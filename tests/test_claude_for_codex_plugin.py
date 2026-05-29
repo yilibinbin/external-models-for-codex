@@ -833,6 +833,13 @@ def test_real_claude_permission_mode_when_enabled():
 
 def test_all_skills_have_frontmatter_and_runtime_call():
     skills = sorted((PLUGIN / "skills").glob("*/SKILL.md"))
+    expected_commands = {
+        "claude-adversarial-review": "adversarial-review",
+        "claude-collaboration-loop": "plan",
+        "claude-multi-review": "multi-review",
+        "claude-plan": "plan",
+        "claude-review": "review",
+    }
     assert {p.parent.name for p in skills} == {
         "claude-adversarial-review",
         "claude-collaboration-loop",
@@ -846,3 +853,4 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         assert frontmatter["name"] == skill.parent.name
         assert frontmatter["description"]
         assert "claude-companion.mjs" in text
+        assert f'claude-companion.mjs" {expected_commands[skill.parent.name]}' in text

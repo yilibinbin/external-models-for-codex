@@ -1,6 +1,6 @@
 ---
 name: claude-multi-review
-description: Opt in to role-based Claude multi-agent review from Codex for high-risk changes that need multiple read-only perspectives.
+description: Opt in to plugin-managed role fan-out Claude review from Codex for high-risk changes that need multiple read-only perspectives.
 ---
 
 # Claude Multi Review
