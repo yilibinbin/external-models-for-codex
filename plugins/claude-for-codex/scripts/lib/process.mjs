@@ -30,16 +30,25 @@ export function validateJobWorkerProcess(pid, jobId) {
   if (!identity) {
     return { ok: false, reason: "process not found" };
   }
-  if (!identity.command.includes("claude-companion.mjs") || !identity.command.includes("__run-job")) {
+  if (!identity.command.includes("claude-companion.mjs")) {
     return { ok: false, reason: "process command is not a Claude for Codex job worker", identity };
   }
-  if (!identity.command.includes(String(jobId))) {
-    return { ok: false, reason: "process command does not match the requested job id", identity };
+  if (identity.command.includes("__run-job")) {
+    if (!identity.command.includes(String(jobId))) {
+      return { ok: false, reason: "process command does not match the requested job id", identity };
+    }
+    if (identity.pgid !== identity.pid) {
+      return { ok: false, reason: "worker is not the process-group leader", identity };
+    }
+    return { ok: true, identity, signalPid: -pid };
   }
-  if (identity.pgid !== identity.pid) {
-    return { ok: false, reason: "worker is not the process-group leader", identity };
+  if (identity.command.includes("run-reserved-job")) {
+    if (!identity.command.includes("--job-id") || !identity.command.includes(String(jobId))) {
+      return { ok: false, reason: "process command does not match the requested reserved job id", identity };
+    }
+    return { ok: true, identity, signalPid: pid };
   }
-  return { ok: true, identity };
+  return { ok: false, reason: "process command is not a Claude for Codex job worker", identity };
 }
 
 export function terminateValidatedJobWorker(pid, jobId) {
@@ -48,7 +57,7 @@ export function terminateValidatedJobWorker(pid, jobId) {
     return validation;
   }
   try {
-    process.kill(-pid, "SIGTERM");
+    process.kill(validation.signalPid, "SIGTERM");
     return { ok: true, identity: validation.identity };
   } catch (error) {
     return {

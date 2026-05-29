@@ -50,15 +50,70 @@ export function reserveJob(cwd, job, workerCommand, env = process.env) {
   }, env);
 }
 
+function isValidReservedWorkerCommand(job, jobId) {
+  if (job.reservationMode !== "host-forwarded") {
+    return false;
+  }
+  if (!Array.isArray(job.workerCommand)) {
+    return false;
+  }
+  const commandIndex = job.workerCommand.indexOf("run-reserved-job");
+  if (commandIndex < 0) {
+    return false;
+  }
+  if (!String(job.workerCommand[commandIndex - 1] ?? "").endsWith("claude-companion.mjs")) {
+    return false;
+  }
+  const jobIdFlagIndex = job.workerCommand.indexOf("--job-id", commandIndex + 1);
+  return jobIdFlagIndex >= 0 && job.workerCommand[jobIdFlagIndex + 1] === jobId;
+}
+
 export function claimReservedJob(cwd, jobId, workerPid = process.pid, env = process.env) {
-  const job = readJob(cwd, jobId, env);
-  if (!job) {
+  const file = jobFile(cwd, jobId, env);
+  if (!fs.existsSync(file)) {
     return { status: "not_found", jobId };
+  }
+  const original = fs.readFileSync(file, "utf8");
+  let job;
+  try {
+    job = JSON.parse(original);
+  } catch (error) {
+    return {
+      status: "not_claimed",
+      jobId,
+      reason: `Reserved job state is corrupt: ${error.message || String(error)}`
+    };
   }
   if (job.status !== "queued") {
     return { status: "not_claimed", jobId, job };
   }
-  const running = markJobRunning(cwd, jobId, workerPid, env);
+  if (!isValidReservedWorkerCommand(job, jobId)) {
+    return {
+      status: "not_claimed",
+      jobId,
+      reason: "Job is not a valid host-forwarded reservation.",
+      job
+    };
+  }
+  const running = {
+    ...job,
+    status: "running",
+    workerPid,
+    pidIdentity: captureProcessIdentity(workerPid),
+    startedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  const tmpFile = `${file}.${process.pid}.claim.tmp`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(running, null, 2)}\n`, "utf8");
+  if (fs.readFileSync(file, "utf8") !== original) {
+    fs.rmSync(tmpFile, { force: true });
+    return {
+      status: "not_claimed",
+      jobId,
+      reason: "Job changed before it could be claimed."
+    };
+  }
+  fs.renameSync(tmpFile, file);
   return { status: "claimed", job: running };
 }
 

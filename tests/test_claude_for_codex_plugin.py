@@ -1461,6 +1461,48 @@ def test_run_reserved_job_executes_existing_job_with_fake_claude(tmp_path):
     assert "CLAUDE RESERVED RESULT" in payload["job"]["stdout"]
 
 
+def test_run_reserved_job_refuses_plain_queued_non_reserved_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    job_file = state_dir / "jobs" / "job-plain.json"
+    job_file.write_text(json.dumps({
+        "id": "job-plain",
+        "status": "queued",
+        "command": "review",
+        "args": ["plain"],
+        "cwd": str(repo),
+        "workerCommand": [NODE, str(runtime), "run-reserved-job", "--job-id", "job-plain"]
+    }))
+
+    worker = subprocess.run(
+        [NODE, str(runtime), "run-reserved-job", "--job-id", "job-plain"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert worker.returncode == 1
+    payload = json.loads(worker.stdout)
+    assert payload["status"] == "not_claimed"
+    assert json.loads(job_file.read_text())["status"] == "queued"
+
+
 def test_internal_job_worker_rejects_unsupported_job_command(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -1658,6 +1700,95 @@ print("SHOULD_NOT_FINISH")
     cancel_payload = json.loads(cancel.stdout)
     assert cancel_payload["status"] == "cancelled"
     assert cancel_payload["job"]["cancelIdentity"]["pid"] == job["workerPid"]
+
+
+def test_cancel_running_host_forwarded_reserved_job_validates_and_terminates_worker(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import os
+import sys
+import time
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+deadline = time.time() + 30
+while time.time() < deadline:
+    if os.getppid() == 1:
+        raise SystemExit(0)
+    time.sleep(0.1)
+print("SHOULD_NOT_FINISH")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "long reserved review"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["job"]["id"]
+
+    worker = subprocess.Popen(
+        [NODE, str(runtime), "run-reserved-job", "--job-id", job_id],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        job = {}
+        for _ in range(50):
+            jobs = subprocess.run(
+                [NODE, str(runtime), "jobs"],
+                cwd=repo,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            payload = json.loads(jobs.stdout)
+            job = next(item for item in payload["jobs"] if item["id"] == job_id)
+            if job["status"] == "running":
+                break
+            time.sleep(0.1)
+        assert job["status"] == "running"
+        assert "run-reserved-job" in job["pidIdentity"]["command"]
+
+        cancel = subprocess.run(
+            [NODE, str(runtime), "cancel", job_id],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert cancel.returncode == 0, cancel.stderr
+        cancel_payload = json.loads(cancel.stdout)
+        assert cancel_payload["status"] == "cancelled"
+        assert cancel_payload["job"]["cancelIdentity"]["pid"] == worker.pid
+        assert "run-reserved-job" in cancel_payload["job"]["cancelIdentity"]["command"]
+        worker.wait(timeout=5)
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
 
 
 def test_session_and_user_prompt_hooks_write_state_and_report_unread_results(tmp_path):
