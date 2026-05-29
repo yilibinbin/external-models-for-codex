@@ -985,19 +985,34 @@ function hookTrustedInCodexConfig(configText) {
   if (!configText) {
     return false;
   }
+  let currentTrustedHookTable = false;
   return configText.split(/\r?\n/).some((line) => {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) {
+    if (!trimmed || trimmed.startsWith("#")) {
+      return false;
+    }
+    const tableMatch = trimmed.match(/^\[(.+)\]$/);
+    if (tableMatch) {
+      currentTrustedHookTable = hookTrustKeyMatches(tableMatch[1]);
+      return false;
+    }
+    if (!trimmed.includes("=")) {
       return false;
     }
     const [rawKey, ...valueParts] = trimmed.split("=");
     const key = rawKey.trim().replace(/^["']|["']$/g, "");
     const value = valueParts.join("=").trim().replace(/^["']|["']$/g, "");
-    return key.includes("claude-for-codex")
-      && key.includes("hooks/hooks.json")
-      && key.includes(":stop:")
-      && value === "trusted";
+    if (currentTrustedHookTable && key === "trusted_hash" && value.startsWith("sha256:")) {
+      return true;
+    }
+    return hookTrustKeyMatches(key) && value === "trusted";
   });
+}
+
+function hookTrustKeyMatches(key) {
+  return key.includes("claude-for-codex")
+    && key.includes("hooks/hooks.json")
+    && key.includes(":stop:");
 }
 
 function hookDiagnostics() {

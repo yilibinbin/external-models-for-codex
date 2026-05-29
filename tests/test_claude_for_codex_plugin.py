@@ -1250,8 +1250,8 @@ def test_setup_reports_hooks_and_mcp_diagnostics(tmp_path):
     codex_dir = home / ".codex"
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text(
-        "[hooks.state]\n"
-        '"claude-for-codex@claude-for-codex-local:hooks/hooks.json:stop:0:0" = "trusted"\n',
+        '[hooks.state."claude-for-codex@claude-for-codex-local:hooks/hooks.json:stop:0:0"]\n'
+        'trusted_hash = "sha256:abc"\n',
         encoding="utf8",
     )
 
@@ -1275,6 +1275,68 @@ def test_setup_reports_hooks_and_mcp_diagnostics(tmp_path):
     assert payload["hooks"]["trustedInCodexConfig"] is True
     assert payload["mcp"]["gitServerExists"] is True
     assert payload["mcp"]["strictConfigSupported"] is True
+
+
+def test_setup_reports_inline_hook_trust_state_for_existing_codex_config(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    home = tmp_path / "home"
+    repo.mkdir()
+    data.mkdir()
+    home.mkdir()
+    codex_dir = home / ".codex"
+    codex_dir.mkdir()
+    (codex_dir / "config.toml").write_text(
+        "[hooks.state]\n"
+        '"claude-for-codex@claude-for-codex-local:hooks/hooks.json:stop:0:0" = "trusted"\n',
+        encoding="utf8",
+    )
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "setup"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode in (0, 1)
+    payload = json.loads(result.stdout)
+    assert payload["hooks"]["codexConfigChecked"] is True
+    assert payload["hooks"]["trustedInCodexConfig"] is True
+
+
+def test_setup_reports_missing_codex_config_without_throwing(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    home = tmp_path / "home"
+    repo.mkdir()
+    data.mkdir()
+    home.mkdir()
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["HOME"] = str(home)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "setup"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode in (0, 1)
+    payload = json.loads(result.stdout)
+    assert payload["hooks"]["codexConfigChecked"] is False
+    assert payload["hooks"]["codexConfigError"] == ""
+    assert payload["hooks"]["trustedInCodexConfig"] is False
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
