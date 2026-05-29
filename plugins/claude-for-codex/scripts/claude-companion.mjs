@@ -87,8 +87,10 @@ function parseArgs(argv) {
     } else if (arg === "--roles") {
       const roles = readOptionValue(tokens, index, arg)
         .split(",")
-        .map((role) => role.trim())
-        .filter(Boolean);
+        .map((role) => role.trim());
+      if (roles.some((role) => !role)) {
+        throw new Error("Missing role in --roles.");
+      }
       parsed.roles = [...(parsed.roles ?? []), ...roles];
       index += 1;
     } else if (arg === "--role") {
@@ -114,10 +116,15 @@ function resolveReviewRoles(args) {
   }
 
   const validRoles = Object.keys(REVIEW_ROLES).sort();
+  const seenRoles = new Set();
   for (const role of args.roles) {
     if (!Object.hasOwn(REVIEW_ROLES, role)) {
       throw new Error(`Unknown review role "${role}". Valid roles: ${validRoles.join(", ")}.`);
     }
+    if (seenRoles.has(role)) {
+      throw new Error(`Duplicate review role "${role}".`);
+    }
+    seenRoles.add(role);
   }
   return args.roles.map((name) => ({
     name,

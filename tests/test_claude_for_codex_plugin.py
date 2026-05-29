@@ -165,6 +165,23 @@ def test_runtime_keeps_claude_tools_read_only():
     assert "Bash" in disallowed.group(1).split(",")
 
 
+def test_default_multi_review_roles_exist_in_registry():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    text = runtime.read_text()
+    registry_match = re.search(r"const REVIEW_ROLES = Object\.freeze\(\{(?P<body>.*?)\n\}\);", text, re.S)
+    defaults_match = re.search(
+        r"const DEFAULT_MULTI_REVIEW_ROLES = Object\.freeze\(\[(?P<body>.*?)\]\);",
+        text,
+        re.S,
+    )
+    assert registry_match
+    assert defaults_match
+    registry_roles = set(re.findall(r"^\s+([a-z-]+):\s*\{", registry_match.group("body"), re.M))
+    default_roles = re.findall(r'"([^"]+)"', defaults_match.group("body"))
+    assert default_roles == ["correctness", "security", "tests", "release", "adversarial"]
+    assert set(default_roles).issubset(registry_roles)
+
+
 def test_runtime_avoids_head_name_only_diff_without_head():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
@@ -450,6 +467,41 @@ def test_repeated_review_role_options_accumulate_in_order(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "<review_roles>correctness, tests</review_roles>" in prompt
+
+
+@pytest.mark.parametrize(
+    "roles",
+    ["correctness,,security", "correctness,", ",correctness"],
+)
+def test_empty_comma_separated_review_role_exits_2_without_calling_claude(tmp_path, roles):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--roles", roles, "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert "Missing role in --roles" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--role", "security", "--role", "security"],
+        ["--roles", "security,security"],
+    ],
+)
+def test_duplicate_review_role_exits_2_without_calling_claude(tmp_path, args):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        [*args, "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert 'Duplicate review role "security".' in result.stderr
+    assert prompt == ""
+    assert argv == []
 
 
 @pytest.mark.parametrize("option", ["--roles", "--role"])
