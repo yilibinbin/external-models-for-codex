@@ -475,11 +475,9 @@ def test_runtime_applies_pathspec_to_git_context_commands():
 def test_runtime_keeps_claude_tools_read_only():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    allowed = re.search(r'"--tools",\s*"([^"]+)"', text)
     disallowed = re.search(r'"--disallowedTools",\s*"([^"]+)"', text)
-    assert allowed
     assert disallowed
-    assert "Bash" not in allowed.group(1).split(",")
+    assert '"Bash"' not in re.search(r"READ_ONLY_CLAUDE_TOOLS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
     assert "Bash" in disallowed.group(1).split(",")
 
 
@@ -556,7 +554,7 @@ print("FAKE_CLAUDE_OK")
     assert "FAKE_CLAUDE_OK" in result.stdout
     argv = json.loads((capture_dir / "argv.json").read_text())
     prompt = (capture_dir / "prompt.txt").read_text()
-    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert {"Read", "Grep", "Glob"}.issubset(set(argv[argv.index("--tools") + 1].split(",")))
     assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,MultiEdit,Bash"
     assert "base requested: main" in prompt
     assert "base effective: unavailable (HEAD missing)" in prompt
@@ -566,6 +564,64 @@ print("FAKE_CLAUDE_OK")
     assert "main...HEAD" not in prompt or "branch diff skipped" in prompt
     assert "sample.txt" in prompt
     assert "changed files from git status fallback" in prompt
+
+
+def test_read_only_review_invokes_claude_with_strict_mcp_config(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    argv_file = tmp_path / "argv.json"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        f"fs.writeFileSync({json.dumps(str(argv_file))}, JSON.stringify(process.argv.slice(2)));\n"
+        "process.stdout.write('OK\\n');\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+    env["CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG"] = "1"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    assert "--mcp-config" in argv
+    assert "--strict-mcp-config" in argv
+    allowed_tools = argv[argv.index("--tools") + 1].split(",")
+    assert "Read" in allowed_tools
+    assert "Grep" in allowed_tools
+    assert "Glob" in allowed_tools
+    assert "mcp__claude-for-codex-git__git_status" in allowed_tools
+    assert "mcp__claude-for-codex-git__git_diff" in allowed_tools
+    disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
+    for tool in ["Bash", "Edit", "Write", "MultiEdit"]:
+        assert tool in disallowed_tools
+    config_path = pathlib.Path(argv[argv.index("--mcp-config") + 1])
+    assert config_path.parent == data / "tmp"
+    config = json.loads(config_path.read_text(encoding="utf8"))
+    server = config["mcpServers"]["claude-for-codex-git"]
+    assert pathlib.Path(server["command"]).name.startswith("node")
+    assert server["args"][-1] == "server"
+    assert "mcp-git.mjs" in " ".join(server["args"])
+    assert server["env"]["PWD"] == str(repo)
 
 
 def test_review_splits_single_quoted_arguments_token(tmp_path):
@@ -943,7 +999,7 @@ def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):
     assert result.returncode == 0, result.stderr
     for prompt, argv in zip(prompts, argvs):
         assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
-        assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+        assert {"Read", "Grep", "Glob"}.issubset(set(argv[argv.index("--tools") + 1].split(",")))
         assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,MultiEdit,Bash"
         assert argv[argv.index("--output-format") + 1] == "text"
         assert argv[-1] == prompt
@@ -2091,6 +2147,8 @@ print("RESCUE_OK")
     write_prompt = (capture_dir / "prompt.txt").read_text()
     assert write_argv[write_argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--disallowedTools" not in write_argv
+    assert "--mcp-config" not in write_argv
+    assert "--strict-mcp-config" not in write_argv
     assert "explicitly requested rescue --write" in write_prompt
     assert "write-mode fingerprint" in write_mode.stderr
 

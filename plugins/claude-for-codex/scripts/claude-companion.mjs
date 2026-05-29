@@ -18,6 +18,7 @@ import {
   resultForJob,
   updateJob
 } from "./lib/jobs.mjs";
+import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import {
   StateReadError,
   canonicalWorkspaceRoot,
@@ -101,6 +102,19 @@ const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
   "tests",
   "release",
   "adversarial"
+]);
+const READ_ONLY_CLAUDE_TOOLS = Object.freeze([
+  "Read",
+  "Grep",
+  "Glob",
+  "mcp__claude-for-codex-git__git_status",
+  "mcp__claude-for-codex-git__git_diff",
+  "mcp__claude-for-codex-git__git_diff_cached",
+  "mcp__claude-for-codex-git__git_log",
+  "mcp__claude-for-codex-git__git_show",
+  "mcp__claude-for-codex-git__git_blame",
+  "mcp__claude-for-codex-git__git_grep",
+  "mcp__claude-for-codex-git__git_ls_files"
 ]);
 
 function run(command, args, options = {}) {
@@ -520,13 +534,18 @@ function claudePrint(prompt, options) {
     "--permission-mode",
     options.write ? "bypassPermissions" : "dontAsk",
   ];
+  let mcpConfig = null;
 
   if (!options.write) {
+    mcpConfig = createGitMcpConfig(process.cwd(), process.env);
     args.push(
       "--tools",
-      "Read,Grep,Glob",
+      READ_ONLY_CLAUDE_TOOLS.join(","),
       "--disallowedTools",
-      "Edit,Write,MultiEdit,Bash"
+      "Edit,Write,MultiEdit,Bash",
+      "--mcp-config",
+      mcpConfig.configPath,
+      "--strict-mcp-config"
     );
   }
 
@@ -543,7 +562,13 @@ function claudePrint(prompt, options) {
   }
 
   args.push(prompt);
-  return runClaude(args, { timeout: options.timeout });
+  try {
+    return runClaude(args, { timeout: options.timeout });
+  } finally {
+    if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
+      mcpConfig.cleanup();
+    }
+  }
 }
 
 function stripBackgroundArgs(rawArgs) {
