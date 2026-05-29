@@ -58,6 +58,11 @@
 - Hardening Task 5 bumped plugin version to `0.1.1`, added `CHANGELOG.md`, and documented remote install, upgrade, verification, and release gate.
 - Hardening Task 5 quality review found README release checklist omitted the real Claude integration gate and used a non-portable absolute validator path; fixed both and changed remote install default to `owner/repo`.
 - Final Claude adversarial review completed; adopted documentation clarification for marketplace id/owner assumptions and recorded default-vs-opt-in Claude integration residual risk.
+- Started post-release robustness testing for Claude prompt hit behavior across text sizes and argument cases.
+- Ran fake-Claude hit matrix for tiny ASCII, Chinese, quoted spaces, Unicode, 8KB, 64KB, and repeated path cases; all markers reached the generated Claude prompt.
+- Ran parse-failure matrix for missing scope, invalid scope, branch without base, empty quoted path, and unmatched quote; all exited 2 with clear stderr and did not invoke Claude.
+- Ran real Claude smoke cases for two short review calls and one Chinese plan call; all returned exit 0 without repeated CLI failure.
+- Added durable pytest coverage for prompt focus hits across the same text-size and argument-case matrix.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -100,6 +105,11 @@
 | Hardening Task 5 README quality fix | Release checklist includes real integration and portable validator commands | pytest/plugin/skill validation passed | PASS |
 | Final hardening validation | pytest, node check/setup, plugin validator, skill validators, real Claude integration | PASS | PASS |
 | Final Claude adversarial review | Remaining release/scope/read-only safety issues | Documentation clarification adopted; no code blockers | PASS |
+| Post-release fake Claude hit matrix | Tiny/Chinese/quoted/Unicode/8KB/64KB/repeated-path markers reach prompt | 7/7 hit | PASS |
+| Post-release parse failure matrix | Bad inputs fail once before Claude invocation | 5/5 exited 2 and fake Claude not called | PASS |
+| Post-release real Claude smoke | Two review calls and one Chinese plan call do not repeatedly fail | 3/3 exit 0 | PASS |
+| Durable hit regression test | pytest focus hit matrix | `7 passed` | PASS |
+| Full test suite after hit matrix | Default pytest | `31 passed, 1 skipped` | PASS |
 
 ### Errors
 | Error | Resolution |

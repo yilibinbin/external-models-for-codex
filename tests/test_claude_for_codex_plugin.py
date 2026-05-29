@@ -296,6 +296,26 @@ def test_review_splits_double_quotes_and_escaped_spaces(tmp_path):
     assert "<focus>focus on escaped space and double quoted risk</focus>" in prompt
 
 
+@pytest.mark.parametrize(
+    ("args", "marker"),
+    [
+        (["--scope working-tree HIT_TINY"], "HIT_TINY"),
+        (["--scope", "working-tree", "请检查 HIT_CHINESE 是否命中"], "HIT_CHINESE"),
+        (['--scope working-tree focus on "HIT QUOTED SPACE" and escaped\\ space'], "HIT QUOTED SPACE"),
+        (["--scope", "working-tree", "unicode HIT_UNICODE 中文 αβγ"], "HIT_UNICODE"),
+        (["--scope", "working-tree", "HIT_MEDIUM " + ("m" * 8192)], "HIT_MEDIUM"),
+        (["--scope", "working-tree", "HIT_LARGE " + ("L" * 65536)], "HIT_LARGE"),
+        (["--scope working-tree --path sample.txt --path other.txt HIT_PATHS"], "HIT_PATHS"),
+    ],
+)
+def test_review_focus_hits_across_text_sizes_and_argument_cases(tmp_path, args, marker):
+    result, prompt, _argv = run_fake_claude_review(tmp_path, args)
+
+    assert result.returncode == 0, result.stderr
+    assert "FAKE_CLAUDE_OK" in result.stdout
+    assert marker in prompt
+
+
 def test_unmatched_quote_exits_2_without_calling_claude(tmp_path):
     result, prompt, argv = run_fake_claude_review(
         tmp_path,
