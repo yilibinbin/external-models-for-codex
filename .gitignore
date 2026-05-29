@@ -1,0 +1,13 @@
+# Local agent workspace notes and generated planning artifacts
+task_plan.md
+findings.md
+progress.md
+docs/superpowers/
+
+# Local caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+
