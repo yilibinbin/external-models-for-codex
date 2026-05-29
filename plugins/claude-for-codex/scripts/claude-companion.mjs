@@ -6,7 +6,18 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
-import { cancelJob, createJob, finishJob, listJobs, markJobRunning, readJob, resultForJob, updateJob } from "./lib/jobs.mjs";
+import {
+  cancelJob,
+  claimReservedJob,
+  createJob,
+  finishJob,
+  listJobs,
+  markJobRunning,
+  readJob,
+  reserveJob,
+  resultForJob,
+  updateJob
+} from "./lib/jobs.mjs";
 import {
   StateReadError,
   canonicalWorkspaceRoot,
@@ -20,7 +31,7 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "__run-job"]);
+const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -539,6 +550,25 @@ function stripBackgroundArgs(rawArgs) {
   return normalizeArgv(rawArgs).filter((arg) => arg !== "--background" && arg !== "--wait");
 }
 
+function parseJobIdArg(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--job-id") {
+      const value = tokens[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("Missing --job-id value.");
+      }
+      return value;
+    }
+  }
+  const positional = tokens.find((token) => token !== "--json" && token !== "--json-output");
+  if (!positional) {
+    throw new Error("Missing --job-id value.");
+  }
+  return positional;
+}
+
 function terminalJobStatus(status) {
   return ["succeeded", "failed", "cancelled", "cancel_failed"].includes(status);
 }
@@ -601,6 +631,43 @@ function maybeStartBackground(command, rawArgs) {
   }
   process.stdout.write(`${JSON.stringify({ status: "started", job }, null, 2)}\n`);
   process.exit(0);
+}
+
+function handleReserveJob(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const command = tokens[0];
+  if (!command) {
+    throw new Error("Missing command to reserve.");
+  }
+  if (!BACKGROUND_CAPABLE_COMMANDS.has(command)) {
+    throw new Error(`Command "${command}" cannot be reserved as a background job.`);
+  }
+  const commandArgs = stripBackgroundArgs(tokens.slice(1));
+  const workerCommand = [
+    process.argv0 || process.execPath,
+    process.argv[1],
+    "run-reserved-job"
+  ];
+  const job = reserveJob(process.cwd(), {
+    command,
+    args: commandArgs,
+    cwd: process.cwd(),
+    focus: commandArgs.join(" ")
+  }, workerCommand);
+  workerCommand.push("--job-id", job.id);
+  const updated = updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
+
+  return {
+    status: "reserved",
+    job: {
+      id: updated.id,
+      status: updated.status,
+      command: updated.command,
+      args: updated.args ?? []
+    },
+    workerCommand,
+    forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once, must not inspect or reinterpret the repository, and must return only the command result."
+  };
 }
 
 function hasReviewableGitChanges(cwd = process.cwd()) {
@@ -1289,6 +1356,69 @@ function runJobWorker(rawArgs) {
   process.exit(result.status ?? 1);
 }
 
+function runStoredJobCommand(job) {
+  if (!BACKGROUND_CAPABLE_COMMANDS.has(job.command)) {
+    return {
+      status: 2,
+      stdout: "",
+      stderr: `Unsupported reserved job command "${job.command}".`,
+      error: ""
+    };
+  }
+  const foregroundArgs = stripBackgroundArgs(job.args ?? []);
+  const result = spawnSync(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
+    cwd: job.cwd || process.cwd(),
+    env: {
+      ...process.env,
+      CLAUDE_FOR_CODEX_JOB_WORKER: "1"
+    },
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: 30 * 60 * 1000
+  });
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error ? String(result.error.message ?? result.error) : ""
+  };
+}
+
+function runReservedJob(rawArgs) {
+  let jobId;
+  try {
+    jobId = parseJobIdArg(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+
+  let claim;
+  try {
+    claim = claimReservedJob(process.cwd(), jobId, process.pid);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  if (claim.status !== "claimed") {
+    process.stdout.write(`${JSON.stringify({
+      status: claim.status,
+      jobId,
+      message: "Reserved job was not queued and was not executed."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
+
+  const result = runStoredJobCommand(claim.job);
+  const finished = finishJob(process.cwd(), claim.job.id, result);
+  process.stdout.write(`${JSON.stringify({
+    status: finished.status,
+    jobId: finished.id,
+    exitStatus: finished.exitStatus
+  }, null, 2)}\n`);
+  process.exit(result.status ?? 1);
+}
+
 const [command, ...rawArgs] = process.argv.slice(2);
 
 if (!VALID_COMMANDS.has(command)) {
@@ -1332,5 +1462,16 @@ switch (command) {
     break;
   case "__run-job":
     runJobWorker(rawArgs);
+    break;
+  case "reserve-job":
+    try {
+      process.stdout.write(`${JSON.stringify(handleReserveJob(rawArgs), null, 2)}\n`);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(2);
+    }
+    break;
+  case "run-reserved-job":
+    runReservedJob(rawArgs);
     break;
 }

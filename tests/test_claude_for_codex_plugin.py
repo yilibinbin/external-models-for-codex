@@ -448,7 +448,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue"]:
+    for command in ["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "reserve-job", "run-reserved-job"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -1378,6 +1378,87 @@ raise SystemExit(17)
     assert payload["job"]["command"] == "multi-review"
     assert payload["job"]["exitStatus"] == 1
     assert "Role failed with exit status 17." in payload["job"]["stdout"]
+
+
+def test_reserve_job_prints_forwarding_worker_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "--base", "main", "--path", "file.txt"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "reserved"
+    assert payload["job"]["status"] == "queued"
+    assert payload["job"]["command"] == "review"
+    assert payload["workerCommand"][0] == NODE
+    assert str(runtime) in payload["workerCommand"]
+    assert "run-reserved-job" in payload["workerCommand"]
+    assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+
+
+def test_run_reserved_job_executes_existing_job_with_fake_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text("#!/bin/sh\nprintf 'CLAUDE RESERVED RESULT\\n'\n", encoding="utf8")
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "focused"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["job"]["id"]
+
+    worker = subprocess.run(
+        [NODE, str(runtime), "run-reserved-job", "--job-id", job_id],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert worker.returncode == 0, worker.stderr
+
+    result = subprocess.run(
+        [NODE, str(runtime), "result", job_id, "--json"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert "CLAUDE RESERVED RESULT" in payload["job"]["stdout"]
 
 
 def test_internal_job_worker_rejects_unsupported_job_command(tmp_path):

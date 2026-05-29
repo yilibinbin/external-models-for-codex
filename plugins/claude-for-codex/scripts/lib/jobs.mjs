@@ -41,6 +41,27 @@ export function createJob(cwd, job, env = process.env) {
   return writeJob(cwd, payload, env);
 }
 
+export function reserveJob(cwd, job, workerCommand, env = process.env) {
+  return createJob(cwd, {
+    ...job,
+    reservationMode: "host-forwarded",
+    reservedBy: "codex-host",
+    workerCommand
+  }, env);
+}
+
+export function claimReservedJob(cwd, jobId, workerPid = process.pid, env = process.env) {
+  const job = readJob(cwd, jobId, env);
+  if (!job) {
+    return { status: "not_found", jobId };
+  }
+  if (job.status !== "queued") {
+    return { status: "not_claimed", jobId, job };
+  }
+  const running = markJobRunning(cwd, jobId, workerPid, env);
+  return { status: "claimed", job: running };
+}
+
 export function updateJob(cwd, jobId, updates, env = process.env) {
   const job = readJob(cwd, jobId, env);
   if (!job) {
