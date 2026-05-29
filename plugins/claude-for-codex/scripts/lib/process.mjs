@@ -25,6 +25,17 @@ export function captureProcessIdentity(pid) {
   return ps(pid);
 }
 
+function commandTokens(command) {
+  return String(command ?? "")
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+function tokenAfter(tokens, token) {
+  const index = tokens.indexOf(token);
+  return index >= 0 ? tokens[index + 1] : undefined;
+}
+
 export function validateJobWorkerProcess(pid, jobId) {
   const identity = captureProcessIdentity(pid);
   if (!identity) {
@@ -33,8 +44,9 @@ export function validateJobWorkerProcess(pid, jobId) {
   if (!identity.command.includes("claude-companion.mjs")) {
     return { ok: false, reason: "process command is not a Claude for Codex job worker", identity };
   }
-  if (identity.command.includes("__run-job")) {
-    if (!identity.command.includes(String(jobId))) {
+  const tokens = commandTokens(identity.command);
+  if (tokens.includes("__run-job")) {
+    if (tokenAfter(tokens, "__run-job") !== String(jobId)) {
       return { ok: false, reason: "process command does not match the requested job id", identity };
     }
     if (identity.pgid !== identity.pid) {
@@ -42,8 +54,8 @@ export function validateJobWorkerProcess(pid, jobId) {
     }
     return { ok: true, identity, signalPid: -pid };
   }
-  if (identity.command.includes("run-reserved-job")) {
-    if (!identity.command.includes("--job-id") || !identity.command.includes(String(jobId))) {
+  if (tokens.includes("run-reserved-job")) {
+    if (tokenAfter(tokens, "--job-id") !== String(jobId)) {
       return { ok: false, reason: "process command does not match the requested reserved job id", identity };
     }
     return { ok: true, identity, signalPid: pid };

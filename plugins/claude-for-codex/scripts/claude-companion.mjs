@@ -1358,33 +1358,89 @@ function runJobWorker(rawArgs) {
 
 function runStoredJobCommand(job) {
   if (!BACKGROUND_CAPABLE_COMMANDS.has(job.command)) {
-    return {
+    return Promise.resolve({
       status: 2,
       stdout: "",
       stderr: `Unsupported reserved job command "${job.command}".`,
       error: ""
-    };
+    });
   }
   const foregroundArgs = stripBackgroundArgs(job.args ?? []);
-  const result = spawnSync(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
-    cwd: job.cwd || process.cwd(),
-    env: {
-      ...process.env,
-      CLAUDE_FOR_CODEX_JOB_WORKER: "1"
-    },
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 30 * 60 * 1000
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
+      cwd: job.cwd || process.cwd(),
+      env: {
+        ...process.env,
+        CLAUDE_FOR_CODEX_JOB_WORKER: "1"
+      },
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const started = Date.now();
+    const timeout = setTimeout(() => {
+      stopChildGroup("SIGTERM");
+    }, 30 * 60 * 1000);
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let settled = false;
+    let stopRequested = false;
+
+    function stopChildGroup(signal) {
+      stopRequested = true;
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          // Child may already have exited.
+        }
+      }
+    }
+
+    function handleWrapperSignal(signal) {
+      stopChildGroup(signal);
+    }
+
+    process.once("SIGTERM", handleWrapperSignal);
+    process.once("SIGINT", handleWrapperSignal);
+
+    child.stdout?.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+    child.once("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      process.removeListener("SIGTERM", handleWrapperSignal);
+      process.removeListener("SIGINT", handleWrapperSignal);
+      resolve({
+        status: 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        error: error.message || String(error)
+      });
+    });
+    child.once("close", (status, signal) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timeout);
+      process.removeListener("SIGTERM", handleWrapperSignal);
+      process.removeListener("SIGINT", handleWrapperSignal);
+      resolve({
+        status: status ?? (signal ? 1 : 0),
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        error: stopRequested || Date.now() - started >= 30 * 60 * 1000 ? `Child terminated by ${signal ?? "timeout"}.` : ""
+      });
+    });
   });
-  return {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    error: result.error ? String(result.error.message ?? result.error) : ""
-  };
 }
 
-function runReservedJob(rawArgs) {
+async function runReservedJob(rawArgs) {
   let jobId;
   try {
     jobId = parseJobIdArg(rawArgs);
@@ -1409,7 +1465,7 @@ function runReservedJob(rawArgs) {
     process.exit(1);
   }
 
-  const result = runStoredJobCommand(claim.job);
+  const result = await runStoredJobCommand(claim.job);
   const finished = finishJob(process.cwd(), claim.job.id, result);
   process.stdout.write(`${JSON.stringify({
     status: finished.status,
@@ -1472,6 +1528,6 @@ switch (command) {
     }
     break;
   case "run-reserved-job":
-    runReservedJob(rawArgs);
+    await runReservedJob(rawArgs);
     break;
 }
