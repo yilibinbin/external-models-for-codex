@@ -29,7 +29,7 @@ codex plugin add claude-for-codex@claude-for-codex-local
 ## Requirements
 
 - Codex CLI with plugin support
-- Claude Code CLI available as `claude`
+- Claude Code CLI available as `claude`, configured with `CLAUDE_CODE_PATH`, or installed at `~/.local/bin/claude`
 - Node.js 18 or newer
 - A Git repository for review context collection
 
@@ -38,6 +38,14 @@ Check runtime status:
 ```bash
 node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 ```
+
+Claude CLI resolution order:
+
+1. `CLAUDE_CODE_PATH` when it points to an executable file.
+2. `claude` from the current `PATH`.
+3. `~/.local/bin/claude`, which covers the default Claude install path that Codex Desktop may omit from `PATH`.
+
+If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set `CLAUDE_CODE_PATH` to the absolute executable path.
 
 ## Capabilities
 

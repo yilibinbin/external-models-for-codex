@@ -7,6 +7,7 @@
 - Add per-skill OpenAI agent metadata for clearer Codex skill presentation.
 - Document publishing metadata, safety model, and hook trust guidance in the README.
 - Document that Claude for Codex is a skills-and-hook plugin, not a `tool_search` callable tool.
+- Add Claude CLI path fallback via `CLAUDE_CODE_PATH` and `~/.local/bin/claude` for Codex Desktop environments with reduced `PATH`.
 - Strengthen `adversarial-review` with intent-first verdict output, Skeptic/Architect/Minimalist lenses, and Lead Judgment.
 - Add `skeptic`, `architect`, and `minimalist` as opt-in `multi-review` roles.
 

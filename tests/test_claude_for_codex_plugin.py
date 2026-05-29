@@ -2,6 +2,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 
 import pytest
@@ -9,6 +10,7 @@ import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "claude-for-codex"
+NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/Codex.app/Contents/Resources/node"
 
 
 def run_fake_claude_review(tmp_path, args, commit_head=False):
@@ -1107,6 +1109,86 @@ print("[]")
     assert payload["reviewGate"]["mode"] == "multi-role"
     argvs = json.loads((capture_dir / "argv.json").read_text())
     assert ["agents", "--json", "--cwd", str(repo)] in argvs
+
+
+def test_setup_uses_claude_code_path_when_path_omits_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    fake_bin.mkdir()
+
+    fake_claude = fake_bin / "claude-custom"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude custom")
+    raise SystemExit(0)
+
+print("unexpected", file=sys.stderr)
+raise SystemExit(2)
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    result = subprocess.run(
+        [NODE, str(runtime), "setup"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claudeAvailable"] is True
+    assert payload["claudeCommand"] == str(fake_claude)
+
+
+def test_setup_falls_back_to_home_local_bin_claude_when_path_omits_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    home = tmp_path / "home"
+    local_bin = home / ".local" / "bin"
+    repo.mkdir()
+    local_bin.mkdir(parents=True)
+
+    fake_claude = local_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude home fallback")
+    raise SystemExit(0)
+
+print("unexpected", file=sys.stderr)
+raise SystemExit(2)
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env.pop("CLAUDE_CODE_PATH", None)
+    env["HOME"] = str(home)
+    env["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+    result = subprocess.run(
+        [NODE, str(runtime), "setup"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claudeAvailable"] is True
+    assert payload["claudeCommand"] == str(fake_claude)
 
 
 def test_setup_can_enable_and_disable_review_gate(tmp_path):

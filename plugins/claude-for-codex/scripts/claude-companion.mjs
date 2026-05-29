@@ -12,6 +12,7 @@ const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
 const STATE_VERSION = 1;
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+const CLAUDE_CODE_PATH_ENV = "CLAUDE_CODE_PATH";
 const REVIEW_GATE_ENV = "CLAUDE_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
@@ -102,8 +103,55 @@ function git(args) {
   return run("git", args);
 }
 
+function isExecutable(filePath) {
+  try {
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findOnPath(commandName) {
+  const searchPath = process.env.PATH || "";
+  for (const entry of searchPath.split(path.delimiter)) {
+    if (!entry) {
+      continue;
+    }
+    const candidate = path.join(entry, commandName);
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
+  }
+  return "";
+}
+
+function claudeCommand() {
+  const configuredPath = process.env[CLAUDE_CODE_PATH_ENV];
+  if (configuredPath && isExecutable(configuredPath)) {
+    return configuredPath;
+  }
+  const pathCommand = findOnPath("claude");
+  if (pathCommand) {
+    return pathCommand;
+  }
+  const homeFallback = path.join(os.homedir(), ".local", "bin", "claude");
+  if (isExecutable(homeFallback)) {
+    return homeFallback;
+  }
+  return "claude";
+}
+
+function runClaude(args, options = {}) {
+  return run(claudeCommand(), args, options);
+}
+
 function hasBinary(name) {
   return run(name, ["--version"]).status === 0;
+}
+
+function hasClaude() {
+  return runClaude(["--version"]).status === 0;
 }
 
 function canonicalWorkspaceRoot(cwd = process.cwd()) {
@@ -543,7 +591,7 @@ function claudePrint(prompt, options) {
   }
 
   args.push(prompt);
-  return run("claude", args, { timeout: options.timeout });
+  return runClaude(args, { timeout: options.timeout });
 }
 
 function hasReviewableGitChanges(cwd = process.cwd()) {
@@ -779,7 +827,8 @@ function buildSetupReport(actionsTaken = []) {
   const config = getConfig(cwd);
   return {
     node: process.version,
-    claudeAvailable: hasBinary("claude"),
+    claudeAvailable: hasClaude(),
+    claudeCommand: claudeCommand(),
     gitAvailable: hasBinary("git"),
     cwd,
     reviewGate: {
@@ -822,7 +871,7 @@ function printSetup(rawArgs) {
 }
 
 function printStatus() {
-  const result = run("claude", ["agents", "--json", "--cwd", process.cwd()]);
+  const result = runClaude(["agents", "--json", "--cwd", process.cwd()]);
   if (result.status !== 0) {
     process.stderr.write(result.stderr || result.error || "claude agents --json failed\n");
     process.exit(result.status);

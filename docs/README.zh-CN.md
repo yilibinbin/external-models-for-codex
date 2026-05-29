@@ -29,7 +29,7 @@ codex plugin add claude-for-codex@claude-for-codex-local
 ## 依赖
 
 - 支持插件的 Codex CLI
-- 本地可执行的 Claude Code CLI：`claude`
+- 本地可执行的 Claude Code CLI：`claude`、`CLAUDE_CODE_PATH` 指向的可执行文件，或 `~/.local/bin/claude`
 - Node.js 18 或更新版本
 - 用于收集审阅上下文的 Git 仓库
 
@@ -38,6 +38,14 @@ codex plugin add claude-for-codex@claude-for-codex-local
 ```bash
 node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 ```
+
+Claude CLI 查找顺序：
+
+1. `CLAUDE_CODE_PATH` 指向的可执行文件。
+2. 当前 `PATH` 中的 `claude`。
+3. `~/.local/bin/claude`，用于覆盖 Codex Desktop `PATH` 未包含 `~/.local/bin` 的情况。
+
+如果 `setup` 显示 `claudeAvailable: false`，但本机已安装 Claude，请将 `CLAUDE_CODE_PATH` 设置为 Claude 可执行文件的绝对路径。
 
 ## 能力
 
