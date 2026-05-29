@@ -27,6 +27,13 @@ const CLI_ALIASES = new Map([
   ["ls-files", "git_ls_files"]
 ]);
 
+class ValidationError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ValidationError";
+  }
+}
+
 export function isSafeGitPath(value) {
   if (typeof value !== "string" || value.length === 0) return false;
   if (value.startsWith("-") || value.includes("\n") || value.includes("\r")) return false;
@@ -41,16 +48,16 @@ export function isSafeGitRef(value) {
 }
 
 function checkedPaths(paths = []) {
-  if (!Array.isArray(paths)) throw new Error("paths must be an array");
+  if (!Array.isArray(paths)) throw new ValidationError("paths must be an array");
   for (const item of paths) {
-    if (!isSafeGitPath(item)) throw new Error(`Unsafe git path: ${item}`);
+    if (!isSafeGitPath(item)) throw new ValidationError(`Unsafe git path: ${item}`);
   }
   return paths;
 }
 
 function checkedRef(ref) {
   if (ref === undefined || ref === "") return "";
-  if (!isSafeGitRef(ref)) throw new Error(`Unsafe git ref: ${ref}`);
+  if (!isSafeGitRef(ref)) throw new ValidationError(`Unsafe git ref: ${ref}`);
   return ref;
 }
 
@@ -58,14 +65,24 @@ function checkedLimit(limit) {
   if (limit === undefined) return "20";
   const numeric = Number(limit);
   if (!Number.isInteger(numeric) || numeric < 1 || numeric > 100) {
-    throw new Error("limit must be an integer from 1 to 100");
+    throw new ValidationError("limit must be an integer from 1 to 100");
   }
   return String(numeric);
 }
 
+function checkedPattern(pattern) {
+  if (typeof pattern !== "string" || pattern.length === 0 || pattern.includes("\n") || pattern.includes("\r")) {
+    throw new ValidationError("pattern must be a non-empty single-line string");
+  }
+  if (pattern.startsWith("-")) {
+    throw new ValidationError("pattern must not start with '-'");
+  }
+  return pattern;
+}
+
 export function runGitTool(name, input = {}, cwd = process.cwd()) {
   const tool = TOOLS[name];
-  if (!tool) throw new Error(`Unknown git MCP tool: ${name}`);
+  if (!tool) throw new ValidationError(`Unknown git MCP tool: ${name}`);
   const args = [...tool.args];
 
   if (tool.acceptsLimit) args.push(checkedLimit(input.limit));
@@ -74,15 +91,12 @@ export function runGitTool(name, input = {}, cwd = process.cwd()) {
     if (ref) args.push(ref);
   }
   if (tool.acceptsPattern) {
-    if (typeof input.pattern !== "string" || input.pattern.length === 0 || input.pattern.includes("\n") || input.pattern.includes("\r")) {
-      throw new Error("pattern must be a non-empty single-line string");
-    }
-    args.push(input.pattern);
+    args.push(checkedPattern(input.pattern));
   }
 
   const paths = checkedPaths(input.paths || []);
-  if (paths.length && !tool.acceptsPaths) throw new Error(`${name} does not accept paths`);
-  if (tool.requiresOnePath && paths.length !== 1) throw new Error(`${name} requires exactly one path`);
+  if (paths.length && !tool.acceptsPaths) throw new ValidationError(`${name} does not accept paths`);
+  if (tool.requiresOnePath && paths.length !== 1) throw new ValidationError(`${name} requires exactly one path`);
   if (paths.length) args.push("--", ...paths);
 
   const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: MAX_BUFFER });
@@ -128,12 +142,31 @@ function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
 }
 
+function requestId(request) {
+  if (request && typeof request === "object" && Object.hasOwn(request, "id")) return request.id;
+  return null;
+}
+
+function isJsonRpcRequest(request) {
+  return request !== null && typeof request === "object" && !Array.isArray(request) && typeof request.method === "string";
+}
+
 async function runServer() {
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   for await (const line of rl) {
     if (!line.trim()) continue;
-    const request = JSON.parse(line);
+    let request;
     try {
+      try {
+        request = JSON.parse(line);
+      } catch {
+        send({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+        continue;
+      }
+      if (!isJsonRpcRequest(request)) {
+        send({ jsonrpc: "2.0", id: requestId(request), error: { code: -32600, message: "Invalid Request" } });
+        continue;
+      }
       if (request.method === "initialize") {
         send({
           jsonrpc: "2.0",
@@ -159,7 +192,8 @@ async function runServer() {
         send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: `Unknown method ${request.method}` } });
       }
     } catch (error) {
-      send({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: error.message || String(error) } });
+      const code = error instanceof ValidationError ? -32602 : -32000;
+      send({ jsonrpc: "2.0", id: requestId(request), error: { code, message: error.message || String(error) } });
     }
   }
 }

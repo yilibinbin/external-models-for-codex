@@ -2187,6 +2187,66 @@ def test_mcp_git_rejects_unsafe_paths_and_refs(tmp_path):
     assert payload["safeRef"]["--help"] is False
 
 
+def test_mcp_git_server_recovers_after_malformed_and_invalid_requests(tmp_path):
+    helper = PLUGIN / "scripts" / "lib" / "mcp-git.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    requests = [
+        "{not json",
+        "null",
+        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+    ]
+
+    result = subprocess.run(
+        [NODE, str(helper), "server"],
+        cwd=repo,
+        input="\n".join(requests) + "\n",
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    responses = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [response.get("id") for response in responses] == [None, None, 1, 2]
+    assert responses[0]["error"]["code"] == -32700
+    assert responses[1]["error"]["code"] == -32600
+    assert responses[2]["result"]["serverInfo"]["name"] == "claude-for-codex-git"
+    assert any(tool["name"] == "git_grep" for tool in responses[3]["result"]["tools"])
+
+
+def test_mcp_git_server_rejects_option_like_grep_pattern(tmp_path):
+    helper = PLUGIN / "scripts" / "lib" / "mcp-git.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    request = {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": {
+            "name": "git_grep",
+            "arguments": {"pattern": "--cached"},
+        },
+    }
+
+    result = subprocess.run(
+        [NODE, str(helper), "server"],
+        cwd=repo,
+        input=json.dumps(request) + "\n",
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    response = json.loads(result.stdout)
+    assert response["id"] == 7
+    assert response["error"]["code"] == -32602
+    assert "pattern must not start with '-'" in response["error"]["message"]
+    assert "fatal" not in response["error"]["message"].lower()
+
+
 def test_setup_uses_claude_code_path_when_path_omits_claude(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
