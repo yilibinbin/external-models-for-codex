@@ -94,7 +94,7 @@ print("FAKE_CLAUDE_OK")
     return result, prompt, argv
 
 
-def run_fake_claude_multi_review(tmp_path, args, commit_head=False):
+def run_fake_claude_multi_review(tmp_path, args, commit_head=False, fail_roles=None):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -156,8 +156,15 @@ import sys
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 call_index = len(list(capture.glob("argv-*.json")))
+prompt = sys.argv[-1]
 (capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
-(capture / f"prompt-{call_index}.txt").write_text(sys.argv[-1])
+(capture / f"prompt-{call_index}.txt").write_text(prompt)
+fail_roles = [role for role in os.environ.get("FAIL_ROLES", "").split(",") if role]
+for role in fail_roles:
+    if f"<role_name>{role}</role_name>" in prompt:
+        print(f"FAKE_CLAUDE_FAIL role {role} call {call_index}")
+        print(f"diagnostic for failed role {role}", file=sys.stderr)
+        raise SystemExit(17)
 print(f"FAKE_CLAUDE_OK call {call_index}")
 """
     )
@@ -165,6 +172,8 @@ print(f"FAKE_CLAUDE_OK call {call_index}")
 
     env = os.environ.copy()
     env["CAPTURE_DIR"] = str(capture_dir)
+    if fail_roles:
+        env["FAIL_ROLES"] = ",".join(fail_roles)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     result = subprocess.run(
         ["node", str(runtime), "multi-review", *args],
@@ -576,6 +585,31 @@ def test_multi_review_default_roles_run_once_each(tmp_path):
     assert "roles requested: correctness, security, tests, release, adversarial" in result.stdout
     assert "roles succeeded: correctness, security, tests, release, adversarial" in result.stdout
     assert "roles failed: (none)" in result.stdout
+
+
+def test_multi_review_failed_role_preserves_partial_results_and_continues(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security,tests", "--scope", "working-tree"],
+        fail_roles=["security"],
+    )
+
+    assert result.returncode == 1
+    assert [re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1) for prompt in prompts] == [
+        "correctness",
+        "security",
+        "tests",
+    ]
+    assert re.findall(r"^## Role: (.+)$", result.stdout, re.M) == ["correctness", "security", "tests"]
+    assert "FAKE_CLAUDE_OK call 0" in result.stdout
+    assert "FAKE_CLAUDE_FAIL role security call 1" in result.stdout
+    assert "Role failed with exit status 17." in result.stdout
+    assert "stderr: diagnostic for failed role security" in result.stdout
+    assert "FAKE_CLAUDE_OK call 2" in result.stdout
+    assert "roles requested: correctness, security, tests" in result.stdout
+    assert "roles succeeded: correctness, tests" in result.stdout
+    assert "roles failed: security" in result.stdout
+    assert "exit policy: exits non-zero if any role fails; completed role output remains visible." in result.stdout
 
 
 def test_multi_review_roles_subset_and_headers_keep_order(tmp_path):
