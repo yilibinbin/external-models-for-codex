@@ -44,6 +44,12 @@
 - Ran installed `claude-for-codex` adversarial review against the plugin.
 - Verified Claude review corrections locally: `dontAsk` is a valid permission mode and real Claude CLI accepted the read-only invocation.
 - Wrote hardening implementation plan to `docs/superpowers/plans/2026-05-29-claude-for-codex-hardening.md`.
+- Hardening Task 1 implemented real `--scope` behavior and option value validation.
+- Task 1 reviews found and fixed missing `--scope` value, `branch` scope without `--base`, and repeated `--path` overwrite behavior.
+- Hardening Task 2 spec review: APPROVED; no-HEAD `--base` prompt now reports requested/effective/ignored state.
+- Hardening Task 2 quality review found one medium follow-up: with-HEAD invalid `--base` was still reported as effective.
+- Fixed invalid-base reporting by validating the base ref before branch diff collection; invalid bases are now marked unavailable and branch diff is skipped without fatal git output.
+- Hardening Task 3 implemented quoted argument edge coverage: double quotes, escaped spaces, and unmatched quote parse failure.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -73,6 +79,10 @@
 | Final implementation review | No blocking/high issues | APPROVED after final fixes | PASS |
 | Claude hardening review | Identify remaining bugs and gaps | Scope/no-HEAD/status/release/test gaps found | ACTIONABLE |
 | Real Claude `dontAsk` smoke | Confirm permission mode value | `CLAUDE_DONTASK_OK` | PASS |
+| Hardening Task 1 | Scope/path behavior tests | `19 passed` in task review | PASS |
+| Hardening Task 2 follow-up | Invalid base ref not reported effective | Targeted pytest passed | PASS |
+| Hardening Task 3 | Quoted argument parser edge tests | Targeted pytest passed | PASS |
+| Hardening Task 3 full file | Runtime/plugin pytest file | `22 passed` | PASS |
 
 ### Errors
 | Error | Resolution |
@@ -88,3 +98,5 @@
 | README marketplace command used JSON file path | Updated to `codex plugin marketplace add .`, matching current Codex CLI behavior. |
 | Skill snippets pass `"$ARGUMENTS"` as a single token | Added runtime normalization and behavioral test for quoted argument splitting. |
 | Test suite file name was not discovered by default pytest | Renamed to `tests/test_claude_for_codex_plugin.py`; default pytest now passes. |
+| With-HEAD invalid `--base` was reported as effective | Added base ref validation, unavailable-base prompt metadata, and fake-Claude regression test. |
+| Unterminated quoted argument was silently accepted | Splitter now exits with parse error before invoking Claude. |

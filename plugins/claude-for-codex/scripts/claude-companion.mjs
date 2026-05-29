@@ -34,6 +34,10 @@ function hasHead() {
   return git(["rev-parse", "--verify", "HEAD"]).status === 0;
 }
 
+function hasBaseRef(base) {
+  return git(["rev-parse", "--verify", `${base}^{commit}`]).status === 0;
+}
+
 function parseArgs(argv) {
   const tokens = normalizeArgv(argv);
   const parsed = { _: [], paths: [] };
@@ -119,6 +123,9 @@ function splitArgumentString(value) {
   if (escaping) {
     current += "\\";
   }
+  if (quote) {
+    throw new Error("Unmatched quote in arguments.");
+  }
   if (current) {
     tokens.push(current);
   }
@@ -167,6 +174,21 @@ function collectGitContext(options) {
   const pathLabel = paths.join(" ");
   const pathArgs = paths.length ? ["--", ...paths] : [];
   const headExists = hasHead();
+  const baseExists = Boolean(base) && headExists && hasBaseRef(base);
+  const baseEffective = !base
+    ? ""
+    : !headExists
+      ? "unavailable (HEAD missing)"
+      : baseExists
+        ? base
+        : "unavailable (base ref missing)";
+  const baseIssue = !base
+    ? ""
+    : !headExists
+      ? "base ignored because HEAD is unavailable"
+      : !baseExists
+        ? "base ignored because requested base ref is unavailable"
+        : "";
   const includeWorkingTree = scope === "auto" || scope === "working-tree";
   const includeBaseBranch = (scope === "auto" || scope === "branch") && Boolean(base);
   const includeHeadNameOnly = scope === "auto" && !base;
@@ -177,16 +199,16 @@ function collectGitContext(options) {
   const unstagedStat = includeWorkingTree ? git(["diff", "--stat", ...pathArgs]) : null;
   const unstagedDiff = includeWorkingTree ? git(["diff", ...pathArgs]) : null;
   const branchStat = includeBaseBranch
-    ? headExists
+    ? baseExists
       ? git(["diff", "--stat", `${base}...HEAD`, ...pathArgs])
-      : safeResult("(HEAD unavailable; branch diff skipped)")
+      : safeResult(`(${baseIssue}; branch diff skipped)`)
     : null;
   const branchNameOnly = includeBaseBranch
-    ? headExists
+    ? baseExists
       ? git(["diff", "--name-only", `${base}...HEAD`, ...pathArgs])
       : includeWorkingTree && status
         ? changedFilesFromStatus(status)
-        : safeResult("(HEAD unavailable; branch name-only skipped)")
+        : safeResult(`(${baseIssue}; branch name-only skipped)`)
     : includeHeadNameOnly && headExists
       ? git(["diff", "--name-only", "HEAD", ...pathArgs])
       : includeHeadNameOnly && status
@@ -198,8 +220,8 @@ function collectGitContext(options) {
     `cwd: ${process.cwd()}`,
     `scope: ${scope}`,
     `base requested: ${base ?? ""}`,
-    `base effective: ${base ? headExists ? base : "unavailable (HEAD missing)" : ""}`,
-    base && !headExists ? "base ignored because HEAD is unavailable" : "",
+    `base effective: ${baseEffective}`,
+    baseIssue,
     `paths: ${pathLabel}`,
     "",
     status
@@ -224,7 +246,7 @@ function collectGitContext(options) {
     "",
     branchStat
       ? formatCommandResult(
-          headExists
+          baseExists
             ? `git diff --stat ${base}...HEAD${paths.length ? ` -- ${pathLabel}` : ""}`
             : "branch diff skipped",
           branchStat
@@ -235,7 +257,7 @@ function collectGitContext(options) {
     "",
     branchNameOnly
       ? base
-      ? headExists
+      ? baseExists
         ? formatCommandResult(`git diff --name-only ${base}...HEAD${paths.length ? ` -- ${pathLabel}` : ""}`, branchNameOnly)
         : formatCommandResult("changed files from git status fallback", branchNameOnly)
       : includeHeadNameOnly && headExists

@@ -285,6 +285,44 @@ print("FAKE_CLAUDE_OK")
     assert "<focus>focus on quoted risk</focus>" in prompt
 
 
+def test_review_splits_double_quotes_and_escaped_spaces(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ['--scope working-tree --path "sample.txt" focus on escaped\\ space and "double quoted risk"'],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "paths: sample.txt" in prompt
+    assert "<focus>focus on escaped space and double quoted risk</focus>" in prompt
+
+
+def test_unmatched_quote_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--path sample.txt focus on 'unterminated"],
+    )
+
+    assert result.returncode == 2
+    assert "Unmatched quote in arguments." in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_invalid_base_ref_is_not_reported_effective(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--base", "does-not-exist"],
+        commit_head=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "base requested: does-not-exist" in prompt
+    assert "base effective: unavailable (base ref missing)" in prompt
+    assert "base ignored because requested base ref is unavailable" in prompt
+    assert "base effective: does-not-exist" not in prompt
+    assert "fatal: ambiguous argument" not in prompt
+
+
 def test_scope_working_tree_omits_branch_diff_from_prompt(tmp_path):
     result, prompt, _argv = run_fake_claude_review(
         tmp_path,

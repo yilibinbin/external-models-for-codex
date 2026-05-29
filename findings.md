@@ -45,6 +45,8 @@
 - Fix needed: real Claude CLI behavior should have an opt-in integration test so future flag changes are caught.
 - Fix needed: release/upgrade process needs `CHANGELOG.md`, version bump, and documented validation steps.
 - Non-breaking decision: keep marketplace id `claude-for-codex-local` for compatibility, but document it as the stable id even for remote GitHub installs.
+- Additional quality finding: with an existing HEAD but invalid `--base`, the prompt previously reported the requested base as effective. Fixed by validating the base ref and marking it unavailable before branch diff collection.
+- Additional parser finding: unmatched quoted argument strings were silently accepted. Fixed by failing argument normalization before Claude invocation.
 
 ## Resources
 - https://github.com/openai/codex-plugin-cc
