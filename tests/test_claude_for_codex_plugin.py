@@ -428,6 +428,74 @@ def test_missing_option_value_exits_2_without_calling_claude(tmp_path, option):
     assert argv == []
 
 
+def test_status_invokes_claude_agents_json_with_cwd(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+print("[]")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run(
+        ["node", str(runtime), "status"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "[]"
+    argv = json.loads((capture_dir / "argv.json").read_text())
+    assert argv == ["agents", "--json", "--cwd", str(repo)]
+
+
+def test_real_claude_permission_mode_when_enabled():
+    if os.environ.get("RUN_CLAUDE_INTEGRATION") != "1":
+        pytest.skip("Set RUN_CLAUDE_INTEGRATION=1 to run real Claude CLI check.")
+
+    result = subprocess.run(
+        [
+            "claude",
+            "--print",
+            "--permission-mode",
+            "dontAsk",
+            "--tools",
+            "Read,Grep,Glob",
+            "--disallowedTools",
+            "Edit,Write,MultiEdit,Bash",
+            "--output-format",
+            "text",
+            "Return exactly: CLAUDE_DONTASK_OK",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "CLAUDE_DONTASK_OK" in result.stdout
+
+
 def test_all_skills_have_frontmatter_and_runtime_call():
     skills = sorted((PLUGIN / "skills").glob("*/SKILL.md"))
     assert {p.parent.name for p in skills} == {

@@ -52,6 +52,8 @@
 - Hardening Task 3 implemented quoted argument edge coverage: double quotes, escaped spaces, and unmatched quote parse failure.
 - Hardening Task 3 quality review found empty quoted option values were dropped, allowing `--path "" focus` to misparse `focus` as the path.
 - Fixed empty quoted token preservation and reject empty option values before Claude invocation.
+- Hardening Task 4 added fake `status` coverage for `claude agents --json --cwd <repo>`.
+- Hardening Task 4 added opt-in real Claude permission-mode integration test and README verification instructions.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -87,6 +89,8 @@
 | Hardening Task 3 full file | Runtime/plugin pytest file | `22 passed` | PASS |
 | Hardening Task 3 empty option regression | Empty quoted `--path` exits before Claude | Targeted pytest passed | PASS |
 | Hardening Task 3 full default pytest | Runtime/plugin pytest file after empty-token fix | `23 passed` | PASS |
+| Hardening Task 4 default pytest | Fake status test plus skipped real integration by default | `24 passed, 1 skipped` | PASS |
+| Hardening Task 4 real Claude integration | `RUN_CLAUDE_INTEGRATION=1` permission-mode check | `1 passed` | PASS |
 
 ### Errors
 | Error | Resolution |

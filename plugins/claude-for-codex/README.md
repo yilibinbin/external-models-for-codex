@@ -52,3 +52,17 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin and include tests
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
+
+## Verification
+
+Default tests use a fake Claude executable and do not require network or model access:
+
+```bash
+python3 -m pytest -q
+```
+
+Run the opt-in real Claude CLI compatibility check when preparing a release:
+
+```bash
+RUN_CLAUDE_INTEGRATION=1 python3 -m pytest tests/test_claude_for_codex_plugin.py::test_real_claude_permission_mode_when_enabled -q
+```
