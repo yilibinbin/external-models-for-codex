@@ -37,6 +37,12 @@ Default to `claude-adversarial-review` for high-risk review. Opt in to `claude-m
 
 `multi-review` fans out plugin-managed roles such as correctness, security, tests, release, and adversarial review. It is not Claude native background agents, it does not apply fixes, and Codex must reconcile the role findings before changing code or reporting residual risk.
 
+## When To Use The Stop Review Gate
+
+Use `claude-review-gate` when a workspace should run an automatic Stop-time check before Codex finishes a turn. The gate is opt-in and reviews current git working-tree changes. It does not prove which files were changed in the immediately previous turn.
+
+The enabled gate runs the multi-role review set and blocks only for explicit `BLOCK:` verdicts. Claude runtime failures, invalid gate output, missing auth, or timeouts warn but do not block. Use `export CLAUDE_FOR_CODEX_REVIEW_GATE=off` in the hook-launching environment as the immediate bypass if a local setup problem appears.
+
 ## When To Use Claude Planning
 
 Use `claude-plan` before editing when:
@@ -64,5 +70,6 @@ Before pushing a new marketplace version:
 - run default pytest,
 - run Codex plugin validation,
 - run all skill validators,
+- run hook syntax validation,
 - run the opt-in Claude integration test when changing Claude CLI flags,
 - update `CHANGELOG.md` and plugin version together.

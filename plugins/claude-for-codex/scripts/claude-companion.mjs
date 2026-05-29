@@ -1,10 +1,20 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status"]);
+const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
+const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
+const STATE_VERSION = 1;
+const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
+const REVIEW_GATE_ENV = "CLAUDE_FOR_CODEX_REVIEW_GATE";
+const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
+const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
 const REVIEW_ROLES = Object.freeze({
   correctness: {
     directive: "Find bugs, regressions, edge cases, and behavioral contract breaks."
@@ -35,14 +45,17 @@ function run(command, args, options = {}) {
     cwd: options.cwd ?? process.cwd(),
     env: process.env,
     encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024
+    input: options.input,
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: options.timeout
   });
 
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
-    error: result.error ? String(result.error.message ?? result.error) : ""
+    error: result.error ? String(result.error.message ?? result.error) : "",
+    errorCode: result.error?.code ? String(result.error.code) : ""
   };
 }
 
@@ -52,6 +65,93 @@ function git(args) {
 
 function hasBinary(name) {
   return run(name, ["--version"]).status === 0;
+}
+
+function canonicalWorkspaceRoot(cwd = process.cwd()) {
+  const rootResult = run("git", ["rev-parse", "--show-toplevel"], { cwd });
+  const candidate = rootResult.status === 0 ? rootResult.stdout.trim() : cwd;
+  const resolved = path.resolve(candidate || cwd);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+function stateDirForCwd(cwd = process.cwd()) {
+  const workspaceRoot = canonicalWorkspaceRoot(cwd);
+  const slug = (path.basename(workspaceRoot) || "workspace")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "workspace";
+  const hash = createHash("sha256").update(workspaceRoot).digest("hex").slice(0, 16);
+  const baseDir = process.env[PLUGIN_DATA_ENV]
+    ? path.join(process.env[PLUGIN_DATA_ENV], "state")
+    : path.join(os.homedir(), ".codex", "claude-for-codex", "state");
+  return path.join(baseDir, `${slug}-${hash}`);
+}
+
+function stateFileForCwd(cwd = process.cwd()) {
+  return path.join(stateDirForCwd(cwd), "state.json");
+}
+
+function defaultState() {
+  return {
+    version: STATE_VERSION,
+    config: {
+      reviewGateEnabled: false,
+      reviewGateMode: "multi-role"
+    }
+  };
+}
+
+function loadState(cwd = process.cwd()) {
+  const stateFile = stateFileForCwd(cwd);
+  if (!fs.existsSync(stateFile)) {
+    return defaultState();
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    return {
+      ...defaultState(),
+      ...parsed,
+      config: {
+        ...defaultState().config,
+        ...(parsed.config ?? {})
+      }
+    };
+  } catch {
+    return defaultState();
+  }
+}
+
+function saveState(cwd, state) {
+  const stateDir = stateDirForCwd(cwd);
+  fs.mkdirSync(stateDir, { recursive: true });
+  const payload = {
+    version: STATE_VERSION,
+    config: {
+      ...defaultState().config,
+      ...(state.config ?? {})
+    }
+  };
+  const stateFile = stateFileForCwd(cwd);
+  const tmpFile = `${stateFile}.${process.pid}.tmp`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  fs.renameSync(tmpFile, stateFile);
+  return payload;
+}
+
+function setConfig(cwd, key, value) {
+  const state = loadState(cwd);
+  state.config = {
+    ...state.config,
+    [key]: value
+  };
+  return saveState(cwd, state);
+}
+
+function getConfig(cwd = process.cwd()) {
+  return loadState(cwd).config;
 }
 
 function hasHead() {
@@ -363,7 +463,30 @@ function claudePrint(prompt, options) {
   }
 
   args.push(prompt);
-  return run("claude", args);
+  return run("claude", args, { timeout: options.timeout });
+}
+
+function hasReviewableGitChanges(cwd = process.cwd()) {
+  if (run("git", ["rev-parse", "--is-inside-work-tree"], { cwd }).status !== 0) {
+    return { reviewable: false, reason: "not a git repository" };
+  }
+  const status = run("git", ["status", "--short", "--untracked-files=all"], { cwd });
+  if (status.status !== 0) {
+    return { reviewable: false, reason: "git status failed" };
+  }
+  return {
+    reviewable: Boolean(status.stdout.trim()),
+    reason: status.stdout.trim() ? "git working tree has changes" : "no git changes"
+  };
+}
+
+function workingTreeFingerprint(cwd = process.cwd()) {
+  const parts = [
+    run("git", ["status", "--short", "--untracked-files=all"], { cwd }).stdout,
+    run("git", ["diff", "--cached"], { cwd }).stdout,
+    run("git", ["diff"], { cwd }).stdout
+  ];
+  return createHash("sha256").update(parts.join("\n--- claude-for-codex ---\n")).digest("hex");
 }
 
 function reviewPrompt(kind, args) {
@@ -428,6 +551,30 @@ function multiReviewRolePrompt(role, args, gitContext) {
   ].filter(Boolean).join("\n");
 }
 
+function reviewGateRolePrompt(role, args, gitContext) {
+  return [
+    "<task>Run a stop-gate review of the current git changes.</task>",
+    `<role_name>${role.name}</role_name>`,
+    `<role_directive>${role.directive}</role_directive>`,
+    gitContext,
+    "<rules>",
+    "- Do not edit files.",
+    "- Do not suggest that you are about to apply fixes.",
+    "- Review only the current git working-tree changes shown in the git context.",
+    "- Use BLOCK only for concrete issues that should prevent stopping now.",
+    "- Use ALLOW if you do not see a blocking issue for this role.",
+    "- Ground every BLOCK claim in concrete changed-file evidence when possible.",
+    "</rules>",
+    "<output_contract>",
+    "Your first line must be exactly one of:",
+    "ALLOW: <short reason>",
+    "BLOCK: <short reason>",
+    "Do not put anything before that first line.",
+    "After the first line, include concise evidence for BLOCK results.",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
 function planPrompt(args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -455,12 +602,72 @@ function planPrompt(args) {
   ].filter(Boolean).join("\n");
 }
 
-function printSetup() {
-  const report = {
+function setupOptions(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const options = { enable: false, disable: false, mode: undefined };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--enable-review-gate") {
+      options.enable = true;
+    } else if (token === "--disable-review-gate") {
+      options.disable = true;
+    } else if (token === "--review-gate-mode") {
+      options.mode = readOptionValue(tokens, index, token);
+      index += 1;
+    } else {
+      throw new Error(`Unknown setup option "${token}".`);
+    }
+  }
+  if (options.enable && options.disable) {
+    throw new Error("Choose either --enable-review-gate or --disable-review-gate.");
+  }
+  if (options.mode !== undefined && !VALID_REVIEW_GATE_MODES.has(options.mode)) {
+    throw new Error(`Invalid --review-gate-mode "${options.mode}". Valid modes: multi-role.`);
+  }
+  return options;
+}
+
+function buildSetupReport(actionsTaken = []) {
+  const cwd = process.cwd();
+  const config = getConfig(cwd);
+  return {
     node: process.version,
     claudeAvailable: hasBinary("claude"),
     gitAvailable: hasBinary("git"),
-    cwd: process.cwd()
+    cwd,
+    reviewGate: {
+      enabled: Boolean(config.reviewGateEnabled),
+      mode: config.reviewGateMode,
+      stateFile: stateFileForCwd(cwd),
+      bypassEnv: REVIEW_GATE_ENV
+    },
+    actionsTaken
+  };
+}
+
+function printSetup(rawArgs) {
+  let options;
+  try {
+    options = setupOptions(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  const actionsTaken = [];
+  const cwd = process.cwd();
+  if (options.mode) {
+    setConfig(cwd, "reviewGateMode", options.mode);
+    actionsTaken.push(`Set review gate mode to ${options.mode}.`);
+  }
+  if (options.enable) {
+    setConfig(cwd, "reviewGateEnabled", true);
+    actionsTaken.push(`Enabled Claude review gate for ${canonicalWorkspaceRoot(cwd)}.`);
+  } else if (options.disable) {
+    setConfig(cwd, "reviewGateEnabled", false);
+    actionsTaken.push(`Disabled Claude review gate for ${canonicalWorkspaceRoot(cwd)}.`);
+  }
+  const report = {
+    ...buildSetupReport(actionsTaken)
   };
 
   console.log(JSON.stringify(report, null, 2));
@@ -473,7 +680,138 @@ function printStatus() {
     process.stderr.write(result.stderr || result.error || "claude agents --json failed\n");
     process.exit(result.status);
   }
-  process.stdout.write(result.stdout);
+  let agents = result.stdout;
+  try {
+    agents = JSON.parse(result.stdout);
+  } catch {
+    // Keep raw output if Claude changes the shape.
+  }
+  process.stdout.write(`${JSON.stringify({
+    claudeAgents: agents,
+    reviewGate: buildSetupReport().reviewGate
+  }, null, 2)}\n`);
+}
+
+function parseGateVerdict(rawOutput) {
+  const text = String(rawOutput ?? "").trim();
+  if (!text) {
+    return { kind: "invalid", reason: "empty Claude gate output" };
+  }
+  const firstLine = text.split(/\r?\n/, 1)[0].trim();
+  if (firstLine.startsWith("ALLOW:")) {
+    return { kind: "allow", reason: firstLine.slice("ALLOW:".length).trim() || "allowed" };
+  }
+  if (firstLine.startsWith("BLOCK:")) {
+    return { kind: "block", reason: firstLine.slice("BLOCK:".length).trim() || "blocked", output: text };
+  }
+  return { kind: "invalid", reason: `unexpected first line: ${firstLine}` };
+}
+
+function warnGate(message) {
+  process.stderr.write(`[claude-for-codex review-gate] ${message}\n`);
+}
+
+function readStdinJsonForGate() {
+  if (process.stdin.isTTY) {
+    return {};
+  }
+  const rawInput = fs.readFileSync(0, "utf8").trim();
+  if (!rawInput) {
+    return {};
+  }
+  return JSON.parse(rawInput);
+}
+
+function runReviewGate(rawArgs) {
+  if (String(process.env[REVIEW_GATE_ENV] ?? "").toLowerCase() === "off") {
+    return;
+  }
+
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+  } catch (error) {
+    warnGate(`argument parse failed; allowing stop: ${error.message || String(error)}`);
+    return;
+  }
+
+  let input = {};
+  try {
+    input = readStdinJsonForGate();
+  } catch (error) {
+    warnGate(`invalid hook input; allowing stop: ${error.message || String(error)}`);
+    return;
+  }
+
+  if (input.stop_hook_active) {
+    return;
+  }
+
+  const cwd = input.cwd || process.cwd();
+  try {
+    process.chdir(cwd);
+  } catch (error) {
+    warnGate(`unable to enter hook cwd "${cwd}"; allowing stop: ${error.message || String(error)}`);
+    return;
+  }
+  const config = getConfig(cwd);
+  if (!config.reviewGateEnabled) {
+    return;
+  }
+  if (config.reviewGateMode !== "multi-role") {
+    warnGate(`unknown gate mode "${config.reviewGateMode}"; allowing stop`);
+    return;
+  }
+
+  const reviewable = hasReviewableGitChanges(cwd);
+  if (!reviewable.reviewable) {
+    return;
+  }
+  const diffHash = workingTreeFingerprint(cwd);
+  if (config.lastAllowedReviewGateDiffHash === diffHash) {
+    return;
+  }
+
+  const roles = DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
+    name,
+    directive: REVIEW_ROLES[name].directive
+  }));
+  args.scope = "working-tree";
+  args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
+
+  const gitContext = collectGitContext(args);
+  const blocks = [];
+  for (const role of roles) {
+    const prompt = reviewGateRolePrompt(role, args, gitContext);
+    const result = claudePrint(prompt, args);
+    if (result.errorCode === "ETIMEDOUT" || result.error.includes("ETIMEDOUT")) {
+      warnGate(`role ${role.name} timed out; allowing stop`);
+      continue;
+    }
+    if (result.status !== 0) {
+      const detail = (result.stderr || result.error || result.stdout || "claude --print failed").trim();
+      warnGate(`role ${role.name} failed; allowing stop: ${detail}`);
+      continue;
+    }
+    const verdict = parseGateVerdict(result.stdout);
+    if (verdict.kind === "block") {
+      blocks.push({ role: role.name, reason: verdict.reason, output: verdict.output });
+    } else if (verdict.kind === "invalid") {
+      warnGate(`role ${role.name} returned invalid gate output; allowing stop: ${verdict.reason}`);
+    }
+  }
+
+  if (blocks.length) {
+    const reason = blocks
+      .map((block) => `${block.role}: ${block.reason}`)
+      .join("; ");
+    process.stdout.write(`${JSON.stringify({
+      decision: "block",
+      reason: `Claude review gate found blocking issues: ${reason}`
+    })}\n`);
+    return;
+  }
+  setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
 }
 
 function runClaudeTask(kind, rawArgs) {
@@ -573,7 +911,7 @@ if (!VALID_COMMANDS.has(command)) {
 
 switch (command) {
   case "setup":
-    printSetup();
+    printSetup(rawArgs);
     break;
   case "review":
     runClaudeTask("review", rawArgs);
@@ -589,5 +927,8 @@ switch (command) {
     break;
   case "status":
     printStatus();
+    break;
+  case "review-gate":
+    runReviewGate(rawArgs);
     break;
 }

@@ -59,6 +59,28 @@
 - Adding a new `claude-multi-review` skill requires updating `test_all_skills_have_frontmatter_and_runtime_call`, which currently asserts the exact four-skill set.
 - The largest ambiguity is terminology: role fan-out is not Claude Code native background-agent orchestration. Native agent dispatch should be researched separately if that is the desired target.
 
+## Local Hook Research Findings
+- `@codex` is a Claude-side plugin cache entry under `openai-codex/codex/1.0.4`; it includes a root-level `hooks/hooks.json` plus scripts such as `stop-review-gate-hook.mjs` and `session-lifecycle-hook.mjs`.
+- CodeRabbit and Codex Security local Codex-native plugins expose skills/assets/scripts but no hook directory in the inspected cache entries.
+- Current local `plugin-creator` guidance for Codex plugins says to omit unsupported manifest fields including `hooks` from `.codex-plugin/plugin.json`. Later local evidence clarifies the nuance: Codex App can still auto-discover root-level `hooks/hooks.json` from enabled plugins; the unsupported part is declaring `hooks` explicitly in `.codex-plugin/plugin.json`.
+- `@codex` hook events: `SessionStart`, `SessionEnd`, and `Stop`. `SessionStart/SessionEnd` manage per-session env/state and broker cleanup; `Stop` optionally runs a Codex stop-gate review.
+- `@codex` stop review gate is opt-in. The hook is always registered in the Claude plugin, but the script exits early unless `config.stopReviewGate` is true. `/codex:setup --enable-review-gate` toggles that state.
+- `@codex` Stop hook reads hook JSON from stdin, uses `cwd`, `session_id`, and `last_assistant_message`, checks for running Codex jobs in the current session, then either prints a stderr note or emits JSON `{ "decision": "block", "reason": "..." }`.
+- The stop-gate prompt requires first-line `ALLOW:` or `BLOCK:`. Non-empty unexpected/invalid output is treated as a block to force manual review or bypass.
+- The `@codex` design intentionally limits gate scope to the immediately previous Claude turn and says to allow immediately when that turn did not produce code edits.
+- CodeRabbit uses a skill wrapper around `coderabbit review --agent`, with auth/install handling and NDJSON output parsing guidance; no automatic stop hook was found.
+- Codex Security uses phased skill orchestration, artifacts, goals, and validation scripts; no automatic hook was found.
+- Codex global hook state exists in `~/.codex/config.toml` under `[hooks.state]`, including entries such as `codex@openai-codex:hooks/hooks.json:session_start:0:0` and `codex@openai-codex:hooks/hooks.json:stop:0:0`.
+- User-level hooks also exist at `~/.codex/hooks.json` and `~/.codex/hooks/hooks.json`; the settings UI screenshot corresponds to this global hook management layer.
+
+## Stop Review Gate Implementation Findings
+- `claude-for-codex` now ships a standard `hooks/hooks.json` Stop hook without adding a `hooks` field to `.codex-plugin/plugin.json`.
+- The gate is opt-in and stores per-workspace state outside the repo, using `CLAUDE_PLUGIN_DATA/state/...` when available and `~/.codex/claude-for-codex/state/...` otherwise.
+- The enabled gate reviews current git working-tree changes, not the exact previous-turn edit set.
+- The gate blocks only on explicit Claude `BLOCK:` verdicts; Claude failures, timeouts, invalid output, and missing runtime fail open with stderr warnings.
+- The hook command uses `${CLAUDE_PLUGIN_ROOT:-$CODEX_PLUGIN_ROOT}` to tolerate both root-variable names in hook environments.
+- The gate caches the last all-ALLOW working-tree fingerprint so unchanged diffs do not trigger repeated multi-role review.
+
 ## Resources
 - https://github.com/openai/codex-plugin-cc
 - https://code.claude.com/docs/en/plugins

@@ -81,6 +81,22 @@
 - Task 5 spec and quality reviews approved.
 - Final `multi-review` self-review found actionable release/docs gaps: real Claude integration should include `--effort`, and `claude-multi-review` skill should document `--path`/`--paths`; both were fixed.
 - Final release validation passed: default pytest, real Claude integration, node check/setup, plugin validator, and all five skill validators.
+- Started hook design research after user asked to inspect local review plugin hooks, especially `@codex`.
+- Loaded `planning-with-files` and `plugin-creator` guidance. Current Codex plugin creator guidance still says unsupported manifest fields including `hooks` must be omitted from `.codex-plugin/plugin.json`.
+- Listed local plugin cache hook files. `openai-codex/codex/1.0.4` contains `hooks/hooks.json`; CodeRabbit and Codex Security cache entries do not expose hook directories.
+- Inspected `@codex` hook config and scripts. It registers Claude Code `SessionStart`, `SessionEnd`, and `Stop` hooks; the Stop review gate is opt-in via setup config and blocks by emitting JSON with `decision: block`.
+- Inspected CodeRabbit and Codex Security plugin manifests/skills. Both are Codex-native skill-first plugins without hook manifests in the local cache.
+- Rechecked after user pointed out the Codex settings Hook page. Found `~/.codex/hooks.json`, `~/.codex/hooks/hooks.json`, and `[hooks.state]` entries in `~/.codex/config.toml` proving Codex App has a global/plugin hook management layer. Corrected earlier interpretation: plugin hook files can be auto-discovered as `hooks/hooks.json`; the invalid part is adding a top-level `hooks` field to `.codex-plugin/plugin.json`.
+- Started implementation of the accepted Stop review gate plan.
+- Created branch `codex/claude-review-gate-hook`.
+- Re-read planning files and Superpowers executing-plans guidance; proceeding with implementation plus validation checkpoints.
+- Implemented `review-gate` runtime command with repo-external per-workspace state, setup enable/disable flags, multi-role gate prompts, fail-open Claude failure handling, and env bypass.
+- Added plugin `hooks/hooks.json` and `hooks/claude-review-gate.mjs` wrapper.
+- Added `claude-review-gate` skill, README hook documentation, workflow docs, changelog entry, and bumped plugin version to `0.3.0`.
+- Added fake-Claude tests for gate disabled/no-change/recursive skip, ALLOW, BLOCK, Claude failure, invalid output, env bypass, setup state, hook manifest, and status gate output.
+- Ran real setup smoke in current repo; output showed Claude/git available, gate disabled by default, and repo-external state path under `~/.codex/claude-for-codex/state/...`.
+- Ran real Claude review-gate smoke in a temporary git repo with temporary `CLAUDE_PLUGIN_DATA`; enabled gate, reviewed a small working-tree change, and exited 0 with no block output.
+- Ran Claude adversarial review of the Stop gate implementation. Adopted fixes for env bypass before stdin reads, hook root variable compatibility, shorter per-role timeout under the 15-minute hook budget, unchanged-diff allow caching, wrapper end-to-end coverage, and actionable `export` bypass docs.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -136,6 +152,12 @@
 | Multi-agent Task 5 implementation | Version/changelog bump | `49 passed, 1 skipped`; manifest version test passed | PASS |
 | Multi-agent final self-review fixes | `--effort` integration coverage and skill path docs | `49 passed, 1 skipped`; real integration passed; skill validator passed | PASS |
 | Multi-agent final release validation | pytest, real integration, node setup, plugin and all skill validators | PASS | PASS |
+| Stop gate targeted pytest | Runtime/hook behavior suite | `59 passed, 1 skipped` then `61 passed, 1 skipped` after review fixes | PASS |
+| Stop gate node syntax | Runtime and hook wrapper syntax | `node --check` passed | PASS |
+| Stop gate real Claude smoke | Temporary repo enabled gate returns without blocking a benign change | exit 0 | PASS |
+| Claude adversarial implementation review | Identify release-blocking hook issues | Actionable issues fixed | PASS |
+| Stop gate full pytest | Full repository test suite | `61 passed, 1 skipped` | PASS |
+| Stop gate real Claude integration | Real Claude permission-mode check | `1 passed` | PASS |
 
 ### Errors
 | Error | Resolution |
@@ -154,3 +176,5 @@
 | With-HEAD invalid `--base` was reported as effective | Added base ref validation, unavailable-base prompt metadata, and fake-Claude regression test. |
 | Unterminated quoted argument was silently accepted | Splitter now exits with parse error before invoking Claude. |
 | Empty quoted option value shifted parsing to the next word | Splitter now preserves empty quoted tokens and option reader rejects empty values. |
+| New status test captured only the last fake-Claude call after status began checking availability | Updated fake test CLI to capture all calls and assert the `agents --json --cwd` call is present. |
+| Real smoke shell used `status` as a zsh variable | Renamed it to `rc` and reran successfully. |

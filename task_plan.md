@@ -4,7 +4,7 @@
 Build a Claude-for-Codex plugin package and workflow plan that mirrors OpenAI's Claude-side Codex plugin in the opposite direction: Codex can invoke Claude for adversarial review, planning, and complementary multi-model collaboration.
 
 ## Current Phase
-Claude multi-agent orchestration implemented and validated
+Implementing Claude Stop review gate hook
 
 ## Phases
 
@@ -35,6 +35,20 @@ Claude multi-agent orchestration implemented and validated
 - [x] Deliver to user
 - **Status:** complete
 
+### Phase 6: Hook Design Research
+- [x] Inspect local review/security plugins for hook structures
+- [x] Compare hook packaging between Claude-side and Codex-native plugins
+- [x] Decide whether/how to add hook-like support to claude-for-codex safely
+- **Status:** complete
+
+### Phase 7: Stop Review Gate Hook
+- [x] Add opt-in gate state and `review-gate` runtime command
+- [x] Add plugin `hooks/hooks.json` and hook wrapper
+- [x] Add fake-Claude gate behavior tests
+- [x] Add skill and documentation for enabling/disabling the gate
+- [x] Validate and prepare `0.3.0`
+- **Status:** complete
+
 ## Decisions Made
 | Decision | Rationale |
 |----------|-----------|
@@ -44,6 +58,8 @@ Claude multi-agent orchestration implemented and validated
 | Remove Bash from Claude review/planning tools | Read-only review must be enforced by CLI permissions, not only prompt wording. |
 | Make tests discoverable by default pytest | Final review found the original `validate_*.py` filename was not discovered by default pytest. |
 | Validate requested base refs before calling them effective | A with-HEAD repo can still have a typoed `--base`; prompt metadata must not tell Claude that an unusable ref is effective. |
+| Implement Stop gate as opt-in and fail-open on Claude runtime failure | The user chose multi-role blocking for explicit BLOCK results, but Claude availability/network failures should not wedge Codex Stop. |
+| Use `hooks/hooks.json` without `plugin.json` hooks field | Local hook docs and existing plugins show standard hook files are auto-loaded; manifest `hooks` risks validation failure or duplicate load. |
 
 ## Errors Encountered
 | Error | Resolution |

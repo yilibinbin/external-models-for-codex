@@ -71,6 +71,10 @@ import os
 import pathlib
 import sys
 
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 (capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
 (capture / "prompt.txt").write_text(sys.argv[-1])
@@ -154,6 +158,10 @@ import os
 import pathlib
 import sys
 
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 call_index = len(list(capture.glob("argv-*.json")))
 prompt = sys.argv[-1]
@@ -193,6 +201,115 @@ print(f"FAKE_CLAUDE_OK call {call_index}")
     return result, prompts, argvs
 
 
+def prepare_gate_repo(tmp_path, *, with_change=True):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    plugin_data = tmp_path / "plugin-data"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+    plugin_data.mkdir()
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "sample.txt").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    if with_change:
+        (repo / "sample.txt").write_text("base\nchanged\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+call_index = len(list(capture.glob("argv-*.json")))
+prompt = sys.argv[-1]
+(capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
+(capture / f"prompt-{call_index}.txt").write_text(prompt)
+fail_roles = [role for role in os.environ.get("FAIL_ROLES", "").split(",") if role]
+invalid_roles = [role for role in os.environ.get("INVALID_ROLES", "").split(",") if role]
+block_roles = [role for role in os.environ.get("BLOCK_ROLES", "").split(",") if role]
+for role in fail_roles:
+    if f"<role_name>{role}</role_name>" in prompt:
+        print(f"failed role {role}", file=sys.stderr)
+        raise SystemExit(17)
+for role in invalid_roles:
+    if f"<role_name>{role}</role_name>" in prompt:
+        print(f"MAYBE: invalid role {role}")
+        raise SystemExit(0)
+for role in block_roles:
+    if f"<role_name>{role}</role_name>" in prompt:
+        print(f"BLOCK: blocking issue from {role}")
+        raise SystemExit(0)
+role = "unknown"
+for candidate in ["correctness", "security", "tests", "release", "adversarial"]:
+    if f"<role_name>{candidate}</role_name>" in prompt:
+        role = candidate
+print(f"ALLOW: no blocking issue from {role}")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["CLAUDE_PLUGIN_DATA"] = str(plugin_data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    return runtime, repo, capture_dir, env
+
+
+def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=None, extra_env=None):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path, with_change=with_change)
+    if extra_env:
+        env.update(extra_env)
+    if enable:
+        setup = subprocess.run(
+            ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert setup.returncode == 0, setup.stderr
+    input_text = json.dumps(hook_input or {"hook_event_name": "Stop", "cwd": str(repo)})
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=input_text,
+        capture_output=True,
+        text=True,
+    )
+    prompts = [
+        path.read_text()
+        for path in sorted(capture_dir.glob("prompt-*.txt"), key=lambda p: int(p.stem.split("-")[1]))
+    ]
+    return result, prompts, capture_dir
+
+
 def parse_skill_frontmatter(text):
     assert text.startswith("---\n")
     end = text.find("\n---\n", 4)
@@ -221,15 +338,26 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.2.0"
+    assert data["version"] == "0.3.0"
     assert data["skills"] == "./skills/"
+    assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
+
+
+def test_plugin_stop_hook_manifest_is_autodiscoverable():
+    hooks_path = PLUGIN / "hooks" / "hooks.json"
+    data = json.loads(hooks_path.read_text())
+    stop_hooks = data["hooks"]["Stop"]
+    command = stop_hooks[0]["hooks"][0]["command"]
+    assert "claude-review-gate.mjs" in command
+    assert "CLAUDE_PLUGIN_ROOT:-$CODEX_PLUGIN_ROOT" in command
+    assert stop_hooks[0]["hooks"][0]["timeout"] == 900
 
 
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "review", "adversarial-review", "multi-review", "plan", "status"]:
+    for command in ["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -781,7 +909,10 @@ import pathlib
 import sys
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
-(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+calls_path = capture / "argv.json"
+calls = json.loads(calls_path.read_text()) if calls_path.exists() else []
+calls.append(sys.argv[1:])
+calls_path.write_text(json.dumps(calls))
 print("[]")
 """
     )
@@ -799,9 +930,207 @@ print("[]")
     )
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "[]"
-    argv = json.loads((capture_dir / "argv.json").read_text())
-    assert argv == ["agents", "--json", "--cwd", str(repo)]
+    payload = json.loads(result.stdout)
+    assert payload["claudeAgents"] == []
+    assert payload["reviewGate"]["enabled"] is False
+    assert payload["reviewGate"]["mode"] == "multi-role"
+    argvs = json.loads((capture_dir / "argv.json").read_text())
+    assert ["agents", "--json", "--cwd", str(repo)] in argvs
+
+
+def test_setup_can_enable_and_disable_review_gate(tmp_path):
+    runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
+
+    enabled = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert enabled.returncode == 0, enabled.stderr
+    enabled_payload = json.loads(enabled.stdout)
+    assert enabled_payload["reviewGate"]["enabled"] is True
+    assert enabled_payload["reviewGate"]["mode"] == "multi-role"
+    assert pathlib.Path(enabled_payload["reviewGate"]["stateFile"]).exists()
+
+    disabled = subprocess.run(
+        ["node", str(runtime), "setup", "--disable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert disabled.returncode == 0, disabled.stderr
+    assert json.loads(disabled.stdout)["reviewGate"]["enabled"] is False
+
+
+def test_review_gate_disabled_does_not_call_claude(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(tmp_path, enable=False)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert prompts == []
+
+
+def test_review_gate_skips_without_git_changes(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(tmp_path, with_change=False)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert prompts == []
+
+
+def test_review_gate_skips_when_stop_hook_already_active(tmp_path):
+    runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo), "stop_hook_active": True}),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+
+
+def test_review_gate_all_allow_exits_without_block(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert len(prompts) == 5
+    for role in ["correctness", "security", "tests", "release", "adversarial"]:
+        assert f"<role_name>{role}</role_name>" in "\n".join(prompts)
+        assert "Your first line must be exactly one of:" in "\n".join(prompts)
+
+
+def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+
+    first = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    prompts = list(capture_dir.glob("prompt-*.txt"))
+    assert len(prompts) == 5
+    assert second.stdout == ""
+    assert second.stderr == ""
+
+
+def test_review_gate_block_outputs_stop_decision_json(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"BLOCK_ROLES": "security,tests"},
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "block"
+    assert "security: blocking issue from security" in payload["reason"]
+    assert "tests: blocking issue from tests" in payload["reason"]
+    assert len(prompts) == 5
+
+
+def test_review_gate_wrapper_forwards_block_and_exits_zero(tmp_path):
+    runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    env["BLOCK_ROLES"] = "security"
+    wrapper = PLUGIN / "hooks" / "claude-review-gate.mjs"
+    result = subprocess.run(
+        ["node", str(wrapper)],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["decision"] == "block"
+    assert "security: blocking issue from security" in payload["reason"]
+
+
+def test_review_gate_claude_failure_warns_but_does_not_block(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"FAIL_ROLES": "security"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "role security failed; allowing stop" in result.stderr
+    assert len(prompts) == 5
+
+
+def test_review_gate_invalid_claude_output_warns_but_does_not_block(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"INVALID_ROLES": "release"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "role release returned invalid gate output; allowing stop" in result.stderr
+    assert len(prompts) == 5
+
+
+def test_review_gate_env_bypass_skips_claude(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_REVIEW_GATE": "off"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert prompts == []
 
 
 def test_real_claude_permission_mode_when_enabled():
@@ -840,6 +1169,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-collaboration-loop": "plan",
         "claude-multi-review": "multi-review",
         "claude-plan": "plan",
+        "claude-review-gate": "review-gate",
         "claude-review": "review",
     }
     assert {p.parent.name for p in skills} == {
@@ -847,6 +1177,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-collaboration-loop",
         "claude-multi-review",
         "claude-plan",
+        "claude-review-gate",
         "claude-review",
     }
     for skill in skills:

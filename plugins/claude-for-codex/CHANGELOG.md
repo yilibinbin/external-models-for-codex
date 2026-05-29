@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0
+
+- Add opt-in Stop-time Claude review gate hook.
+- Add `review-gate` runtime command and `claude-review-gate` skill.
+- Add repo-external per-workspace gate state with enable/disable setup flags.
+- Add fail-open behavior for Claude CLI failures and invalid gate output.
+- Document hook auto-discovery, settings trust, and emergency bypass.
+
 ## 0.2.0
 
 - Add opt-in `multi-review` command.
