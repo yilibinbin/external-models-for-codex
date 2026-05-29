@@ -1,22 +1,91 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import readline from "node:readline";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-const COMMANDS = new Map([
-  ["status", ["status", "--short", "--untracked-files=all"]],
-  ["diff", ["diff"]],
-  ["diff-cached", ["diff", "--cached"]],
-  ["ls-files", ["ls-files"]]
+const MAX_BUFFER = 5 * 1024 * 1024;
+const SAFE_PATH = /^[A-Za-z0-9._/@:+-]+$/;
+const SAFE_REF = /^[A-Za-z0-9._/@:+~^-]+$/;
+
+const TOOLS = {
+  git_status: { args: ["status", "--short", "--untracked-files=all"] },
+  git_diff: { args: ["diff"], acceptsPaths: true },
+  git_diff_cached: { args: ["diff", "--cached"], acceptsPaths: true },
+  git_log: { args: ["log", "--oneline", "--decorate", "-n"], acceptsLimit: true },
+  git_show: { args: ["show"], acceptsRef: true, acceptsPaths: true },
+  git_blame: { args: ["blame"], acceptsPaths: true, requiresOnePath: true },
+  git_grep: { args: ["grep", "-n"], acceptsPattern: true, acceptsPaths: true },
+  git_ls_files: { args: ["ls-files"], acceptsPaths: true }
+};
+
+const CLI_ALIASES = new Map([
+  ["status", "git_status"],
+  ["diff", "git_diff"],
+  ["diff-cached", "git_diff_cached"],
+  ["ls-files", "git_ls_files"]
 ]);
 
-function runGit(args) {
-  const result = spawnSync("git", args, {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    maxBuffer: 5 * 1024 * 1024
-  });
+export function isSafeGitPath(value) {
+  if (typeof value !== "string" || value.length === 0) return false;
+  if (value.startsWith("-") || value.includes("\n") || value.includes("\r")) return false;
+  if (!SAFE_PATH.test(value)) return false;
+  return !value.split("/").some((part) => part === "..");
+}
+
+export function isSafeGitRef(value) {
+  if (typeof value !== "string" || value.length === 0) return false;
+  if (value.startsWith("-") || value.includes("\n") || value.includes("\r")) return false;
+  return SAFE_REF.test(value);
+}
+
+function checkedPaths(paths = []) {
+  if (!Array.isArray(paths)) throw new Error("paths must be an array");
+  for (const item of paths) {
+    if (!isSafeGitPath(item)) throw new Error(`Unsafe git path: ${item}`);
+  }
+  return paths;
+}
+
+function checkedRef(ref) {
+  if (ref === undefined || ref === "") return "";
+  if (!isSafeGitRef(ref)) throw new Error(`Unsafe git ref: ${ref}`);
+  return ref;
+}
+
+function checkedLimit(limit) {
+  if (limit === undefined) return "20";
+  const numeric = Number(limit);
+  if (!Number.isInteger(numeric) || numeric < 1 || numeric > 100) {
+    throw new Error("limit must be an integer from 1 to 100");
+  }
+  return String(numeric);
+}
+
+export function runGitTool(name, input = {}, cwd = process.cwd()) {
+  const tool = TOOLS[name];
+  if (!tool) throw new Error(`Unknown git MCP tool: ${name}`);
+  const args = [...tool.args];
+
+  if (tool.acceptsLimit) args.push(checkedLimit(input.limit));
+  if (tool.acceptsRef) {
+    const ref = checkedRef(input.ref || "HEAD");
+    if (ref) args.push(ref);
+  }
+  if (tool.acceptsPattern) {
+    if (typeof input.pattern !== "string" || input.pattern.length === 0 || input.pattern.includes("\n") || input.pattern.includes("\r")) {
+      throw new Error("pattern must be a non-empty single-line string");
+    }
+    args.push(input.pattern);
+  }
+
+  const paths = checkedPaths(input.paths || []);
+  if (paths.length && !tool.acceptsPaths) throw new Error(`${name} does not accept paths`);
+  if (tool.requiresOnePath && paths.length !== 1) throw new Error(`${name} requires exactly one path`);
+  if (paths.length) args.push("--", ...paths);
+
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: MAX_BUFFER });
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? "",
@@ -26,7 +95,8 @@ function runGit(args) {
 }
 
 export function runReadOnlyGitCommand(name) {
-  if (!COMMANDS.has(name)) {
+  const toolName = CLI_ALIASES.get(name) || name;
+  if (!TOOLS[toolName]) {
     return {
       status: 2,
       stdout: "",
@@ -34,12 +104,97 @@ export function runReadOnlyGitCommand(name) {
       error: ""
     };
   }
-  return runGit(COMMANDS.get(name));
+  return runGitTool(toolName);
+}
+
+function toolList() {
+  return Object.keys(TOOLS).map((name) => ({
+    name,
+    description: `Read-only ${name.replaceAll("_", " ")} inspection for the current Git repository.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" } },
+        ref: { type: "string" },
+        pattern: { type: "string" },
+        limit: { type: "integer", minimum: 1, maximum: 100 }
+      },
+      additionalProperties: false
+    }
+  }));
+}
+
+function send(message) {
+  process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+async function runServer() {
+  const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
+  for await (const line of rl) {
+    if (!line.trim()) continue;
+    const request = JSON.parse(line);
+    try {
+      if (request.method === "initialize") {
+        send({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            protocolVersion: "2024-11-05",
+            capabilities: { tools: {} },
+            serverInfo: { name: "claude-for-codex-git", version: "1.0.0" }
+          }
+        });
+      } else if (request.method === "tools/list") {
+        send({ jsonrpc: "2.0", id: request.id, result: { tools: toolList() } });
+      } else if (request.method === "tools/call") {
+        const name = request.params?.name;
+        const args = request.params?.arguments || {};
+        const result = runGitTool(name, args);
+        send({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] }
+        });
+      } else {
+        send({ jsonrpc: "2.0", id: request.id, error: { code: -32601, message: `Unknown method ${request.method}` } });
+      }
+    } catch (error) {
+      send({ jsonrpc: "2.0", id: request.id, error: { code: -32000, message: error.message || String(error) } });
+    }
+  }
+}
+
+function selftest() {
+  return {
+    safePath: {
+      "file.txt": isSafeGitPath("file.txt"),
+      "../secret": isSafeGitPath("../secret"),
+      "-p": isSafeGitPath("-p"),
+      "a;b": isSafeGitPath("a;b"),
+      "a$(touch x)": isSafeGitPath("a$(touch x)"),
+      "a\nb": isSafeGitPath("a\nb")
+    },
+    safeRef: {
+      HEAD: isSafeGitRef("HEAD"),
+      "main~1": isSafeGitRef("main~1"),
+      "main;rm -rf /": isSafeGitRef("main;rm -rf /"),
+      "--help": isSafeGitRef("--help")
+    }
+  };
 }
 
 if (fileURLToPath(import.meta.url) === process.argv[1]) {
-  const command = process.argv[2] || "status";
-  const result = runReadOnlyGitCommand(command);
-  process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  process.exit(result.status === 0 ? 0 : 1);
+  const mode = process.argv[2] || "server";
+  if (mode === "selftest") {
+    process.stdout.write(`${JSON.stringify(selftest(), null, 2)}\n`);
+  } else if (mode === "server") {
+    runServer().catch((error) => {
+      process.stderr.write(`${error.stack || error.message || String(error)}\n`);
+      process.exit(1);
+    });
+  } else {
+    const result = runReadOnlyGitCommand(mode);
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    process.exit(result.status === 0 ? 0 : 1);
+  }
 }

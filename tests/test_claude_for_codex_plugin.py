@@ -2160,6 +2160,33 @@ def test_read_only_git_helper_rejects_unknown_commands(tmp_path):
     assert json.loads(rejected.stdout)["status"] == 2
 
 
+def test_mcp_git_rejects_unsafe_paths_and_refs(tmp_path):
+    helper = PLUGIN / "scripts" / "lib" / "mcp-git.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+    result = subprocess.run(
+        [NODE, str(helper), "selftest"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["safePath"]["file.txt"] is True
+    assert payload["safePath"]["../secret"] is False
+    assert payload["safePath"]["-p"] is False
+    assert payload["safePath"]["a;b"] is False
+    assert payload["safePath"]["a$(touch x)"] is False
+    assert payload["safePath"]["a\nb"] is False
+    assert payload["safeRef"]["HEAD"] is True
+    assert payload["safeRef"]["main~1"] is True
+    assert payload["safeRef"]["main;rm -rf /"] is False
+    assert payload["safeRef"]["--help"] is False
+
+
 def test_setup_uses_claude_code_path_when_path_omits_claude(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
