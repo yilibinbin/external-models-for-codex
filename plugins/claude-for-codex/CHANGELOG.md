@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Add opt-in `multi-review` command.
+- Add role-based Claude review fan-out.
+- Add deterministic aggregation for multi-review output.
+- Add partial-failure reporting for failed review roles.
+- Add new `claude-multi-review` skill.
+
 ## 0.1.1
 
 - Implement real `--scope auto|working-tree|branch` review behavior.
