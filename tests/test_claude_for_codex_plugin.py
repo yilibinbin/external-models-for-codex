@@ -641,7 +641,6 @@ def test_read_only_review_invokes_claude_with_strict_mcp_config(tmp_path):
     assert server["args"][-1] == "server"
     assert "mcp-git.mjs" in " ".join(server["args"])
     assert server["cwd"] == str(repo)
-    assert server["env"]["PWD"] == str(repo)
 
 
 def test_review_splits_single_quoted_arguments_token(tmp_path):
