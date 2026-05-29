@@ -36,7 +36,7 @@ function hasHead() {
 
 function parseArgs(argv) {
   const tokens = normalizeArgv(argv);
-  const parsed = { _: [] };
+  const parsed = { _: [], paths: [] };
   for (let index = 0; index < tokens.length; index += 1) {
     const arg = tokens[index];
     if (arg === "--base") {
@@ -46,7 +46,9 @@ function parseArgs(argv) {
       parsed.scope = readOptionValue(tokens, index, arg);
       index += 1;
     } else if (arg === "--path" || arg === "--paths") {
-      parsed.path = readOptionValue(tokens, index, arg);
+      const path = readOptionValue(tokens, index, arg);
+      parsed.paths.push(path);
+      parsed.path = path;
       index += 1;
     } else if (arg === "--model") {
       parsed.model = readOptionValue(tokens, index, arg);
@@ -161,8 +163,9 @@ function safeResult(stdout) {
 function collectGitContext(options) {
   const scope = options.scope ?? "auto";
   const base = options.base;
-  const pathspec = options.path;
-  const pathArgs = pathspec ? ["--", pathspec] : [];
+  const paths = options.paths?.length ? options.paths : options.path ? [options.path] : [];
+  const pathLabel = paths.join(" ");
+  const pathArgs = paths.length ? ["--", ...paths] : [];
   const headExists = hasHead();
   const includeWorkingTree = scope === "auto" || scope === "working-tree";
   const includeBaseBranch = (scope === "auto" || scope === "branch") && Boolean(base);
@@ -195,32 +198,32 @@ function collectGitContext(options) {
     `cwd: ${process.cwd()}`,
     `scope: ${scope}`,
     `base: ${base ?? ""}`,
-    `path: ${pathspec ?? ""}`,
+    `paths: ${pathLabel}`,
     "",
     status
-      ? formatCommandResult(`git status --short --untracked-files=all${pathspec ? ` -- ${pathspec}` : ""}`, status)
+      ? formatCommandResult(`git status --short --untracked-files=all${paths.length ? ` -- ${pathLabel}` : ""}`, status)
       : "",
     "",
     stagedStat
-      ? formatCommandResult(`git diff --cached --stat${pathspec ? ` -- ${pathspec}` : ""}`, stagedStat)
+      ? formatCommandResult(`git diff --cached --stat${paths.length ? ` -- ${pathLabel}` : ""}`, stagedStat)
       : "",
     "",
     stagedDiff
-      ? formatCommandResult(`git diff --cached${pathspec ? ` -- ${pathspec}` : ""}`, stagedDiff)
+      ? formatCommandResult(`git diff --cached${paths.length ? ` -- ${pathLabel}` : ""}`, stagedDiff)
       : "",
     "",
     unstagedStat
-      ? formatCommandResult(`git diff --stat${pathspec ? ` -- ${pathspec}` : ""}`, unstagedStat)
+      ? formatCommandResult(`git diff --stat${paths.length ? ` -- ${pathLabel}` : ""}`, unstagedStat)
       : "",
     "",
     unstagedDiff
-      ? formatCommandResult(`git diff${pathspec ? ` -- ${pathspec}` : ""}`, unstagedDiff)
+      ? formatCommandResult(`git diff${paths.length ? ` -- ${pathLabel}` : ""}`, unstagedDiff)
       : "",
     "",
     branchStat
       ? formatCommandResult(
           headExists
-            ? `git diff --stat ${base}...HEAD${pathspec ? ` -- ${pathspec}` : ""}`
+            ? `git diff --stat ${base}...HEAD${paths.length ? ` -- ${pathLabel}` : ""}`
             : "branch diff skipped",
           branchStat
         )
@@ -231,10 +234,10 @@ function collectGitContext(options) {
     branchNameOnly
       ? base
       ? headExists
-        ? formatCommandResult(`git diff --name-only ${base}...HEAD${pathspec ? ` -- ${pathspec}` : ""}`, branchNameOnly)
+        ? formatCommandResult(`git diff --name-only ${base}...HEAD${paths.length ? ` -- ${pathLabel}` : ""}`, branchNameOnly)
         : formatCommandResult("changed files from git status fallback", branchNameOnly)
       : includeHeadNameOnly && headExists
-        ? formatCommandResult(`git diff --name-only HEAD${pathspec ? ` -- ${pathspec}` : ""}`, branchNameOnly)
+        ? formatCommandResult(`git diff --name-only HEAD${paths.length ? ` -- ${pathLabel}` : ""}`, branchNameOnly)
         : formatCommandResult("changed files from git status fallback", branchNameOnly)
       : "",
     "</git_context>"
@@ -355,6 +358,10 @@ function runClaudeTask(kind, rawArgs) {
   const scope = args.scope ?? "auto";
   if (!VALID_SCOPES.has(scope)) {
     console.error(`Invalid --scope "${scope}". Valid scopes: auto, working-tree, branch.`);
+    process.exit(2);
+  }
+  if (scope === "branch" && !args.base) {
+    console.error("--scope branch requires --base <ref>.");
     process.exit(2);
   }
   args.scope = scope;

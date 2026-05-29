@@ -37,6 +37,8 @@ def run_fake_claude_review(tmp_path, args, commit_head=False):
     )
     (repo / "branch.txt").write_text("base\n")
     (repo / "working.txt").write_text("base\n")
+    (repo / "sample.txt").write_text("base\n")
+    (repo / "other.txt").write_text("base\n")
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(
         ["git", "commit", "-m", "base"],
@@ -58,6 +60,8 @@ def run_fake_claude_review(tmp_path, args, commit_head=False):
         )
 
     (repo / "working.txt").write_text("base\nworking tree change\n")
+    (repo / "sample.txt").write_text("base\nsample change\n")
+    (repo / "other.txt").write_text("base\nother change\n")
 
     fake_claude = fake_bin / "claude"
     fake_claude.write_text(
@@ -132,7 +136,7 @@ def test_runtime_has_required_commands():
     assert "--print" in text or "-p" in text
     assert "--path" in text
     assert "--paths" in text
-    assert "pathspec" in text
+    assert "pathArgs" in text
 
 
 def test_runtime_applies_pathspec_to_git_context_commands():
@@ -270,7 +274,7 @@ print("FAKE_CLAUDE_OK")
     assert result.returncode == 0, result.stderr
     prompt = (capture_dir / "prompt.txt").read_text()
     assert "base: main" in prompt
-    assert "path: sample.txt" in prompt
+    assert "paths: sample.txt" in prompt
     assert "<focus>focus on quoted risk</focus>" in prompt
 
 
@@ -310,6 +314,32 @@ def test_scope_branch_omits_working_tree_diff_from_prompt(tmp_path):
     assert "git diff --cached --stat" not in prompt
     assert "git diff --stat:\n" not in prompt
     assert "working tree change" not in prompt
+
+
+def test_scope_branch_without_base_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(tmp_path, ["--scope", "branch"])
+
+    assert result.returncode == 2
+    assert "--scope branch requires --base <ref>." in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_repeated_path_options_accumulate_pathspecs(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree", "--path", "sample.txt", "--path", "other.txt"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "FAKE_CLAUDE_OK" in result.stdout
+    assert "paths: sample.txt other.txt" in prompt
+    assert "git status --short --untracked-files=all -- sample.txt other.txt" in prompt
+    assert "sample.txt" in prompt
+    assert "sample change" in prompt
+    assert "other.txt" in prompt
+    assert "other change" in prompt
+    assert "working.txt" not in prompt
 
 
 def test_invalid_scope_exits_2_without_calling_claude(tmp_path):
