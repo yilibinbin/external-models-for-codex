@@ -98,6 +98,89 @@ print("FAKE_CLAUDE_OK")
     return result, prompt, argv
 
 
+def run_fake_claude_adversarial_review(tmp_path, args, commit_head=False):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "branch.txt").write_text("base\n")
+    (repo / "working.txt").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if commit_head:
+        (repo / "branch.txt").write_text("base\nbranch change\n")
+        subprocess.run(["git", "add", "branch.txt"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "branch change"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    (repo / "working.txt").write_text("base\nworking tree change\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+(capture / "prompt.txt").write_text(sys.argv[-1])
+print("FAKE_CLAUDE_ADVERSARIAL_OK")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run(
+        ["node", str(runtime), "adversarial-review", *args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    prompt = (capture_dir / "prompt.txt").read_text() if (capture_dir / "prompt.txt").exists() else ""
+    argv = json.loads((capture_dir / "argv.json").read_text()) if (capture_dir / "argv.json").exists() else []
+    return result, prompt, argv
+
+
 def run_fake_claude_multi_review(tmp_path, args, commit_head=False, fail_roles=None):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -671,7 +754,10 @@ def test_unknown_review_role_exits_2_without_calling_claude(tmp_path):
 
     assert result.returncode == 2
     assert 'Unknown review role "unknown"' in result.stderr
-    assert "Valid roles: adversarial, correctness, release, security, tests" in result.stderr
+    assert (
+        "Valid roles: adversarial, architect, correctness, minimalist, release, security, skeptic, tests"
+        in result.stderr
+    )
     assert prompt == ""
     assert argv == []
 
@@ -694,6 +780,75 @@ def test_repeated_review_role_options_accumulate_in_order(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "<review_roles>correctness, tests</review_roles>" in prompt
+
+
+def test_adversarial_review_prompt_requires_intent_verdict_and_lead_judgment(tmp_path):
+    result, prompt, argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["challenge whether the retry design is sufficient"],
+    )
+
+    assert result.returncode == 0
+    assert "FAKE_CLAUDE_ADVERSARIAL_OK" in result.stdout
+    assert "--permission-mode" in argv
+    assert "dontAsk" in argv
+    assert "--disallowedTools" in argv
+    assert "Edit,Write,MultiEdit,Bash" in argv
+    assert "<task>Run an adversarial read-only code and design review.</task>" in prompt
+    assert "## Intent" in prompt
+    assert "## Verdict: PASS | CONTESTED | REJECT" in prompt
+    assert "## Findings" in prompt
+    assert "## What Went Well" in prompt
+    assert "## Lead Judgment" in prompt
+    assert "working tree change" in prompt
+    assert "challenge whether the retry design is sufficient" in prompt
+
+
+def test_adversarial_review_accepts_custom_lens_subset(tmp_path):
+    result, prompt, _argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--adversarial-lenses", "skeptic,minimalist", "focus on complexity"],
+    )
+
+    assert result.returncode == 0
+    assert '<lens name="skeptic" label="Skeptic">' in prompt
+    assert '<lens name="minimalist" label="Minimalist">' in prompt
+    assert '<lens name="architect" label="Architect">' not in prompt
+    assert "focus on complexity" in prompt
+
+
+def test_adversarial_review_accepts_repeated_lens_flags(tmp_path):
+    result, prompt, _argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--adversarial-lens", "architect", "--adversarial-lens", "skeptic"],
+    )
+
+    assert result.returncode == 0
+    assert '<lens name="architect" label="Architect">' in prompt
+    assert '<lens name="skeptic" label="Skeptic">' in prompt
+    assert '<lens name="minimalist" label="Minimalist">' not in prompt
+
+
+def test_adversarial_review_rejects_unknown_lens_before_claude(tmp_path):
+    result, prompt, _argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--adversarial-lens", "optimist"],
+    )
+
+    assert result.returncode == 2
+    assert 'Unknown adversarial lens "optimist"' in result.stderr
+    assert prompt == ""
+
+
+def test_adversarial_review_rejects_multi_review_roles_before_claude(tmp_path):
+    result, prompt, _argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--roles", "skeptic,architect"],
+    )
+
+    assert result.returncode == 2
+    assert "--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review." in result.stderr
+    assert prompt == ""
 
 
 def test_multi_review_default_roles_run_once_each(tmp_path):
@@ -753,6 +908,22 @@ def test_multi_review_roles_subset_and_headers_keep_order(tmp_path):
     ]
     assert re.findall(r"^## Role: (.+)$", result.stdout, re.M) == ["correctness", "security"]
     assert "roles requested: correctness, security" in result.stdout
+
+
+def test_multi_review_supports_adversarial_lens_roles(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "skeptic,architect,minimalist"],
+    )
+
+    assert result.returncode == 0
+    assert len(prompts) == 3
+    assert "<role_name>skeptic</role_name>" in prompts[0]
+    assert "<role_name>architect</role_name>" in prompts[1]
+    assert "<role_name>minimalist</role_name>" in prompts[2]
+    assert "Challenge correctness and completeness." in prompts[0]
+    assert "Challenge structural fitness." in prompts[1]
+    assert "Challenge necessity and complexity." in prompts[2]
 
 
 def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):

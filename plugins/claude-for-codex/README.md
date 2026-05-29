@@ -130,6 +130,23 @@ Default roles:
 
 Use `--roles correctness,security` for an ordered comma-separated subset. Use repeated `--role` flags, such as `--role release --role adversarial`, when shell composition or incremental selection is clearer.
 
+## Enhanced Adversarial Review
+
+`adversarial-review` uses an intent-first verdict workflow inspired by cross-model adversarial review practice. Claude must infer the author's intent, review through the `skeptic`, `architect`, and `minimalist` lenses, and produce:
+
+- `## Intent`
+- `## Verdict: PASS | CONTESTED | REJECT`
+- `## Findings`
+- `## What Went Well`
+- `## Lead Judgment`
+
+Use lens selection when a review needs a narrower challenge:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --adversarial-lenses skeptic,minimalist --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles skeptic,architect,minimalist --base main
+```
+
 ## Stop Review Gate
 
 The plugin includes `hooks/hooks.json` so Codex can discover a Stop hook. Do not add a `hooks` field to `.codex-plugin/plugin.json`; standard hook files are discovered from `hooks/hooks.json`, and declaring them in the manifest can fail validation or duplicate-load the hook.

@@ -15,11 +15,22 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review "$AR
 
 Rules:
 - This is read-only.
-- Ask Claude to challenge the direction, not just inspect code style.
-- Preserve all findings exactly enough that the user can decide whether to act.
+- Claude must first infer and state the author's intent.
+- Claude reviews through adversarial lenses: `skeptic`, `architect`, and `minimalist`.
+- Claude must output `PASS`, `CONTESTED`, or `REJECT`.
+- Claude must include `Findings`, `What Went Well`, and `Lead Judgment`.
+- Codex must accept or reject Claude findings with its own judgment before making follow-up edits.
 - Do not apply fixes until the user chooses which findings to adopt.
 
-Useful focus examples:
+Arguments:
+- `--adversarial-lenses skeptic,architect,minimalist` selects an ordered lens subset.
+- `--adversarial-lens skeptic` adds one lens; repeat it to build an ordered lens list.
+- `--base <ref>` reviews `ref...HEAD`.
+- `--scope auto|working-tree|branch` controls git context.
+- `--path <path>` filters review context; repeat for multiple paths.
+- `--model <model>` and `--effort <level>` are passed to Claude CLI.
+
+Useful examples:
 - `--base main challenge the retry and rollback design`
-- `look for race conditions and hidden data-loss paths`
-- `question whether this abstraction is simpler than the existing pattern`
+- `--adversarial-lenses skeptic,minimalist look for correctness gaps and removable complexity`
+- `--adversarial-lens architect --adversarial-lens skeptic review the migration boundary`

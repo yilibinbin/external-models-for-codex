@@ -27,6 +27,11 @@ Default roles:
 - `release`: install, marketplace, versioning, documentation, and upgrade risks.
 - `adversarial`: assumptions, simpler alternatives, hidden costs, and failure modes.
 
+Additional opt-in adversarial lens roles:
+- `skeptic`: correctness, completeness, unproven assumptions, and breakable states.
+- `architect`: structure, boundaries, coupling, and design fitness.
+- `minimalist`: necessity, complexity, speculative abstraction, and deletable work.
+
 Arguments:
 - `--roles <a,b,c>` runs a comma-separated role list in order instead of the defaults.
 - `--role <name>` adds one role; repeat it to build an ordered role list.
@@ -39,3 +44,4 @@ Examples:
 - `--base main`
 - `--roles correctness,security --scope branch --base main`
 - `--role release --role adversarial check upgrade and rollback risk`
+- `--roles skeptic,architect,minimalist --base main`

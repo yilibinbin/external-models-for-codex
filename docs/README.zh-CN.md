@@ -48,6 +48,28 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `claude-review-gate`：配置可选 Stop Hook 审阅门禁。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
 
+## 增强对抗性审阅
+
+`claude-adversarial-review` 会要求 Claude 先识别作者意图，再用三个 lens 审阅：
+
+- `skeptic`：挑战正确性、完整性、未证明假设和可破坏状态。
+- `architect`：挑战结构适配性、边界、耦合和责任泄漏。
+- `minimalist`：挑战必要性、复杂度、过早抽象和可删除工作。
+
+输出必须包含：
+
+- `## Intent`
+- `## Verdict: PASS | CONTESTED | REJECT`
+- `## Findings`
+- `## What Went Well`
+- `## Lead Judgment`
+
+可以只选择部分 lens：
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --adversarial-lenses skeptic,minimalist --base main
+```
+
 ## 正确调用方式
 
 Claude for Codex 是 skills-and-hook 插件，不是 MCP/app tool 插件。因此 `tool_search` 查不到 `claude-for-codex` callable tool 是正常现象，不代表安装失败。
@@ -93,4 +115,3 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base m
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
-

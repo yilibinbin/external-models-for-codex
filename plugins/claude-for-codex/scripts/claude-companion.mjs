@@ -15,6 +15,36 @@ const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const REVIEW_GATE_ENV = "CLAUDE_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
+const ADVERSARIAL_LENSES = Object.freeze({
+  skeptic: {
+    label: "Skeptic",
+    directive: [
+      "Challenge correctness and completeness.",
+      "Ask what inputs, states, or sequences will break this.",
+      "Find unhandled error paths, race conditions, ordering dependencies, and assumptions that are not proven.",
+      "Map findings to: prove-it-works, fix-root-causes, serialize-shared-state-mutations."
+    ].join(" ")
+  },
+  architect: {
+    label: "Architect",
+    directive: [
+      "Challenge structural fitness.",
+      "Ask whether the design serves the stated goal or an assumed goal.",
+      "Find coupling points, boundary violations, responsibility leaks, and assumptions about scale, concurrency, or ordering.",
+      "Map findings to: boundary-discipline, foundational-thinking, redesign-from-first-principles."
+    ].join(" ")
+  },
+  minimalist: {
+    label: "Minimalist",
+    directive: [
+      "Challenge necessity and complexity.",
+      "Ask what can be deleted without losing the stated goal.",
+      "Find speculative abstractions, configuration without a concrete second use case, and thoroughness that does not improve the outcome.",
+      "Map findings to: subtract-before-you-add, outcome-oriented-execution, cost-aware-delegation."
+    ].join(" ")
+  }
+});
+const DEFAULT_ADVERSARIAL_LENSES = Object.freeze(["skeptic", "architect", "minimalist"]);
 const REVIEW_ROLES = Object.freeze({
   correctness: {
     directive: "Find bugs, regressions, edge cases, and behavioral contract breaks."
@@ -30,6 +60,15 @@ const REVIEW_ROLES = Object.freeze({
   },
   adversarial: {
     directive: "Challenge assumptions, simpler alternatives, hidden costs, and failure modes."
+  },
+  skeptic: {
+    directive: ADVERSARIAL_LENSES.skeptic.directive
+  },
+  architect: {
+    directive: ADVERSARIAL_LENSES.architect.directive
+  },
+  minimalist: {
+    directive: ADVERSARIAL_LENSES.minimalist.directive
   }
 });
 const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
@@ -200,6 +239,22 @@ function parseArgs(argv) {
       }
       parsed.roles = [...(parsed.roles ?? []), role];
       index += 1;
+    } else if (arg === "--adversarial-lenses") {
+      const lenses = readOptionValue(tokens, index, arg)
+        .split(",")
+        .map((lens) => lens.trim());
+      if (lenses.some((lens) => !lens)) {
+        throw new Error("Missing lens in --adversarial-lenses.");
+      }
+      parsed.adversarialLenses = [...(parsed.adversarialLenses ?? []), ...lenses];
+      index += 1;
+    } else if (arg === "--adversarial-lens") {
+      const lens = readOptionValue(tokens, index, arg).trim();
+      if (!lens) {
+        throw new Error("Missing value for --adversarial-lens.");
+      }
+      parsed.adversarialLenses = [...(parsed.adversarialLenses ?? []), lens];
+      index += 1;
     } else {
       parsed._.push(arg);
     }
@@ -229,6 +284,31 @@ function resolveReviewRoles(args) {
   return args.roles.map((name) => ({
     name,
     directive: REVIEW_ROLES[name].directive
+  }));
+}
+
+function resolveAdversarialLenses(args) {
+  const requested = args.adversarialLenses === undefined
+    ? DEFAULT_ADVERSARIAL_LENSES
+    : args.adversarialLenses;
+  if (!requested.length) {
+    throw new Error("Missing value for --adversarial-lenses.");
+  }
+
+  const validLenses = Object.keys(ADVERSARIAL_LENSES).sort();
+  const seenLenses = new Set();
+  for (const lens of requested) {
+    if (!Object.hasOwn(ADVERSARIAL_LENSES, lens)) {
+      throw new Error(`Unknown adversarial lens "${lens}". Valid lenses: ${validLenses.join(", ")}.`);
+    }
+    if (seenLenses.has(lens)) {
+      throw new Error(`Duplicate adversarial lens "${lens}".`);
+    }
+    seenLenses.add(lens);
+  }
+  return requested.map((name) => ({
+    name,
+    ...ADVERSARIAL_LENSES[name]
   }));
 }
 
@@ -489,6 +569,45 @@ function workingTreeFingerprint(cwd = process.cwd()) {
   return createHash("sha256").update(parts.join("\n--- claude-for-codex ---\n")).digest("hex");
 }
 
+function adversarialLensSection(lenses) {
+  return [
+    "<adversarial_lenses>",
+    ...lenses.map((lens) => [
+      `<lens name="${lens.name}" label="${lens.label}">`,
+      lens.directive,
+      "</lens>"
+    ].join("\n")),
+    "</adversarial_lenses>"
+  ].join("\n");
+}
+
+function adversarialVerdictContract() {
+  return [
+    "<output_contract>",
+    "## Intent",
+    "State what the author is trying to achieve. Challenge whether the work achieves that intent well, not whether the intent itself is desirable.",
+    "",
+    "## Verdict: PASS | CONTESTED | REJECT",
+    "Use PASS when there are no high-severity findings.",
+    "Use CONTESTED when high-severity findings exist but the evidence or lens agreement is mixed.",
+    "Use REJECT when high-severity findings have strong evidence or consensus across lenses.",
+    "",
+    "## Findings",
+    "Number findings by severity from high to low. For each finding include:",
+    "- **[severity]** file:line - description, evidence, and impact",
+    "- Lens: skeptic | architect | minimalist",
+    "- Principle: mapped principle name",
+    "- Recommendation: concrete action",
+    "",
+    "## What Went Well",
+    "List one to three things that appear sound, or say none observed.",
+    "",
+    "## Lead Judgment",
+    "For each finding, state accept or reject with a one-line rationale. Reject false positives, overreach, and style-only objections.",
+    "</output_contract>"
+  ].join("\n");
+}
+
 function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -497,10 +616,40 @@ function reviewPrompt(kind, args) {
     ? args.reviewRoles.map((role) => role.name).join(", ")
     : "";
 
+  if (adversarial) {
+    const adversarialLenses = args.resolvedAdversarialLenses ?? resolveAdversarialLenses(args);
+    return [
+      "<task>Run an adversarial read-only code and design review.</task>",
+      gitContext,
+      adversarialLensSection(adversarialLenses),
+      "<scale_guidance>",
+      "If the diff is small, emphasize Skeptic findings.",
+      "If the diff is medium, weigh Skeptic and Architect findings.",
+      "If the diff is large or spans many files, use Skeptic, Architect, and Minimalist lenses.",
+      "When explicit lenses are provided, use only those lenses.",
+      "Small means fewer than 50 changed lines across one or two files; medium means roughly 50 to 200 changed lines or three to five files; large means more than 200 changed lines or more than five files.",
+      "</scale_guidance>",
+      "<rules>",
+      "- Do not edit files.",
+      "- Do not suggest that you are about to apply fixes.",
+      "- First infer the author's intent from the request, focus text, git context, and changed files.",
+      "- Challenge whether the work achieves that intent well.",
+      "- Find real problems, not validation or style preferences.",
+      "- Ground every finding in concrete evidence from changed files or explicit git context.",
+      "- Include exact file paths and line numbers when available.",
+      "- Deduplicate overlapping lens findings.",
+      "- Apply lead judgment: accept strong findings and reject false positives or overreach.",
+      "- Use PASS only when there are no high-severity findings.",
+      "- Use CONTESTED when high-severity findings exist but lens evidence or agreement is mixed.",
+      "- Use REJECT when high-severity findings have strong evidence or consensus across lenses.",
+      "</rules>",
+      focus ? `<focus>${focus}</focus>` : "",
+      adversarialVerdictContract()
+    ].filter(Boolean).join("\n");
+  }
+
   return [
-    adversarial
-      ? "<task>Run an adversarial read-only code and design review.</task>"
-      : "<task>Run a read-only code review.</task>",
+    "<task>Run a read-only code review.</task>",
     gitContext,
     reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     "<rules>",
@@ -510,9 +659,7 @@ function reviewPrompt(kind, args) {
     "- Ground every finding in concrete evidence from changed files or explicit git context.",
     "- Include exact file paths and line numbers when available.",
     "- If there are no findings, say so and list residual risks briefly.",
-    adversarial
-      ? "- Challenge assumptions, tradeoffs, failure modes, hidden costs, and simpler alternatives."
-      : "- Focus on concrete bugs, regressions, missing tests, and maintainability risks.",
+    "- Focus on concrete bugs, regressions, missing tests, and maintainability risks.",
     "</rules>",
     focus ? `<focus>${focus}</focus>` : "",
     "<output_contract>",
@@ -818,6 +965,12 @@ function runClaudeTask(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    if (kind === "adversarial-review" && args.roles !== undefined) {
+      throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
+    }
+    if (kind === "adversarial-review") {
+      args.resolvedAdversarialLenses = resolveAdversarialLenses(args);
+    }
     if (args.roles !== undefined) {
       args.reviewRoles = resolveReviewRoles(args);
     }

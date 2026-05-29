@@ -48,6 +48,28 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
 
+## Enhanced Adversarial Review
+
+`claude-adversarial-review` asks Claude to infer the author's intent first, then review through three lenses:
+
+- `skeptic`: correctness, completeness, unproven assumptions, and breakable states.
+- `architect`: structural fitness, boundaries, coupling, and responsibility leaks.
+- `minimalist`: necessity, complexity, premature abstraction, and deletable work.
+
+The output must include:
+
+- `## Intent`
+- `## Verdict: PASS | CONTESTED | REJECT`
+- `## Findings`
+- `## What Went Well`
+- `## Lead Judgment`
+
+Use a lens subset when the review needs a narrower challenge:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --adversarial-lenses skeptic,minimalist --base main
+```
+
 ## Routing
 
 Claude for Codex is a skills-and-hook plugin, not an MCP/app tool plugin. It is expected that `tool_search` will not return a `claude-for-codex` callable tool. That is not an installation failure.
@@ -93,4 +115,3 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base m
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
-
