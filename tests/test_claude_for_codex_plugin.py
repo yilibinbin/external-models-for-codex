@@ -223,6 +223,10 @@ print("FAKE_CLAUDE_OK")
     prompt = (capture_dir / "prompt.txt").read_text()
     assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
     assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,MultiEdit,Bash"
+    assert "base requested: main" in prompt
+    assert "base effective: unavailable (HEAD missing)" in prompt
+    assert "base ignored because HEAD is unavailable" in prompt
+    assert "base: main" not in prompt
     assert "fatal: bad revision" not in prompt
     assert "main...HEAD" not in prompt or "branch diff skipped" in prompt
     assert "sample.txt" in prompt
@@ -273,7 +277,10 @@ print("FAKE_CLAUDE_OK")
 
     assert result.returncode == 0, result.stderr
     prompt = (capture_dir / "prompt.txt").read_text()
-    assert "base: main" in prompt
+    assert "base requested: main" in prompt
+    assert "base effective: unavailable (HEAD missing)" in prompt
+    assert "base ignored because HEAD is unavailable" in prompt
+    assert "base: main" not in prompt
     assert "paths: sample.txt" in prompt
     assert "<focus>focus on quoted risk</focus>" in prompt
 

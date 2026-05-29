@@ -197,7 +197,9 @@ function collectGitContext(options) {
     "<git_context>",
     `cwd: ${process.cwd()}`,
     `scope: ${scope}`,
-    `base: ${base ?? ""}`,
+    `base requested: ${base ?? ""}`,
+    `base effective: ${base ? headExists ? base : "unavailable (HEAD missing)" : ""}`,
+    base && !headExists ? "base ignored because HEAD is unavailable" : "",
     `paths: ${pathLabel}`,
     "",
     status
