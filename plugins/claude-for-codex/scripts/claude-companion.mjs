@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import {
   cancelJob,
   claimReservedJob,
@@ -966,6 +967,89 @@ function setupOptions(rawArgs) {
   return options;
 }
 
+function pluginRoot() {
+  return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+}
+
+function hookEventsFromManifest(manifest) {
+  const hooks = manifest && typeof manifest === "object" && manifest.hooks && typeof manifest.hooks === "object"
+    ? manifest.hooks
+    : manifest;
+  if (!hooks || typeof hooks !== "object" || Array.isArray(hooks)) {
+    return [];
+  }
+  return Object.keys(hooks);
+}
+
+function hookTrustedInCodexConfig(configText) {
+  if (!configText) {
+    return false;
+  }
+  return configText.split(/\r?\n/).some((line) => {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#") || !trimmed.includes("=")) {
+      return false;
+    }
+    const [rawKey, ...valueParts] = trimmed.split("=");
+    const key = rawKey.trim().replace(/^["']|["']$/g, "");
+    const value = valueParts.join("=").trim().replace(/^["']|["']$/g, "");
+    return key.includes("claude-for-codex")
+      && key.includes("hooks/hooks.json")
+      && key.includes(":stop:")
+      && value === "trusted";
+  });
+}
+
+function hookDiagnostics() {
+  const root = pluginRoot();
+  const manifestPath = path.join(root, "hooks", "hooks.json");
+  const manifestExists = fs.existsSync(manifestPath);
+  let events = [];
+  let manifestError = "";
+  if (manifestExists) {
+    try {
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+      events = hookEventsFromManifest(manifest);
+    } catch (error) {
+      manifestError = error?.message ? String(error.message) : String(error);
+    }
+  }
+
+  const configPath = path.join(os.homedir(), ".codex", "config.toml");
+  const codexConfigChecked = fs.existsSync(configPath);
+  let configText = "";
+  let codexConfigError = "";
+  if (codexConfigChecked) {
+    try {
+      configText = fs.readFileSync(configPath, "utf8");
+    } catch (error) {
+      codexConfigError = error?.message ? String(error.message) : String(error);
+    }
+  }
+
+  return {
+    manifest: "hooks/hooks.json",
+    manifestPath,
+    manifestExists,
+    manifestError,
+    events,
+    codexConfigPath: configPath,
+    codexConfigChecked,
+    codexConfigError,
+    trustedInCodexConfig: hookTrustedInCodexConfig(configText)
+  };
+}
+
+function mcpDiagnostics() {
+  const gitServerPath = path.join(pluginRoot(), "scripts", "lib", "mcp-git.mjs");
+  return {
+    gitServerPath,
+    gitServerExists: fs.existsSync(gitServerPath),
+    strictConfigSupported: true,
+    claudeFlags: ["--mcp-config", "--strict-mcp-config"]
+  };
+}
+
 function buildSetupReport(actionsTaken = []) {
   const cwd = process.cwd();
   const stateReport = readStateReport(cwd);
@@ -985,10 +1069,8 @@ function buildSetupReport(actionsTaken = []) {
       bypassEnv: REVIEW_GATE_ENV
     },
     jobCommands: ["jobs", "result", "cancel", "rescue"],
-    hooks: {
-      manifest: "hooks/hooks.json",
-      events: ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
-    },
+    hooks: hookDiagnostics(),
+    mcp: mcpDiagnostics(),
     actionsTaken
   };
 }
