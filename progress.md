@@ -56,6 +56,7 @@
 - Hardening Task 4 added opt-in real Claude permission-mode integration test and README verification instructions.
 - Hardening Task 4 spec review: APPROVED with a low tracking note; marked the hardening checklist item complete during Task 5.
 - Hardening Task 5 bumped plugin version to `0.1.1`, added `CHANGELOG.md`, and documented remote install, upgrade, verification, and release gate.
+- Hardening Task 5 quality review found README release checklist omitted the real Claude integration gate and used a non-portable absolute validator path; fixed both and changed remote install default to `owner/repo`.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -95,6 +96,7 @@
 | Hardening Task 4 real Claude integration | `RUN_CLAUDE_INTEGRATION=1` permission-mode check | `1 passed` | PASS |
 | Hardening Task 5 manifest version | `test_plugin_manifest_is_valid` expects `0.1.1` | `1 passed` | PASS |
 | Hardening Task 5 default pytest | Version and docs updates | `24 passed, 1 skipped` | PASS |
+| Hardening Task 5 README quality fix | Release checklist includes real integration and portable validator commands | pytest/plugin/skill validation passed | PASS |
 
 ### Errors
 | Error | Resolution |
