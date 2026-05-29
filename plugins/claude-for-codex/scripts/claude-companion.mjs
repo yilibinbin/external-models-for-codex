@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "plan", "status"]);
+const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const REVIEW_ROLES = Object.freeze({
   correctness: {
@@ -401,6 +401,33 @@ function reviewPrompt(kind, args) {
   ].filter(Boolean).join("\n");
 }
 
+function multiReviewRolePrompt(role, args, gitContext) {
+  const focus = args._.join(" ").trim();
+
+  return [
+    "<task>Run a role-specialized read-only code review.</task>",
+    `<role_name>${role.name}</role_name>`,
+    `<role_directive>${role.directive}</role_directive>`,
+    gitContext,
+    "<rules>",
+    "- Do not edit files.",
+    "- Do not suggest that you are about to apply fixes.",
+    "- Put findings first, ordered by severity.",
+    "- Ground every finding in concrete evidence from changed files or explicit git context.",
+    "- Include exact file paths and line numbers when available.",
+    "- If there are no findings, say so and list residual risks briefly.",
+    "- Focus only on this role's directive; do not broaden into unrelated review areas.",
+    "</rules>",
+    focus ? `<focus>${focus}</focus>` : "",
+    "<output_contract>",
+    "## Findings",
+    "- [Severity] file:line - issue, evidence, impact, suggested direction",
+    "## Open Questions",
+    "## Residual Risk",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
 function planPrompt(args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -480,6 +507,63 @@ function runClaudeTask(kind, rawArgs) {
   process.stdout.write(result.stdout);
 }
 
+function runClaudeMultiReview(rawArgs) {
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+    args.reviewRoles = args.roles === undefined
+      ? DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
+          name,
+          directive: REVIEW_ROLES[name].directive
+        }))
+      : resolveReviewRoles(args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  const scope = args.scope ?? "auto";
+  if (!VALID_SCOPES.has(scope)) {
+    console.error(`Invalid --scope "${scope}". Valid scopes: auto, working-tree, branch.`);
+    process.exit(2);
+  }
+  if (scope === "branch" && !args.base) {
+    console.error("--scope branch requires --base <ref>.");
+    process.exit(2);
+  }
+  args.scope = scope;
+
+  const gitContext = collectGitContext(args);
+  const results = [];
+  for (const role of args.reviewRoles) {
+    const prompt = multiReviewRolePrompt(role, args, gitContext);
+    const result = claudePrint(prompt, args);
+    results.push({ role, result });
+  }
+
+  const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
+  const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
+  const sections = [
+    "# Claude Multi-Agent Review",
+    ...results.map(({ role, result }) => [
+      `## Role: ${role.name}`,
+      result.stdout.trim() || "(no stdout)",
+      result.status === 0 ? "" : [
+        "",
+        `Role failed with exit status ${result.status}.`,
+        result.stderr || result.error ? `stderr: ${(result.stderr || result.error).trim()}` : ""
+      ].filter(Boolean).join("\n")
+    ].filter(Boolean).join("\n")),
+    "## Orchestration Summary",
+    `roles requested: ${args.reviewRoles.map((role) => role.name).join(", ")}`,
+    `roles succeeded: ${succeeded.length ? succeeded.join(", ") : "(none)"}`,
+    `roles failed: ${failed.length ? failed.join(", ") : "(none)"}`,
+    "exit policy: exits non-zero if any role fails; completed role output remains visible."
+  ];
+
+  process.stdout.write(`${sections.join("\n\n")}\n`);
+  process.exit(failed.length ? 1 : 0);
+}
+
 const [command, ...rawArgs] = process.argv.slice(2);
 
 if (!VALID_COMMANDS.has(command)) {
@@ -496,6 +580,9 @@ switch (command) {
     break;
   case "adversarial-review":
     runClaudeTask("adversarial-review", rawArgs);
+    break;
+  case "multi-review":
+    runClaudeMultiReview(rawArgs);
     break;
   case "plan":
     runClaudeTask("plan", rawArgs);

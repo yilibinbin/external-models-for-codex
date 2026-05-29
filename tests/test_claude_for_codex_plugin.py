@@ -94,6 +94,96 @@ print("FAKE_CLAUDE_OK")
     return result, prompt, argv
 
 
+def run_fake_claude_multi_review(tmp_path, args, commit_head=False):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "branch.txt").write_text("base\n")
+    (repo / "working.txt").write_text("base\n")
+    (repo / "sample.txt").write_text("base\n")
+    (repo / "other.txt").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if commit_head:
+        (repo / "branch.txt").write_text("base\nbranch change\n")
+        subprocess.run(["git", "add", "branch.txt"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "branch change"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    (repo / "working.txt").write_text("base\nworking tree change\n")
+    (repo / "sample.txt").write_text("base\nsample change\n")
+    (repo / "other.txt").write_text("base\nother change\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+call_index = len(list(capture.glob("argv-*.json")))
+(capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
+(capture / f"prompt-{call_index}.txt").write_text(sys.argv[-1])
+print(f"FAKE_CLAUDE_OK call {call_index}")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run(
+        ["node", str(runtime), "multi-review", *args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    prompts = [
+        path.read_text()
+        for path in sorted(capture_dir.glob("prompt-*.txt"), key=lambda p: int(p.stem.split("-")[1]))
+    ]
+    argvs = [
+        json.loads(path.read_text())
+        for path in sorted(capture_dir.glob("argv-*.json"), key=lambda p: int(p.stem.split("-")[1]))
+    ]
+    return result, prompts, argvs
+
+
 def parse_skill_frontmatter(text):
     assert text.startswith("---\n")
     end = text.find("\n---\n", 4)
@@ -130,7 +220,7 @@ def test_plugin_manifest_is_valid():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "review", "adversarial-review", "plan", "status"]:
+    for command in ["setup", "review", "adversarial-review", "multi-review", "plan", "status"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -467,6 +557,102 @@ def test_repeated_review_role_options_accumulate_in_order(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert "<review_roles>correctness, tests</review_roles>" in prompt
+
+
+def test_multi_review_default_roles_run_once_each(tmp_path):
+    result, prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(prompts) == 5
+    assert len(argvs) == 5
+    assert result.stdout.startswith("# Claude Multi-Agent Review")
+    for role in ["correctness", "security", "tests", "release", "adversarial"]:
+        assert f"## Role: {role}" in result.stdout
+        assert result.stdout.count(f"## Role: {role}") == 1
+        assert f"<role_name>{role}</role_name>" in "\n".join(prompts)
+    assert "roles requested: correctness, security, tests, release, adversarial" in result.stdout
+    assert "roles succeeded: correctness, security, tests, release, adversarial" in result.stdout
+    assert "roles failed: (none)" in result.stdout
+
+
+def test_multi_review_roles_subset_and_headers_keep_order(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert [re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1) for prompt in prompts] == [
+        "correctness",
+        "security",
+    ]
+    assert re.findall(r"^## Role: (.+)$", result.stdout, re.M) == ["correctness", "security"]
+    assert "roles requested: correctness, security" in result.stdout
+
+
+def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):
+    result, prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    for prompt, argv in zip(prompts, argvs):
+        assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+        assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+        assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,MultiEdit,Bash"
+        assert argv[argv.index("--output-format") + 1] == "text"
+        assert argv[-1] == prompt
+
+
+def test_multi_review_model_and_effort_apply_to_each_role(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--model", "sonnet-test", "--effort", "high"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "sonnet-test"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_multi_review_scope_branch_omits_working_tree_context_in_every_prompt(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--scope", "branch", "--base", "HEAD~1"],
+        commit_head=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    for prompt in prompts:
+        assert "scope: branch" in prompt
+        assert "git diff --stat HEAD~1...HEAD" in prompt
+        assert "git diff --name-only HEAD~1...HEAD" in prompt
+        assert "branch.txt" in prompt
+        assert "git status --short --untracked-files=all" not in prompt
+        assert "git diff --cached --stat" not in prompt
+        assert "working tree change" not in prompt
+
+
+def test_multi_review_repeated_path_options_filter_every_prompt(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--scope", "working-tree", "--path", "sample.txt", "--path", "other.txt"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    for prompt in prompts:
+        assert "paths: sample.txt other.txt" in prompt
+        assert "git status --short --untracked-files=all -- sample.txt other.txt" in prompt
+        assert "sample.txt" in prompt
+        assert "sample change" in prompt
+        assert "other.txt" in prompt
+        assert "other change" in prompt
+        assert "working.txt" not in prompt
 
 
 @pytest.mark.parametrize(
