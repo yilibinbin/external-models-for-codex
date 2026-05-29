@@ -31,6 +31,12 @@ Use `claude-adversarial-review` when the main risk is direction:
 - performance claims,
 - tests that may be overfit to implementation.
 
+## When To Use Multi Review
+
+Default to `claude-adversarial-review` for high-risk review. Opt in to `claude-multi-review` or the direct `multi-review` runtime only when a release gate, security-sensitive change, or similarly high-risk patch benefits from several role-specific read-only passes.
+
+`multi-review` fans out plugin-managed roles such as correctness, security, tests, release, and adversarial review. It is not Claude native background agents, it does not apply fixes, and Codex must reconcile the role findings before changing code or reporting residual risk.
+
 ## When To Use Claude Planning
 
 Use `claude-plan` before editing when:

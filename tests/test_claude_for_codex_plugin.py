@@ -836,6 +836,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
     assert {p.parent.name for p in skills} == {
         "claude-adversarial-review",
         "claude-collaboration-loop",
+        "claude-multi-review",
         "claude-plan",
         "claude-review",
     }

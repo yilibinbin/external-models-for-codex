@@ -58,6 +58,7 @@ codex plugin add claude-for-codex@claude-for-codex-local
 
 - `claude-review`: normal read-only review of current changes or `--base <ref>`.
 - `claude-adversarial-review`: steerable challenge review for design assumptions and failure modes.
+- `claude-multi-review`: opt-in role fan-out review across multiple read-only Claude perspectives.
 - `claude-plan`: independent Claude implementation plan for Codex reconciliation.
 - `claude-collaboration-loop`: full plan, reconcile, implement, adversarial review, report workflow.
 
@@ -68,9 +69,23 @@ Run from the repository root:
 ```bash
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles correctness,security --scope branch --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin and include tests
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
+
+`multi-review` runs several role-specialized Claude review prompts and prints one section per role plus an orchestration summary. This is role fan-out from the plugin runtime, not Claude native background agents. It is read-only; Codex must reconcile findings before any follow-up changes.
+
+Default roles:
+
+- `correctness`: bugs, regressions, edge cases, and behavioral contract breaks.
+- `security`: read-only safety, secrets exposure, injection risks, and unsafe command or path handling.
+- `tests`: missing, brittle, or overfit tests and release validation gaps.
+- `release`: install, marketplace, versioning, documentation, and upgrade risks.
+- `adversarial`: assumptions, simpler alternatives, hidden costs, and failure modes.
+
+Use `--roles correctness,security` for an ordered comma-separated subset. Use repeated `--role` flags, such as `--role release --role adversarial`, when shell composition or incremental selection is clearer.
 
 ## Verification
 
