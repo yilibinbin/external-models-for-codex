@@ -4,6 +4,8 @@ import pathlib
 import re
 import subprocess
 
+import pytest
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "claude-for-codex"
@@ -316,6 +318,25 @@ def test_invalid_scope_exits_2_without_calling_claude(tmp_path):
     assert result.returncode == 2
     assert 'Invalid --scope "everything"' in result.stderr
     assert "Valid scopes: auto, working-tree, branch" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_missing_scope_value_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(tmp_path, ["--scope"])
+
+    assert result.returncode == 2
+    assert "Missing value for --scope" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+@pytest.mark.parametrize("option", ["--base", "--path", "--paths", "--model", "--effort"])
+def test_missing_option_value_exits_2_without_calling_claude(tmp_path, option):
+    result, prompt, argv = run_fake_claude_review(tmp_path, [option, "--scope", "auto"])
+
+    assert result.returncode == 2
+    assert f"Missing value for {option}" in result.stderr
     assert prompt == ""
     assert argv == []
 

@@ -40,20 +40,33 @@ function parseArgs(argv) {
   for (let index = 0; index < tokens.length; index += 1) {
     const arg = tokens[index];
     if (arg === "--base") {
-      parsed.base = tokens[++index];
+      parsed.base = readOptionValue(tokens, index, arg);
+      index += 1;
     } else if (arg === "--scope") {
-      parsed.scope = tokens[++index];
+      parsed.scope = readOptionValue(tokens, index, arg);
+      index += 1;
     } else if (arg === "--path" || arg === "--paths") {
-      parsed.path = tokens[++index];
+      parsed.path = readOptionValue(tokens, index, arg);
+      index += 1;
     } else if (arg === "--model") {
-      parsed.model = tokens[++index];
+      parsed.model = readOptionValue(tokens, index, arg);
+      index += 1;
     } else if (arg === "--effort") {
-      parsed.effort = tokens[++index];
+      parsed.effort = readOptionValue(tokens, index, arg);
+      index += 1;
     } else {
       parsed._.push(arg);
     }
   }
   return parsed;
+}
+
+function readOptionValue(tokens, index, optionName) {
+  const value = tokens[index + 1];
+  if (!value || value.startsWith("--")) {
+    throw new Error(`Missing value for ${optionName}.`);
+  }
+  return value;
 }
 
 function normalizeArgv(argv) {
@@ -332,7 +345,13 @@ function printStatus() {
 }
 
 function runClaudeTask(kind, rawArgs) {
-  const args = parseArgs(rawArgs);
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
   const scope = args.scope ?? "auto";
   if (!VALID_SCOPES.has(scope)) {
     console.error(`Invalid --scope "${scope}". Valid scopes: auto, working-tree, branch.`);
