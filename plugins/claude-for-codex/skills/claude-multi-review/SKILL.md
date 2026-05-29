@@ -13,13 +13,25 @@ Run:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review "$ARGUMENTS"
 ```
 
+Background routing:
+- Foreground use runs the normal command above.
+- If `$ARGUMENTS` contains `--background`, first run:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job multi-review "$ARGUMENTS"
+```
+
+- Parse the returned JSON and dispatch exactly one forwarding subagent or child worker with the returned `workerCommand`.
+- The child runs `run-reserved-job` once through `workerCommand`; it must not inspect or reinterpret the repository.
+- The parent returns the job id immediately and tells the user to use `claude-result <job-id>`.
+
 Rules:
 - This is read-only.
 - Claude must not edit files or apply fixes.
 - Treat each role output as review findings for Codex to reconcile.
 - Codex remains responsible for deciding which findings to adopt, reject, or report as residual risk.
 - Preserve role headers, file paths, line numbers, uncertainty markers, failed-role diagnostics, and the orchestration summary.
-- Use `--background` for long multi-role reviews and retrieve the job with `claude-result`.
+- Use `--background` for long multi-role reviews through the background routing contract above and retrieve the job with `claude-result`.
 
 Default roles:
 - `correctness`: bugs, regressions, edge cases, and contract breaks.

@@ -1922,6 +1922,22 @@ assert.notEqual(reservedJobIdFromCommandTokens(tokens), "job-1");
     assert result.returncode == 0, result.stderr
 
 
+def test_background_skills_require_forwarding_subagent_contract():
+    skill_commands = {
+        "claude-review": "review",
+        "claude-adversarial-review": "adversarial-review",
+        "claude-multi-review": "multi-review",
+        "claude-rescue": "rescue",
+    }
+
+    for skill_name, command in skill_commands.items():
+        text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text()
+        assert f'reserve-job {command} "$ARGUMENTS"' in text
+        assert "run-reserved-job" in text
+        assert text.count("forwarding subagent") == 1
+        assert "must not inspect or reinterpret the repository" in text
+
+
 def test_session_and_user_prompt_hooks_write_state_and_report_unread_results(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     session_hook = PLUGIN / "hooks" / "session-lifecycle.mjs"

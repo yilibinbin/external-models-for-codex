@@ -13,6 +13,18 @@ Run:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" rescue "$ARGUMENTS"
 ```
 
+Background routing:
+- Foreground use runs the normal command above.
+- If `$ARGUMENTS` contains `--background`, first run:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job rescue "$ARGUMENTS"
+```
+
+- Parse the returned JSON and dispatch exactly one forwarding subagent or child worker with the returned `workerCommand`.
+- The child runs `run-reserved-job` once through `workerCommand`; it must not inspect or reinterpret the repository.
+- The parent returns the job id immediately and tells the user to use `claude-result <job-id>`.
+
 Rules:
 - Default mode is read-only.
 - Claude must diagnose and propose recovery steps, not edit files, unless `--write` is explicitly present.
