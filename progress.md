@@ -54,6 +54,8 @@
 - Fixed empty quoted token preservation and reject empty option values before Claude invocation.
 - Hardening Task 4 added fake `status` coverage for `claude agents --json --cwd <repo>`.
 - Hardening Task 4 added opt-in real Claude permission-mode integration test and README verification instructions.
+- Hardening Task 4 spec review: APPROVED with a low tracking note; marked the hardening checklist item complete during Task 5.
+- Hardening Task 5 bumped plugin version to `0.1.1`, added `CHANGELOG.md`, and documented remote install, upgrade, verification, and release gate.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -91,6 +93,8 @@
 | Hardening Task 3 full default pytest | Runtime/plugin pytest file after empty-token fix | `23 passed` | PASS |
 | Hardening Task 4 default pytest | Fake status test plus skipped real integration by default | `24 passed, 1 skipped` | PASS |
 | Hardening Task 4 real Claude integration | `RUN_CLAUDE_INTEGRATION=1` permission-mode check | `1 passed` | PASS |
+| Hardening Task 5 manifest version | `test_plugin_manifest_is_valid` expects `0.1.1` | `1 passed` | PASS |
+| Hardening Task 5 default pytest | Version and docs updates | `24 passed, 1 skipped` | PASS |
 
 ### Errors
 | Error | Resolution |

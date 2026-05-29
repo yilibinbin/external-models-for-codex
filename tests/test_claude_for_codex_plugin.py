@@ -122,7 +122,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.1.0"
+    assert data["version"] == "0.1.1"
     assert data["skills"] == "./skills/"
     assert data["interface"]["displayName"] == "Claude for Codex"
 

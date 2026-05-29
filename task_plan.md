@@ -53,8 +53,8 @@ Hardening execution in progress: Tasks 1-4 complete; Task 5 next
 | Git commits failed because user.name/user.email are not configured | Staged all final files and reported commit skipped. |
 
 ## Hardening Follow-Up
-- [ ] Implement real `--scope` behavior.
-- [ ] Make no-HEAD `--base` behavior explicit.
-- [ ] Add status and real Claude integration tests.
-- [ ] Add release/upgrade documentation and `0.1.1` changelog.
+- [x] Implement real `--scope` behavior.
+- [x] Make no-HEAD `--base` behavior explicit.
+- [x] Add status and real Claude integration tests.
+- [x] Add release/upgrade documentation and `0.1.1` changelog.
 - [ ] Validate, tag, and push `v0.1.1`.

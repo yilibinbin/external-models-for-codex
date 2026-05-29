@@ -35,6 +35,23 @@ codex plugin marketplace add .
 
 Then install or enable `claude-for-codex` from the Codex plugin UI.
 
+## Remote Install
+
+```bash
+codex plugin marketplace add git@github.com:yilibinbin/claude-for-codex.git --ref main
+codex plugin add claude-for-codex@claude-for-codex-local
+```
+
+`claude-for-codex-local` is the stable marketplace id for this repository, even when installed from GitHub.
+
+## Upgrade
+
+```bash
+codex plugin marketplace upgrade claude-for-codex-local
+codex plugin remove claude-for-codex
+codex plugin add claude-for-codex@claude-for-codex-local
+```
+
 ## Skills
 
 - `claude-review`: normal read-only review of current changes or `--base <ref>`.
@@ -66,3 +83,12 @@ Run the opt-in real Claude CLI compatibility check when preparing a release:
 ```bash
 RUN_CLAUDE_INTEGRATION=1 python3 -m pytest tests/test_claude_for_codex_plugin.py::test_real_claude_permission_mode_when_enabled -q
 ```
+
+## Release Checklist
+
+1. Update `.codex-plugin/plugin.json` version.
+2. Update `CHANGELOG.md`.
+3. Run `python3 -m pytest -q`.
+4. Run `python3 /Users/fanghao/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py plugins/claude-for-codex`.
+5. Run all skill validators.
+6. Commit, tag, and push.

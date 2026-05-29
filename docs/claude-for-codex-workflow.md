@@ -50,3 +50,13 @@ Final Codex reports should include:
 - Claude findings adopted,
 - Claude findings rejected with reasons,
 - residual risks.
+
+## Release Gate
+
+Before pushing a new marketplace version:
+
+- run default pytest,
+- run Codex plugin validation,
+- run all skill validators,
+- run the opt-in Claude integration test when changing Claude CLI flags,
+- update `CHANGELOG.md` and plugin version together.
