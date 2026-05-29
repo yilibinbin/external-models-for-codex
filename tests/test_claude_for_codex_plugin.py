@@ -419,6 +419,49 @@ def test_repeated_path_options_accumulate_pathspecs(tmp_path):
     assert "working.txt" not in prompt
 
 
+def test_unknown_review_role_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--role", "unknown", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert 'Unknown review role "unknown"' in result.stderr
+    assert "Valid roles: adversarial, correctness, release, security, tests" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_comma_separated_review_roles_resolve_in_order(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "<review_roles>correctness, security</review_roles>" in prompt
+
+
+def test_repeated_review_role_options_accumulate_in_order(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--role", "correctness", "--role", "tests", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "<review_roles>correctness, tests</review_roles>" in prompt
+
+
+@pytest.mark.parametrize("option", ["--roles", "--role"])
+def test_missing_review_role_option_value_exits_2_without_calling_claude(tmp_path, option):
+    result, prompt, argv = run_fake_claude_review(tmp_path, [option, "--scope", "auto"])
+
+    assert result.returncode == 2
+    assert f"Missing value for {option}" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
 def test_invalid_scope_exits_2_without_calling_claude(tmp_path):
     result, prompt, argv = run_fake_claude_review(tmp_path, ["--scope", "everything"])
 

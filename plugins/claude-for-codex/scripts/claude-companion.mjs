@@ -5,6 +5,30 @@ import process from "node:process";
 
 const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "plan", "status"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
+const REVIEW_ROLES = Object.freeze({
+  correctness: {
+    directive: "Find bugs, regressions, edge cases, and behavioral contract breaks."
+  },
+  security: {
+    directive: "Review read-only safety, secrets exposure, injection risks, and unsafe command or path handling."
+  },
+  tests: {
+    directive: "Find missing, brittle, or overfit tests and release validation gaps."
+  },
+  release: {
+    directive: "Review install, marketplace, versioning, documentation, and upgrade risks."
+  },
+  adversarial: {
+    directive: "Challenge assumptions, simpler alternatives, hidden costs, and failure modes."
+  }
+});
+const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
+  "correctness",
+  "security",
+  "tests",
+  "release",
+  "adversarial"
+]);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -60,11 +84,45 @@ function parseArgs(argv) {
     } else if (arg === "--effort") {
       parsed.effort = readOptionValue(tokens, index, arg);
       index += 1;
+    } else if (arg === "--roles") {
+      const roles = readOptionValue(tokens, index, arg)
+        .split(",")
+        .map((role) => role.trim())
+        .filter(Boolean);
+      parsed.roles = [...(parsed.roles ?? []), ...roles];
+      index += 1;
+    } else if (arg === "--role") {
+      const role = readOptionValue(tokens, index, arg).trim();
+      if (!role) {
+        throw new Error("Missing value for --role.");
+      }
+      parsed.roles = [...(parsed.roles ?? []), role];
+      index += 1;
     } else {
       parsed._.push(arg);
     }
   }
   return parsed;
+}
+
+function resolveReviewRoles(args) {
+  if (args.roles === undefined) {
+    return [];
+  }
+  if (!args.roles.length) {
+    throw new Error("Missing value for --roles.");
+  }
+
+  const validRoles = Object.keys(REVIEW_ROLES).sort();
+  for (const role of args.roles) {
+    if (!Object.hasOwn(REVIEW_ROLES, role)) {
+      throw new Error(`Unknown review role "${role}". Valid roles: ${validRoles.join(", ")}.`);
+    }
+  }
+  return args.roles.map((name) => ({
+    name,
+    directive: REVIEW_ROLES[name].directive
+  }));
 }
 
 function readOptionValue(tokens, index, optionName) {
@@ -305,12 +363,16 @@ function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
   const adversarial = kind === "adversarial-review";
+  const reviewRoles = args.reviewRoles?.length
+    ? args.reviewRoles.map((role) => role.name).join(", ")
+    : "";
 
   return [
     adversarial
       ? "<task>Run an adversarial read-only code and design review.</task>"
       : "<task>Run a read-only code review.</task>",
     gitContext,
+    reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     "<rules>",
     "- Do not edit files.",
     "- Do not suggest that you are about to apply fixes.",
@@ -384,6 +446,9 @@ function runClaudeTask(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    if (args.roles !== undefined) {
+      args.reviewRoles = resolveReviewRoles(args);
+    }
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
