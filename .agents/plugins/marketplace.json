@@ -1,0 +1,20 @@
+{
+  "name": "claude-for-codex-local",
+  "interface": {
+    "displayName": "Claude for Codex Local"
+  },
+  "plugins": [
+    {
+      "name": "claude-for-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/claude-for-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

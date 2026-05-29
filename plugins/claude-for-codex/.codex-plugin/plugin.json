@@ -1,0 +1,35 @@
+{
+  "name": "claude-for-codex",
+  "version": "0.1.0",
+  "description": "Use Claude Code from Codex for read-only review, adversarial review, and planning.",
+  "author": {
+    "name": "fanghao"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude",
+    "codex",
+    "review",
+    "planning",
+    "multi-model"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Claude for Codex",
+    "shortDescription": "Claude review and planning workflows inside Codex.",
+    "longDescription": "Adds Codex skills that invoke Claude Code for normal code review, adversarial challenge review, plan critique, and multi-model collaboration loops.",
+    "developerName": "fanghao",
+    "category": "Productivity",
+    "capabilities": [
+      "Review",
+      "Planning",
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use Claude to review this branch.",
+      "Ask Claude to challenge this plan.",
+      "Run a Codex-Claude collaboration loop."
+    ],
+    "brandColor": "#4F46E5"
+  }
+}
