@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Expand Codex plugin page metadata with homepage, repository, developer URL, richer capabilities, and publishing prompts.
+- Add logo, composer icon, and product-page screenshot assets.
+- Add per-skill OpenAI agent metadata for clearer Codex skill presentation.
+- Document publishing metadata, safety model, and hook trust guidance in the README.
+- Document that Claude for Codex is a skills-and-hook plugin, not a `tool_search` callable tool.
+
 ## 0.3.0
 
 - Add opt-in Stop-time Claude review gate hook.

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Collaboration Loop"
+  short_description: "Run a Codex-Claude plan, review, and reconciliation loop"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to run a full Codex-Claude collaboration loop and reconcile Claude findings before final reporting."

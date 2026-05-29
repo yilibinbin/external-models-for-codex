@@ -3,33 +3,51 @@
   "version": "0.3.0",
   "description": "Use Claude Code from Codex for read-only review, adversarial review, and planning.",
   "author": {
-    "name": "fanghao"
+    "name": "fanghao",
+    "url": "https://github.com/yilibinbin"
   },
+  "homepage": "https://github.com/yilibinbin/claude-for-codex",
+  "repository": "https://github.com/yilibinbin/claude-for-codex",
   "license": "MIT",
   "keywords": [
     "claude",
     "codex",
     "review",
     "planning",
-    "multi-model"
+    "multi-model",
+    "code-review",
+    "hooks",
+    "multi-agent"
   ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Claude for Codex",
-    "shortDescription": "Claude review and planning workflows inside Codex.",
-    "longDescription": "Adds Codex skills that invoke Claude Code for normal code review, adversarial challenge review, plan critique, and multi-model collaboration loops.",
+    "shortDescription": "Claude Code reviews, planning, and stop-gate workflows for Codex.",
+    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, adversarial design critique, implementation planning, multi-role review fan-out, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
-      "Review",
-      "Planning",
-      "Interactive"
+      "Read-only Claude Code review",
+      "Adversarial review",
+      "Implementation planning",
+      "Multi-role review orchestration",
+      "Opt-in Stop hook gate",
+      "Codex-Claude collaboration"
     ],
     "defaultPrompt": [
-      "Use Claude to review this branch.",
-      "Ask Claude to challenge this plan.",
-      "Run a Codex-Claude collaboration loop."
+      "Use Claude to review the current git changes.",
+      "Ask Claude to challenge this implementation plan.",
+      "Run a multi-role Claude review across correctness, security, tests, release, and adversarial perspectives.",
+      "Enable the opt-in Claude Stop review gate for this repository.",
+      "Run a Codex-Claude collaboration loop and reconcile the findings."
     ],
-    "brandColor": "#4F46E5"
+    "websiteURL": "https://github.com/yilibinbin/claude-for-codex",
+    "brandColor": "#4F46E5",
+    "composerIcon": "assets/composer-icon.svg",
+    "logo": "assets/logo.svg",
+    "screenshots": [
+      "assets/review-workflow.svg",
+      "assets/stop-gate.svg"
+    ]
   }
 }

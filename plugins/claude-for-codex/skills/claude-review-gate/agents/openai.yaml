@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Review Gate"
+  short_description: "Configure the opt-in Claude Stop review gate"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to inspect or configure the opt-in Stop review gate for this repository."

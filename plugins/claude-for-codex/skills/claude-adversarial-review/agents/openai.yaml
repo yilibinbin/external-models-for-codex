@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Adversarial Review"
+  short_description: "Ask Claude to challenge assumptions and failure modes"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to challenge this implementation plan, assumptions, rollback path, and hidden failure modes."

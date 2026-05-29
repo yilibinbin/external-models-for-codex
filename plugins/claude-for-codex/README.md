@@ -2,6 +2,43 @@
 
 Codex plugin that invokes Claude Code for independent read-only review, adversarial review, and implementation planning.
 
+## Publishing Metadata
+
+This plugin is prepared for a Codex plugin page with:
+
+- Name: Claude for Codex
+- Category: Productivity
+- Developer: fanghao
+- License: MIT
+- Homepage: https://github.com/yilibinbin/claude-for-codex
+- Repository: https://github.com/yilibinbin/claude-for-codex
+- Marketplace id: `claude-for-codex-local`
+- Plugin id: `claude-for-codex`
+- Current version: `0.3.0`
+
+Published capabilities:
+
+- Read-only Claude Code review of working-tree or branch changes.
+- Adversarial review for assumptions, rollback risks, hidden failure modes, and simpler alternatives.
+- Claude implementation planning for Codex to reconcile before editing.
+- Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
+- Opt-in Stop hook review gate that blocks only on explicit Claude `BLOCK:` verdicts.
+- Codex-Claude collaboration loop for plan, review, reconcile, implement, and report workflows.
+
+Safety and operating model:
+
+- Review commands invoke Claude Code with read-only tool permissions.
+- Codex remains responsible for applying or rejecting Claude findings.
+- The Stop gate is disabled by default after installation.
+- Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
+- The Stop gate reviews current git working-tree changes, not an exact previous-turn file list.
+
+Important routing note:
+
+- Claude for Codex is a skills-and-hook plugin, not an MCP/app tool plugin.
+- `tool_search` only discovers callable tools exposed by MCP servers or apps, so it is expected not to return a `claude-for-codex` tool.
+- When this plugin is installed and enabled, Codex should route through the `claude-for-codex:*` skills, which run `scripts/claude-companion.mjs`; lack of a `tool_search` result is not an installation failure.
+
 ## Requirements
 
 - Codex CLI with plugin support
@@ -38,6 +75,7 @@ codex plugin marketplace add .
 ```
 
 Then install or enable `claude-for-codex` from the Codex plugin UI.
+After installing or upgrading, open Codex Settings > Hooks and trust or enable the `Claude for Codex` Stop hook if you want the opt-in review gate available.
 
 ## Remote Install
 
