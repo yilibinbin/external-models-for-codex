@@ -19,6 +19,7 @@ Rules:
 - Treat each role output as review findings for Codex to reconcile.
 - Codex remains responsible for deciding which findings to adopt, reject, or report as residual risk.
 - Preserve role headers, file paths, line numbers, uncertainty markers, failed-role diagnostics, and the orchestration summary.
+- Use `--background` for long multi-role reviews and retrieve the job with `claude-result`.
 
 Default roles:
 - `correctness`: bugs, regressions, edge cases, and contract breaks.
@@ -39,6 +40,8 @@ Arguments:
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
+- `--background` starts a tracked job and returns a job id.
+- `--wait` waits for a background job to finish before returning.
 
 Examples:
 - `--base main`

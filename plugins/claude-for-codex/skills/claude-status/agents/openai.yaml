@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Job Status"
+  short_description: "List tracked Claude for Codex jobs"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to list tracked Claude jobs for this workspace."

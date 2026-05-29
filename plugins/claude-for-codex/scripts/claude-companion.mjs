@@ -1,17 +1,29 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { cancelJob, createJob, finishJob, listJobs, markJobRunning, readJob, resultForJob, updateJob } from "./lib/jobs.mjs";
+import {
+  StateReadError,
+  canonicalWorkspaceRoot,
+  currentSessionFileForCwd,
+  getConfig,
+  readJson,
+  readStateReport,
+  setConfig,
+  stateFileForCwd,
+  turnBaselineFileForCwd
+} from "./lib/state.mjs";
+import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate"]);
+const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "__run-job"]);
+const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
-const STATE_VERSION = 1;
-const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const CLAUDE_CODE_PATH_ENV = "CLAUDE_CODE_PATH";
 const REVIEW_GATE_ENV = "CLAUDE_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -154,93 +166,6 @@ function hasClaude() {
   return runClaude(["--version"]).status === 0;
 }
 
-function canonicalWorkspaceRoot(cwd = process.cwd()) {
-  const rootResult = run("git", ["rev-parse", "--show-toplevel"], { cwd });
-  const candidate = rootResult.status === 0 ? rootResult.stdout.trim() : cwd;
-  const resolved = path.resolve(candidate || cwd);
-  try {
-    return fs.realpathSync.native(resolved);
-  } catch {
-    return resolved;
-  }
-}
-
-function stateDirForCwd(cwd = process.cwd()) {
-  const workspaceRoot = canonicalWorkspaceRoot(cwd);
-  const slug = (path.basename(workspaceRoot) || "workspace")
-    .replace(/[^a-zA-Z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "") || "workspace";
-  const hash = createHash("sha256").update(workspaceRoot).digest("hex").slice(0, 16);
-  const baseDir = process.env[PLUGIN_DATA_ENV]
-    ? path.join(process.env[PLUGIN_DATA_ENV], "state")
-    : path.join(os.homedir(), ".codex", "claude-for-codex", "state");
-  return path.join(baseDir, `${slug}-${hash}`);
-}
-
-function stateFileForCwd(cwd = process.cwd()) {
-  return path.join(stateDirForCwd(cwd), "state.json");
-}
-
-function defaultState() {
-  return {
-    version: STATE_VERSION,
-    config: {
-      reviewGateEnabled: false,
-      reviewGateMode: "multi-role"
-    }
-  };
-}
-
-function loadState(cwd = process.cwd()) {
-  const stateFile = stateFileForCwd(cwd);
-  if (!fs.existsSync(stateFile)) {
-    return defaultState();
-  }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(stateFile, "utf8"));
-    return {
-      ...defaultState(),
-      ...parsed,
-      config: {
-        ...defaultState().config,
-        ...(parsed.config ?? {})
-      }
-    };
-  } catch {
-    return defaultState();
-  }
-}
-
-function saveState(cwd, state) {
-  const stateDir = stateDirForCwd(cwd);
-  fs.mkdirSync(stateDir, { recursive: true });
-  const payload = {
-    version: STATE_VERSION,
-    config: {
-      ...defaultState().config,
-      ...(state.config ?? {})
-    }
-  };
-  const stateFile = stateFileForCwd(cwd);
-  const tmpFile = `${stateFile}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
-  fs.renameSync(tmpFile, stateFile);
-  return payload;
-}
-
-function setConfig(cwd, key, value) {
-  const state = loadState(cwd);
-  state.config = {
-    ...state.config,
-    [key]: value
-  };
-  return saveState(cwd, state);
-}
-
-function getConfig(cwd = process.cwd()) {
-  return loadState(cwd).config;
-}
-
 function hasHead() {
   return git(["rev-parse", "--verify", "HEAD"]).status === 0;
 }
@@ -303,6 +228,14 @@ function parseArgs(argv) {
       }
       parsed.adversarialLenses = [...(parsed.adversarialLenses ?? []), lens];
       index += 1;
+    } else if (arg === "--background") {
+      parsed.background = true;
+    } else if (arg === "--wait") {
+      parsed.wait = true;
+    } else if (arg === "--json" || arg === "--json-output") {
+      parsed.jsonOutput = true;
+    } else if (arg === "--write") {
+      parsed.write = true;
     } else {
       parsed._.push(arg);
     }
@@ -574,14 +507,22 @@ function claudePrint(prompt, options) {
   const args = [
     "--print",
     "--permission-mode",
-    "dontAsk",
-    "--tools",
-    "Read,Grep,Glob",
-    "--disallowedTools",
-    "Edit,Write,MultiEdit,Bash",
+    options.write ? "bypassPermissions" : "dontAsk",
+  ];
+
+  if (!options.write) {
+    args.push(
+      "--tools",
+      "Read,Grep,Glob",
+      "--disallowedTools",
+      "Edit,Write,MultiEdit,Bash"
+    );
+  }
+
+  args.push(
     "--output-format",
     "text"
-  ];
+  );
 
   if (options.model) {
     args.push("--model", options.model);
@@ -592,6 +533,74 @@ function claudePrint(prompt, options) {
 
   args.push(prompt);
   return runClaude(args, { timeout: options.timeout });
+}
+
+function stripBackgroundArgs(rawArgs) {
+  return normalizeArgv(rawArgs).filter((arg) => arg !== "--background" && arg !== "--wait");
+}
+
+function terminalJobStatus(status) {
+  return ["succeeded", "failed", "cancelled", "cancel_failed"].includes(status);
+}
+
+function startBackgroundJob(command, rawArgs) {
+  if (!BACKGROUND_CAPABLE_COMMANDS.has(command)) {
+    console.error(`${command} does not support --background.`);
+    process.exit(2);
+  }
+  const cwd = process.cwd();
+  const foregroundArgs = stripBackgroundArgs(rawArgs);
+  const session = readJson(currentSessionFileForCwd(cwd), {});
+  const job = createJob(cwd, {
+    command,
+    args: foregroundArgs,
+    cwd,
+    sessionId: session?.sessionId || ""
+  });
+  const child = spawn(process.execPath, [process.argv[1], "__run-job", job.id], {
+    cwd,
+    env: process.env,
+    detached: true,
+    stdio: "ignore"
+  });
+  child.unref();
+  updateJob(cwd, job.id, {
+    workerPid: child.pid
+  });
+  return readJob(cwd, job.id) ?? job;
+}
+
+function waitForJob(jobId) {
+  const started = Date.now();
+  const timeoutMs = 30 * 60 * 1000;
+  while (Date.now() - started < timeoutMs) {
+    const job = readJob(process.cwd(), jobId);
+    if (job && terminalJobStatus(job.status)) {
+      return job;
+    }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  }
+  return readJob(process.cwd(), jobId) ?? { id: jobId, status: "unknown" };
+}
+
+function maybeStartBackground(command, rawArgs) {
+  let parsed;
+  try {
+    parsed = parseArgs(rawArgs);
+  } catch {
+    return false;
+  }
+  if (!parsed.background) {
+    return false;
+  }
+  const job = startBackgroundJob(command, rawArgs);
+  if (parsed.wait) {
+    const completed = waitForJob(job.id);
+    process.stdout.write(`${JSON.stringify({ status: completed.status, job: completed }, null, 2)}\n`);
+    process.exit(completed.status === "succeeded" ? 0 : 1);
+  }
+  process.stdout.write(`${JSON.stringify({ status: "started", job }, null, 2)}\n`);
+  process.exit(0);
 }
 
 function hasReviewableGitChanges(cwd = process.cwd()) {
@@ -656,6 +665,24 @@ function adversarialVerdictContract() {
   ].join("\n");
 }
 
+function adversarialJsonContract() {
+  return [
+    "<output_contract>",
+    "Return exactly one JSON object and no Markdown.",
+    "Schema:",
+    "{",
+    '  "verdict": "PASS | CONTESTED | REJECT",',
+    '  "summary": "short intent-aware judgment",',
+    '  "findings": [',
+    '    {"severity": "high|medium|low", "file": "path", "line": 1, "description": "issue", "evidence": "changed-file evidence", "recommendation": "action"}',
+    "  ],",
+    '  "next_steps": ["concrete next step"]',
+    "}",
+    "Use an empty findings array when there are no findings.",
+    "</output_contract>"
+  ].join("\n");
+}
+
 function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -692,7 +719,7 @@ function reviewPrompt(kind, args) {
       "- Use REJECT when high-severity findings have strong evidence or consensus across lenses.",
       "</rules>",
       focus ? `<focus>${focus}</focus>` : "",
-      adversarialVerdictContract()
+      args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
     ].filter(Boolean).join("\n");
   }
 
@@ -797,6 +824,31 @@ function planPrompt(args) {
   ].filter(Boolean).join("\n");
 }
 
+function rescuePrompt(args) {
+  const focus = args._.join(" ").trim();
+  const gitContext = collectGitContext(args);
+
+  return [
+    "<task>Diagnose a stuck or failed Codex implementation from Claude's independent read-only perspective.</task>",
+    gitContext,
+    "<rules>",
+    args.write ? "- You may edit files because the user explicitly requested rescue --write." : "- Do not edit files.",
+    args.write ? "- Keep changes narrowly scoped and report every modified file." : "- Do not suggest that you are currently applying fixes.",
+    "- Identify the likely failure mode, missing context, or incorrect assumption.",
+    "- Prefer a short recovery checklist Codex can execute.",
+    "- Ground claims in current git state, changed files, and visible evidence.",
+    "- If evidence is insufficient, say exactly what Codex should inspect next.",
+    "</rules>",
+    focus ? `<rescue_request>${focus}</rescue_request>` : "",
+    "<output_contract>",
+    "## Diagnosis",
+    "## Evidence",
+    "## Recovery Steps",
+    "## Risks",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
 function setupOptions(rawArgs) {
   const tokens = normalizeArgv(rawArgs);
   const options = { enable: false, disable: false, mode: undefined };
@@ -824,7 +876,8 @@ function setupOptions(rawArgs) {
 
 function buildSetupReport(actionsTaken = []) {
   const cwd = process.cwd();
-  const config = getConfig(cwd);
+  const stateReport = readStateReport(cwd);
+  const config = stateReport.state.config;
   return {
     node: process.version,
     claudeAvailable: hasClaude(),
@@ -835,7 +888,14 @@ function buildSetupReport(actionsTaken = []) {
       enabled: Boolean(config.reviewGateEnabled),
       mode: config.reviewGateMode,
       stateFile: stateFileForCwd(cwd),
+      stateReadable: stateReport.readable,
+      stateError: stateReport.error,
       bypassEnv: REVIEW_GATE_ENV
+    },
+    jobCommands: ["jobs", "result", "cancel", "rescue"],
+    hooks: {
+      manifest: "hooks/hooks.json",
+      events: ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
     },
     actionsTaken
   };
@@ -867,7 +927,7 @@ function printSetup(rawArgs) {
   };
 
   console.log(JSON.stringify(report, null, 2));
-  process.exit(report.claudeAvailable && report.gitAvailable ? 0 : 1);
+  process.exit(report.claudeAvailable && report.gitAvailable && report.reviewGate.stateReadable ? 0 : 1);
 }
 
 function printStatus() {
@@ -950,7 +1010,16 @@ function runReviewGate(rawArgs) {
     warnGate(`unable to enter hook cwd "${cwd}"; allowing stop: ${error.message || String(error)}`);
     return;
   }
-  const config = getConfig(cwd);
+  let config;
+  try {
+    config = getConfig(cwd);
+  } catch (error) {
+    if (error instanceof StateReadError) {
+      warnGate(`state unreadable; allowing stop: ${error.message}`);
+      return;
+    }
+    throw error;
+  }
   if (!config.reviewGateEnabled) {
     return;
   }
@@ -964,6 +1033,10 @@ function runReviewGate(rawArgs) {
     return;
   }
   const diffHash = workingTreeFingerprint(cwd);
+  const baseline = readJson(turnBaselineFileForCwd(cwd), null);
+  if (baseline?.workingTreeFingerprint === diffHash) {
+    return;
+  }
   if (config.lastAllowedReviewGateDiffHash === diffHash) {
     return;
   }
@@ -1011,6 +1084,9 @@ function runReviewGate(rawArgs) {
 }
 
 function runClaudeTask(kind, rawArgs) {
+  if (maybeStartBackground(kind, rawArgs)) {
+    return;
+  }
   let args;
   try {
     args = parseArgs(rawArgs);
@@ -1037,17 +1113,43 @@ function runClaudeTask(kind, rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
-  const prompt = kind === "plan" ? planPrompt(args) : reviewPrompt(kind, args);
+  const prompt = kind === "plan" ? planPrompt(args) : kind === "rescue" ? rescuePrompt(args) : reviewPrompt(kind, args);
+  let rescueBefore = null;
+  if (kind === "rescue" && args.write) {
+    if (run("git", ["rev-parse", "--is-inside-work-tree"]).status !== 0) {
+      console.error("rescue --write requires a git repository.");
+      process.exit(2);
+    }
+    rescueBefore = workingTreeFingerprint(process.cwd());
+  }
   const result = claudePrint(prompt, args);
 
   if (result.status !== 0) {
     process.stderr.write(result.stderr || result.error || "claude --print failed\n");
     process.exit(result.status);
   }
+  if (kind === "adversarial-review" && args.jsonOutput) {
+    try {
+      const parsed = validateAdversarialJson(extractJsonObject(result.stdout));
+      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`Invalid structured adversarial output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
+  if (kind === "rescue" && args.write) {
+    const rescueAfter = workingTreeFingerprint(process.cwd());
+    process.stderr.write(`[claude-for-codex rescue] write-mode fingerprint ${rescueBefore} -> ${rescueAfter}\n`);
+  }
   process.stdout.write(result.stdout);
 }
 
 function runClaudeMultiReview(rawArgs) {
+  if (maybeStartBackground("multi-review", rawArgs)) {
+    return;
+  }
   let args;
   try {
     args = parseArgs(rawArgs);
@@ -1104,6 +1206,89 @@ function runClaudeMultiReview(rawArgs) {
   process.exit(failed.length ? 1 : 0);
 }
 
+function printJobs() {
+  process.stdout.write(`${JSON.stringify(listJobs(process.cwd()), null, 2)}\n`);
+}
+
+function printResult(rawArgs) {
+  const jobId = rawArgs[0];
+  if (!jobId) {
+    console.error("Usage: claude-companion.mjs result <job-id>");
+    process.exit(2);
+  }
+  let payload;
+  try {
+    payload = resultForJob(process.cwd(), jobId);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.exit(payload.status === "ok" ? 0 : 1);
+}
+
+function runCancel(rawArgs) {
+  const jobId = rawArgs[0];
+  if (!jobId) {
+    console.error("Usage: claude-companion.mjs cancel <job-id>");
+    process.exit(2);
+  }
+  let payload;
+  try {
+    payload = cancelJob(process.cwd(), jobId);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.exit(payload.status === "cancelled" ? 0 : 1);
+}
+
+function runJobWorker(rawArgs) {
+  const jobId = rawArgs[0];
+  if (!jobId) {
+    process.exit(2);
+  }
+  const job = readJob(process.cwd(), jobId);
+  if (!job) {
+    process.exit(1);
+  }
+  if (job.status === "cancelled") {
+    process.exit(0);
+  }
+  if (!BACKGROUND_CAPABLE_COMMANDS.has(job.command)) {
+    finishJob(process.cwd(), jobId, {
+      status: 2,
+      stdout: "",
+      stderr: `Unsupported background job command "${job.command}".`,
+      error: ""
+    });
+    process.exit(2);
+  }
+  markJobRunning(process.cwd(), jobId, process.pid);
+  const result = spawnSync(process.execPath, [process.argv[1], job.command, ...(job.args ?? [])], {
+    cwd: job.cwd || process.cwd(),
+    env: {
+      ...process.env,
+      CLAUDE_FOR_CODEX_JOB_WORKER: "1"
+    },
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: 30 * 60 * 1000
+  });
+  const current = readJob(process.cwd(), jobId);
+  if (current?.status === "cancelled") {
+    process.exit(0);
+  }
+  finishJob(process.cwd(), jobId, {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error ? String(result.error.message ?? result.error) : ""
+  });
+  process.exit(result.status ?? 1);
+}
+
 const [command, ...rawArgs] = process.argv.slice(2);
 
 if (!VALID_COMMANDS.has(command)) {
@@ -1127,10 +1312,25 @@ switch (command) {
   case "plan":
     runClaudeTask("plan", rawArgs);
     break;
+  case "rescue":
+    runClaudeTask("rescue", rawArgs);
+    break;
   case "status":
     printStatus();
     break;
   case "review-gate":
     runReviewGate(rawArgs);
+    break;
+  case "jobs":
+    printJobs();
+    break;
+  case "result":
+    printResult(rawArgs);
+    break;
+  case "cancel":
+    runCancel(rawArgs);
+    break;
+  case "__run-job":
+    runJobWorker(rawArgs);
     break;
 }

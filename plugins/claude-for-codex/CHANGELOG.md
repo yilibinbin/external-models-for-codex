@@ -1,6 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
+
+- Add repo-external state modules with atomic writes and explicit corrupt-state reporting.
+- Preserve existing runtime `status` diagnostics and add separate `jobs`, `result`, and `cancel` lifecycle commands with background worker persistence.
+- Add process identity validation for running job cancellation.
+- Add `rescue` runtime command and `claude-rescue` skill, with read-only default mode and explicit `--write` opt-in.
+- Add `claude-status`, `claude-result`, and `claude-cancel` skills for tracked job lifecycle workflows.
+- Add `SessionStart`, `SessionEnd`, and `UserPromptSubmit` hook scripts for session state, cleanup, turn baselines, and unread-result reminders.
+- Add structured `adversarial-review --json` parsing and validation.
+- Add bounded read-only git helper for plugin-owned git inspection without exposing Bash to Claude.
+- Keep Stop gate fail-open on corrupt state while setup reports unreadable state as an error.
+- Add rollback notes for disabling lifecycle hooks and returning to `0.3.x`.
 
 - Expand Codex plugin page metadata with homepage, repository, developer URL, richer capabilities, and publishing prompts.
 - Add logo, composer icon, and product-page screenshot assets.

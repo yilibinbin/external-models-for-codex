@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Job Result"
+  short_description: "Retrieve a tracked Claude job result"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to retrieve the result for a tracked Claude job id."

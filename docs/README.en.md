@@ -19,6 +19,8 @@ codex plugin remove claude-for-codex
 codex plugin add claude-for-codex@claude-for-codex-local
 ```
 
+Rollback from `0.4.0`: disable the review gate with `setup --disable-review-gate`, remove or downgrade the plugin, then remove stale trusted hook entries for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, or `Stop` if Codex Settings still points at missing files.
+
 Install from a local checkout:
 
 ```bash
@@ -53,6 +55,8 @@ If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set
 - `claude-adversarial-review`: challenge assumptions, tradeoffs, rollback paths, and hidden failure modes.
 - `claude-plan`: request an independent implementation plan before Codex edits.
 - `claude-multi-review`: run ordered role reviews for correctness, security, tests, release, and adversarial perspectives.
+- `claude-rescue`: ask Claude for read-only recovery diagnosis or explicit `--write` repair.
+- `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
 
@@ -78,6 +82,8 @@ Use a lens subset when the review needs a narrower challenge:
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --adversarial-lenses skeptic,minimalist --base main
 ```
 
+Use `--json` for a validated `{verdict, summary, findings, next_steps}` object. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job, and retrieve it with `claude-result`. `rescue --write` is explicit opt-in and records before/after git fingerprints.
+
 ## Routing
 
 Claude for Codex is a skills-and-hook plugin, not an MCP/app tool plugin. It is expected that `tool_search` will not return a `claude-for-codex` callable tool. That is not an installation failure.
@@ -87,6 +93,10 @@ Use the Codex skills instead:
 - `claude-for-codex:claude-review`
 - `claude-for-codex:claude-adversarial-review`
 - `claude-for-codex:claude-multi-review`
+- `claude-for-codex:claude-rescue`
+- `claude-for-codex:claude-status`
+- `claude-for-codex:claude-result`
+- `claude-for-codex:claude-cancel`
 - `claude-for-codex:claude-plan`
 - `claude-for-codex:claude-review-gate`
 - `claude-for-codex:claude-collaboration-loop`
@@ -105,11 +115,12 @@ Disable it:
 node plugins/claude-for-codex/scripts/claude-companion.mjs setup --disable-review-gate
 ```
 
-After installing or upgrading, open Codex Settings > Hooks and trust or enable the `Claude for Codex` Stop hook.
+After installing or upgrading, open Codex Settings > Hooks and trust or enable the `Claude for Codex` hooks. `SessionStart`, `SessionEnd`, and `UserPromptSubmit` provide session tracking, unread-result reminders, and turn-baseline capture when supported by the local Codex runtime.
 
 ## Safety Model
 
 - Review workflows call Claude with read-only permissions.
+- Background jobs persist outside the repository under plugin data state.
 - Codex remains responsible for accepting or rejecting Claude findings.
 - The Stop gate blocks only when Claude explicitly returns `BLOCK:`.
 - Missing Claude, authentication failures, rate limits, timeouts, invalid output, or runtime failures fail open with warnings instead of blocking Codex.
@@ -120,6 +131,9 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs review --background --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs jobs
+node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```

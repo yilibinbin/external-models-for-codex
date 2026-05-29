@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Rescue"
+  short_description: "Ask Claude for read-only recovery diagnosis"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to run a read-only rescue diagnosis and recovery checklist."

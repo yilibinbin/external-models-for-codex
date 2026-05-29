@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Job Cancel"
+  short_description: "Cancel a tracked Claude for Codex job"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex to cancel a tracked Claude job only if the runtime reports safe cancellation."

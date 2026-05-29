@@ -1,6 +1,6 @@
 # Claude for Codex
 
-Codex plugin that invokes Claude Code for independent read-only review, adversarial review, and implementation planning.
+Codex plugin that invokes Claude Code for independent read-only review, adversarial review, implementation planning, rescue diagnosis, and tracked job workflows.
 
 ## Publishing Metadata
 
@@ -14,20 +14,25 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/claude-for-codex
 - Marketplace id: `claude-for-codex-local`
 - Plugin id: `claude-for-codex`
-- Current version: `0.3.0`
+- Current version: `0.4.0`
 
 Published capabilities:
 
 - Read-only Claude Code review of working-tree or branch changes.
 - Adversarial review for assumptions, rollback risks, hidden failure modes, and simpler alternatives.
 - Claude implementation planning for Codex to reconcile before editing.
+- Read-only Claude rescue diagnosis when Codex is stuck or validation is failing.
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
+- Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
+- Background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
+- Session/UserPrompt hooks for session state, turn baselines, and unread-result reminders.
 - Opt-in Stop hook review gate that blocks only on explicit Claude `BLOCK:` verdicts.
 - Codex-Claude collaboration loop for plan, review, reconcile, implement, and report workflows.
 
 Safety and operating model:
 
 - Review commands invoke Claude Code with read-only tool permissions.
+- Rescue is read-only by default; `rescue --write` is explicit opt-in and records git fingerprints before and after Claude runs.
 - Codex remains responsible for applying or rejecting Claude findings.
 - The Stop gate is disabled by default after installation.
 - Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
@@ -105,11 +110,25 @@ codex plugin remove claude-for-codex
 codex plugin add claude-for-codex@claude-for-codex-local
 ```
 
+## Rollback
+
+To roll back from `0.4.0` to a `0.3.x` install, first disable the review gate in each protected repository:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs setup --disable-review-gate
+```
+
+Then remove or downgrade the plugin through Codex. If Codex Settings > Hooks still shows trusted entries for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, or `Stop` that point at missing files, remove or disable those hook entries before continuing work. The repo-external state directory printed by `setup` may be deleted to reset gate/job/session state for that workspace.
+
 ## Skills
 
 - `claude-review`: normal read-only review of current changes or `--base <ref>`.
 - `claude-adversarial-review`: steerable challenge review for design assumptions and failure modes.
 - `claude-multi-review`: opt-in role fan-out review across multiple read-only Claude perspectives.
+- `claude-rescue`: read-only diagnosis by default, or explicit `--write` repair when the user asks Claude to modify files.
+- `claude-status`: list tracked Claude jobs for the current workspace.
+- `claude-result`: retrieve a tracked Claude job result by job id.
+- `claude-cancel`: cancel only when the runtime can safely validate the job state.
 - `claude-review-gate`: configure the opt-in Stop-time Claude review gate.
 - `claude-plan`: independent Claude implementation plan for Codex reconciliation.
 - `claude-collaboration-loop`: full plan, reconcile, implement, adversarial review, report workflow.
@@ -123,11 +142,21 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles correctness,security --scope branch --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs rescue diagnose the failing release validation
+node plugins/claude-for-codex/scripts/claude-companion.mjs rescue --write fix the failing test
+node plugins/claude-for-codex/scripts/claude-companion.mjs review --background --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs jobs
+node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
+node plugins/claude-for-codex/scripts/claude-companion.mjs cancel <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin and include tests
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
 `multi-review` runs several role-specialized Claude review prompts and prints one section per role plus an orchestration summary. This is role fan-out from the plugin runtime, not Claude native background agents. It is read-only; Codex must reconcile findings before any follow-up changes.
+
+`jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
+
+`rescue --write` requires a git repository and runs Claude Code with write permissions. The runtime writes a before/after working-tree fingerprint to stderr; Codex must inspect the resulting diff before reporting success.
 
 Default roles:
 
@@ -155,6 +184,24 @@ Use lens selection when a review needs a narrower challenge:
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --adversarial-lenses skeptic,minimalist --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles skeptic,architect,minimalist --base main
 ```
+
+Use structured adversarial output when Codex needs a machine-checked verdict:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --json --base main
+```
+
+The JSON contract is `{ "verdict": "PASS|CONTESTED|REJECT", "summary": "...", "findings": [], "next_steps": [] }`. Mixed or fenced Claude output is parsed and validated before being returned.
+
+## Hooks And Background Jobs
+
+`hooks/hooks.json` registers `SessionStart`, `SessionEnd`, `UserPromptSubmit`, and `Stop` hooks. Session hooks record the active session and attempt safe cleanup of tracked queued/running jobs at session end. The prompt-submit hook records a turn baseline fingerprint and emits a short stderr reminder for unread terminal job results.
+
+If the local Codex runtime does not expose one of these hook events, the plugin degrades to explicit `jobs`, `result`, and `cancel` commands. The Stop hook remains opt-in through setup state.
+
+## Read-Only Git Boundary
+
+Claude review commands run with `Read,Grep,Glob` only and explicitly disallow `Edit,Write,MultiEdit,Bash`. Git context is collected by the plugin before invoking Claude. A bounded read-only helper exists at `scripts/lib/mcp-git.mjs` for `status`, `diff`, `diff-cached`, and `ls-files`; unsupported git operations are rejected.
 
 ## Stop Review Gate
 
