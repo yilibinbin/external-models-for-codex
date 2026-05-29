@@ -42,9 +42,9 @@ codex plugin marketplace add yilibinbin/claude-for-codex --ref main
 codex plugin add claude-for-codex@claude-for-codex-local
 ```
 
-`claude-for-codex-local` is the stable marketplace id for this repository, even when installed from GitHub.
+This repository currently keeps `claude-for-codex-local` as its marketplace id for compatibility with existing installs, even when installed from GitHub. If the marketplace id changes later, update the install and upgrade commands together.
 
-If your Codex setup requires an explicit Git URL, use `https://github.com/yilibinbin/claude-for-codex.git` or `git@github.com:yilibinbin/claude-for-codex.git`.
+The `yilibinbin/claude-for-codex` owner/repo form assumes this repository remains under that GitHub owner. If your Codex setup requires an explicit Git URL, use `https://github.com/yilibinbin/claude-for-codex.git` or `git@github.com:yilibinbin/claude-for-codex.git`.
 
 ## Upgrade
 
@@ -74,7 +74,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs status
 
 ## Verification
 
-Default tests use a fake Claude executable and do not require network or model access:
+Default tests use a fake Claude executable and do not require network or model access. They verify the read-only CLI arguments passed to Claude, but the actual installed Claude CLI is checked by the opt-in integration test below.
 
 ```bash
 python3 -m pytest -q

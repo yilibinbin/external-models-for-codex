@@ -48,6 +48,8 @@
 - Additional quality finding: with an existing HEAD but invalid `--base`, the prompt previously reported the requested base as effective. Fixed by validating the base ref and marking it unavailable before branch diff collection.
 - Additional parser finding: unmatched quoted argument strings were silently accepted. Fixed by failing argument normalization before Claude invocation.
 - Additional parser finding: empty quoted option values were dropped, allowing the next focus token to become the option value. Fixed by preserving empty quoted tokens and rejecting empty option values.
+- Final Claude adversarial review residual risk: default pytest uses fake Claude for speed and determinism; real installed Claude CLI compatibility is covered by the opt-in release gate, not the default suite.
+- Final Claude adversarial review documentation fix: marketplace id and GitHub owner are compatibility assumptions, so README now says they must be updated together if the remote or marketplace id changes.
 
 ## Resources
 - https://github.com/openai/codex-plugin-cc
