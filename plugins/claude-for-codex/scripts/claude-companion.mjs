@@ -69,7 +69,7 @@ function parseArgs(argv) {
 
 function readOptionValue(tokens, index, optionName) {
   const value = tokens[index + 1];
-  if (!value || value.startsWith("--")) {
+  if (value === undefined || value === "" || value.startsWith("--")) {
     throw new Error(`Missing value for ${optionName}.`);
   }
   return value;
@@ -87,15 +87,26 @@ function splitArgumentString(value) {
   let current = "";
   let quote = null;
   let escaping = false;
+  let tokenStarted = false;
+
+  function pushToken() {
+    if (tokenStarted) {
+      tokens.push(current);
+      current = "";
+      tokenStarted = false;
+    }
+  }
 
   for (const char of value) {
     if (escaping) {
       current += char;
       escaping = false;
+      tokenStarted = true;
       continue;
     }
     if (char === "\\") {
       escaping = true;
+      tokenStarted = true;
       continue;
     }
     if (quote) {
@@ -104,20 +115,20 @@ function splitArgumentString(value) {
       } else {
         current += char;
       }
+      tokenStarted = true;
       continue;
     }
     if (char === "\"" || char === "'") {
       quote = char;
+      tokenStarted = true;
       continue;
     }
     if (/\s/.test(char)) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
+      pushToken();
       continue;
     }
     current += char;
+    tokenStarted = true;
   }
 
   if (escaping) {
@@ -126,9 +137,7 @@ function splitArgumentString(value) {
   if (quote) {
     throw new Error("Unmatched quote in arguments.");
   }
-  if (current) {
-    tokens.push(current);
-  }
+  pushToken();
   return tokens;
 }
 

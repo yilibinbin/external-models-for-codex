@@ -50,6 +50,8 @@
 - Hardening Task 2 quality review found one medium follow-up: with-HEAD invalid `--base` was still reported as effective.
 - Fixed invalid-base reporting by validating the base ref before branch diff collection; invalid bases are now marked unavailable and branch diff is skipped without fatal git output.
 - Hardening Task 3 implemented quoted argument edge coverage: double quotes, escaped spaces, and unmatched quote parse failure.
+- Hardening Task 3 quality review found empty quoted option values were dropped, allowing `--path "" focus` to misparse `focus` as the path.
+- Fixed empty quoted token preservation and reject empty option values before Claude invocation.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -83,6 +85,8 @@
 | Hardening Task 2 follow-up | Invalid base ref not reported effective | Targeted pytest passed | PASS |
 | Hardening Task 3 | Quoted argument parser edge tests | Targeted pytest passed | PASS |
 | Hardening Task 3 full file | Runtime/plugin pytest file | `22 passed` | PASS |
+| Hardening Task 3 empty option regression | Empty quoted `--path` exits before Claude | Targeted pytest passed | PASS |
+| Hardening Task 3 full default pytest | Runtime/plugin pytest file after empty-token fix | `23 passed` | PASS |
 
 ### Errors
 | Error | Resolution |
@@ -100,3 +104,4 @@
 | Test suite file name was not discovered by default pytest | Renamed to `tests/test_claude_for_codex_plugin.py`; default pytest now passes. |
 | With-HEAD invalid `--base` was reported as effective | Added base ref validation, unavailable-base prompt metadata, and fake-Claude regression test. |
 | Unterminated quoted argument was silently accepted | Splitter now exits with parse error before invoking Claude. |
+| Empty quoted option value shifted parsing to the next word | Splitter now preserves empty quoted tokens and option reader rejects empty values. |

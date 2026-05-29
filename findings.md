@@ -47,6 +47,7 @@
 - Non-breaking decision: keep marketplace id `claude-for-codex-local` for compatibility, but document it as the stable id even for remote GitHub installs.
 - Additional quality finding: with an existing HEAD but invalid `--base`, the prompt previously reported the requested base as effective. Fixed by validating the base ref and marking it unavailable before branch diff collection.
 - Additional parser finding: unmatched quoted argument strings were silently accepted. Fixed by failing argument normalization before Claude invocation.
+- Additional parser finding: empty quoted option values were dropped, allowing the next focus token to become the option value. Fixed by preserving empty quoted tokens and rejecting empty option values.
 
 ## Resources
 - https://github.com/openai/codex-plugin-cc

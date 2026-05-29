@@ -308,6 +308,18 @@ def test_unmatched_quote_exits_2_without_calling_claude(tmp_path):
     assert argv == []
 
 
+def test_empty_quoted_option_value_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ['--scope working-tree --path "" focus on empty path'],
+    )
+
+    assert result.returncode == 2
+    assert "Missing value for --path" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
 def test_invalid_base_ref_is_not_reported_effective(tmp_path):
     result, prompt, _argv = run_fake_claude_review(
         tmp_path,
