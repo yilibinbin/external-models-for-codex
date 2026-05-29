@@ -818,6 +818,8 @@ def test_real_claude_permission_mode_when_enabled():
             "Read,Grep,Glob",
             "--disallowedTools",
             "Edit,Write,MultiEdit,Bash",
+            "--effort",
+            "low",
             "--output-format",
             "text",
             "Return exactly: CLAUDE_DONTASK_OK",

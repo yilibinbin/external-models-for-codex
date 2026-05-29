@@ -32,6 +32,7 @@ Arguments:
 - `--role <name>` adds one role; repeat it to build an ordered role list.
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
+- `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
 
 Examples:
