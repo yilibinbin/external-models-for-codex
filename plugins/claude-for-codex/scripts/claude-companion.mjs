@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "plan", "status"]);
+const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -145,44 +146,63 @@ function safeResult(stdout) {
 }
 
 function collectGitContext(options) {
+  const scope = options.scope ?? "auto";
   const base = options.base;
   const pathspec = options.path;
   const pathArgs = pathspec ? ["--", pathspec] : [];
   const headExists = hasHead();
-  const status = git(["status", "--short", "--untracked-files=all", ...pathArgs]);
-  const stagedStat = git(["diff", "--cached", "--stat", ...pathArgs]);
-  const stagedDiff = git(["diff", "--cached", ...pathArgs]);
-  const unstagedStat = git(["diff", "--stat", ...pathArgs]);
-  const unstagedDiff = git(["diff", ...pathArgs]);
-  const branchStat = base
+  const includeWorkingTree = scope === "auto" || scope === "working-tree";
+  const includeBaseBranch = (scope === "auto" || scope === "branch") && Boolean(base);
+  const includeHeadNameOnly = scope === "auto" && !base;
+
+  const status = includeWorkingTree ? git(["status", "--short", "--untracked-files=all", ...pathArgs]) : null;
+  const stagedStat = includeWorkingTree ? git(["diff", "--cached", "--stat", ...pathArgs]) : null;
+  const stagedDiff = includeWorkingTree ? git(["diff", "--cached", ...pathArgs]) : null;
+  const unstagedStat = includeWorkingTree ? git(["diff", "--stat", ...pathArgs]) : null;
+  const unstagedDiff = includeWorkingTree ? git(["diff", ...pathArgs]) : null;
+  const branchStat = includeBaseBranch
     ? headExists
       ? git(["diff", "--stat", `${base}...HEAD`, ...pathArgs])
       : safeResult("(HEAD unavailable; branch diff skipped)")
     : null;
-  const branchNameOnly = base
+  const branchNameOnly = includeBaseBranch
     ? headExists
       ? git(["diff", "--name-only", `${base}...HEAD`, ...pathArgs])
-      : changedFilesFromStatus(status)
-    : headExists
+      : includeWorkingTree && status
+        ? changedFilesFromStatus(status)
+        : safeResult("(HEAD unavailable; branch name-only skipped)")
+    : includeHeadNameOnly && headExists
       ? git(["diff", "--name-only", "HEAD", ...pathArgs])
-      : changedFilesFromStatus(status);
+      : includeHeadNameOnly && status
+        ? changedFilesFromStatus(status)
+        : null;
 
   return [
     "<git_context>",
     `cwd: ${process.cwd()}`,
-    `scope: ${options.scope ?? "auto"}`,
+    `scope: ${scope}`,
     `base: ${base ?? ""}`,
     `path: ${pathspec ?? ""}`,
     "",
-    formatCommandResult(`git status --short --untracked-files=all${pathspec ? ` -- ${pathspec}` : ""}`, status),
+    status
+      ? formatCommandResult(`git status --short --untracked-files=all${pathspec ? ` -- ${pathspec}` : ""}`, status)
+      : "",
     "",
-    formatCommandResult(`git diff --cached --stat${pathspec ? ` -- ${pathspec}` : ""}`, stagedStat),
+    stagedStat
+      ? formatCommandResult(`git diff --cached --stat${pathspec ? ` -- ${pathspec}` : ""}`, stagedStat)
+      : "",
     "",
-    formatCommandResult(`git diff --cached${pathspec ? ` -- ${pathspec}` : ""}`, stagedDiff),
+    stagedDiff
+      ? formatCommandResult(`git diff --cached${pathspec ? ` -- ${pathspec}` : ""}`, stagedDiff)
+      : "",
     "",
-    formatCommandResult(`git diff --stat${pathspec ? ` -- ${pathspec}` : ""}`, unstagedStat),
+    unstagedStat
+      ? formatCommandResult(`git diff --stat${pathspec ? ` -- ${pathspec}` : ""}`, unstagedStat)
+      : "",
     "",
-    formatCommandResult(`git diff${pathspec ? ` -- ${pathspec}` : ""}`, unstagedDiff),
+    unstagedDiff
+      ? formatCommandResult(`git diff${pathspec ? ` -- ${pathspec}` : ""}`, unstagedDiff)
+      : "",
     "",
     branchStat
       ? formatCommandResult(
@@ -191,17 +211,21 @@ function collectGitContext(options) {
             : "branch diff skipped",
           branchStat
         )
-      : "branch diff:\n(empty)",
+      : scope === "auto"
+        ? "branch diff:\n(empty)"
+        : "",
     "",
-    base
+    branchNameOnly
+      ? base
       ? headExists
         ? formatCommandResult(`git diff --name-only ${base}...HEAD${pathspec ? ` -- ${pathspec}` : ""}`, branchNameOnly)
         : formatCommandResult("changed files from git status fallback", branchNameOnly)
-      : headExists
+      : includeHeadNameOnly && headExists
         ? formatCommandResult(`git diff --name-only HEAD${pathspec ? ` -- ${pathspec}` : ""}`, branchNameOnly)
-        : formatCommandResult("changed files from git status fallback", branchNameOnly),
+        : formatCommandResult("changed files from git status fallback", branchNameOnly)
+      : "",
     "</git_context>"
-  ].join("\n");
+  ].filter((line) => line !== "").join("\n");
 }
 
 function claudePrint(prompt, options) {
@@ -309,6 +333,12 @@ function printStatus() {
 
 function runClaudeTask(kind, rawArgs) {
   const args = parseArgs(rawArgs);
+  const scope = args.scope ?? "auto";
+  if (!VALID_SCOPES.has(scope)) {
+    console.error(`Invalid --scope "${scope}". Valid scopes: auto, working-tree, branch.`);
+    process.exit(2);
+  }
+  args.scope = scope;
   const prompt = kind === "plan" ? planPrompt(args) : reviewPrompt(kind, args);
   const result = claudePrint(prompt, args);
 

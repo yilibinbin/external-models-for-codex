@@ -9,6 +9,85 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "claude-for-codex"
 
 
+def run_fake_claude_review(tmp_path, args, commit_head=False):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@example.com"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test User"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo / "branch.txt").write_text("base\n")
+    (repo / "working.txt").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "base"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    if commit_head:
+        (repo / "branch.txt").write_text("base\nbranch change\n")
+        subprocess.run(["git", "add", "branch.txt"], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(
+            ["git", "commit", "-m", "branch change"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    (repo / "working.txt").write_text("base\nworking tree change\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+(capture / "prompt.txt").write_text(sys.argv[-1])
+print("FAKE_CLAUDE_OK")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run(
+        ["node", str(runtime), "review", *args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    prompt = (capture_dir / "prompt.txt").read_text() if (capture_dir / "prompt.txt").exists() else ""
+    argv = json.loads((capture_dir / "argv.json").read_text()) if (capture_dir / "argv.json").exists() else []
+    return result, prompt, argv
+
+
 def parse_skill_frontmatter(text):
     assert text.startswith("---\n")
     end = text.find("\n---\n", 4)
@@ -87,11 +166,8 @@ def test_runtime_avoids_head_name_only_diff_without_head():
         r'git\(\[\s*"rev-parse",\s*"--verify",\s*"HEAD"\s*\]\)',
         text,
     )
-    assert re.search(
-        r'headExists\s*\?\s*git\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)\s*:\s*changedFilesFromStatus\(status\)',
-        text,
-        re.DOTALL,
-    )
+    assert re.search(r'git\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)', text)
+    assert re.search(r'includeHeadNameOnly\s*&&\s*status\s*\?\s*changedFilesFromStatus\(status\)', text)
     assert "function changedFilesFromStatus" in text
     assert "changed files from git status fallback" in text
 
@@ -194,6 +270,54 @@ print("FAKE_CLAUDE_OK")
     assert "base: main" in prompt
     assert "path: sample.txt" in prompt
     assert "<focus>focus on quoted risk</focus>" in prompt
+
+
+def test_scope_working_tree_omits_branch_diff_from_prompt(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree", "--base", "HEAD~1"],
+        commit_head=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "FAKE_CLAUDE_OK" in result.stdout
+    assert "scope: working-tree" in prompt
+    assert "git status --short --untracked-files=all" in prompt
+    assert "git diff --cached --stat" in prompt
+    assert "git diff --stat" in prompt
+    assert "working tree change" in prompt
+    assert "git diff --stat HEAD~1...HEAD" not in prompt
+    assert "git diff --name-only HEAD~1...HEAD" not in prompt
+    assert "branch.txt" not in prompt
+
+
+def test_scope_branch_omits_working_tree_diff_from_prompt(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "branch", "--base", "HEAD~1"],
+        commit_head=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "FAKE_CLAUDE_OK" in result.stdout
+    assert "scope: branch" in prompt
+    assert "git diff --stat HEAD~1...HEAD" in prompt
+    assert "git diff --name-only HEAD~1...HEAD" in prompt
+    assert "branch.txt" in prompt
+    assert "git status --short --untracked-files=all" not in prompt
+    assert "git diff --cached --stat" not in prompt
+    assert "git diff --stat:\n" not in prompt
+    assert "working tree change" not in prompt
+
+
+def test_invalid_scope_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(tmp_path, ["--scope", "everything"])
+
+    assert result.returncode == 2
+    assert 'Invalid --scope "everything"' in result.stderr
+    assert "Valid scopes: auto, working-tree, branch" in result.stderr
+    assert prompt == ""
+    assert argv == []
 
 
 def test_all_skills_have_frontmatter_and_runtime_call():
