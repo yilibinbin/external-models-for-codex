@@ -1894,6 +1894,34 @@ time.sleep(30)
             worker.wait(timeout=5)
 
 
+def test_reserved_job_identity_parser_ignores_pre_subcommand_job_id():
+    process_module = (PLUGIN / "scripts" / "lib" / "process.mjs").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ reservedJobIdFromCommandTokens }} from {json.dumps(process_module)};
+
+const tokens = [
+  "node",
+  "claude-companion.mjs",
+  "--job-id",
+  "job-1",
+  "run-reserved-job",
+  "--job-id",
+  "job-123"
+];
+
+assert.equal(reservedJobIdFromCommandTokens(tokens), "job-123");
+assert.notEqual(reservedJobIdFromCommandTokens(tokens), "job-1");
+"""
+    result = subprocess.run(
+        [NODE, "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_session_and_user_prompt_hooks_write_state_and_report_unread_results(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     session_hook = PLUGIN / "hooks" / "session-lifecycle.mjs"

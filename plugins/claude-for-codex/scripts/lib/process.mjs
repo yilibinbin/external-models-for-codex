@@ -36,6 +36,15 @@ function tokenAfter(tokens, token) {
   return index >= 0 ? tokens[index + 1] : undefined;
 }
 
+export function reservedJobIdFromCommandTokens(tokens) {
+  const commandIndex = tokens.indexOf("run-reserved-job");
+  if (commandIndex < 0) {
+    return undefined;
+  }
+  const jobIdIndex = tokens.indexOf("--job-id", commandIndex + 1);
+  return jobIdIndex >= 0 ? tokens[jobIdIndex + 1] : undefined;
+}
+
 export function validateJobWorkerProcess(pid, jobId) {
   const identity = captureProcessIdentity(pid);
   if (!identity) {
@@ -55,7 +64,7 @@ export function validateJobWorkerProcess(pid, jobId) {
     return { ok: true, identity, signalPid: -pid };
   }
   if (tokens.includes("run-reserved-job")) {
-    if (tokenAfter(tokens, "--job-id") !== String(jobId)) {
+    if (reservedJobIdFromCommandTokens(tokens) !== String(jobId)) {
       return { ok: false, reason: "process command does not match the requested reserved job id", identity };
     }
     return { ok: true, identity, signalPid: pid };
