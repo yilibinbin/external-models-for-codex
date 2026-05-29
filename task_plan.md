@@ -4,7 +4,7 @@
 Build a Claude-for-Codex plugin package and workflow plan that mirrors OpenAI's Claude-side Codex plugin in the opposite direction: Codex can invoke Claude for adversarial review, planning, and complementary multi-model collaboration.
 
 ## Current Phase
-Post-release robustness testing complete
+Planning Claude multi-agent orchestration
 
 ## Phases
 
@@ -60,3 +60,4 @@ Post-release robustness testing complete
 - [x] Validate release candidate.
 - [x] Tag and push `v0.1.1`.
 - [x] Test Claude prompt hit behavior across text sizes and argument cases.
+- [x] Plan opt-in Claude multi-agent orchestration for a future feature release.

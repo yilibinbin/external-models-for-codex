@@ -28,6 +28,7 @@
 | Enforce read-only Claude review by tool restrictions | Runtime invokes Claude with `Read,Grep,Glob` only and disallows `Edit,Write,MultiEdit,Bash`, preventing shell-based mutation during reviews/plans. |
 | Split single `$ARGUMENTS` token in runtime | Codex skill snippets pass `"$ARGUMENTS"` as one shell token; runtime now normalizes this so flags such as `--base`, `--path`, `--model`, and `--effort` parse correctly. |
 | Use repo root for Codex marketplace add | Current Codex CLI accepts `codex plugin marketplace add .` for this repo-local marketplace layout, not the direct `.agents/plugins/marketplace.json` file path. |
+| Implement Claude multi-agent v1 as role fan-out | Current runtime has one safe `claude --print` path and no native dispatch API; role fan-out is deterministic, testable, and preserves existing single-agent commands. |
 
 ## Issues Encountered
 | Issue | Resolution |
@@ -50,6 +51,13 @@
 - Additional parser finding: empty quoted option values were dropped, allowing the next focus token to become the option value. Fixed by preserving empty quoted tokens and rejecting empty option values.
 - Final Claude adversarial review residual risk: default pytest uses fake Claude for speed and determinism; real installed Claude CLI compatibility is covered by the opt-in release gate, not the default suite.
 - Final Claude adversarial review documentation fix: marketplace id and GitHub owner are compatibility assumptions, so README now says they must be updated together if the remote or marketplace id changes.
+
+## Claude Multi-Agent Planning Findings
+- Existing Claude review commands are single-call `claude --print` flows through `claudePrint`; they do not spawn or coordinate multiple Claude agents.
+- Recommended v1 multi-agent implementation is an opt-in `multi-review` command that runs multiple role-specialized Claude calls sequentially and aggregates results deterministically.
+- Existing command defaults should remain unchanged to avoid surprising users and to preserve current tests.
+- Adding a new `claude-multi-review` skill requires updating `test_all_skills_have_frontmatter_and_runtime_call`, which currently asserts the exact four-skill set.
+- The largest ambiguity is terminology: role fan-out is not Claude Code native background-agent orchestration. Native agent dispatch should be researched separately if that is the desired target.
 
 ## Resources
 - https://github.com/openai/codex-plugin-cc
