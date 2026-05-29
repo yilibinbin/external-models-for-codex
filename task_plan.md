@@ -4,7 +4,7 @@
 Build a Claude-for-Codex plugin package and workflow plan that mirrors OpenAI's Claude-side Codex plugin in the opposite direction: Codex can invoke Claude for adversarial review, planning, and complementary multi-model collaboration.
 
 ## Current Phase
-Phase 5 complete
+Hardening plan complete; awaiting execution choice
 
 ## Phases
 
@@ -50,3 +50,10 @@ Phase 5 complete
 | `session-catchup.py` reports Codex session parsing is not implemented | Proceeded from freshly initialized planning files and current git state. |
 | Initial plugin-creator path lookup used `~/.codex/skills/plugin-creator/SKILL.md`, which does not exist | Read the actual system skill at `~/.codex/skills/.system/plugin-creator/SKILL.md`. |
 | Git commits failed because user.name/user.email are not configured | Staged all final files and reported commit skipped. |
+
+## Hardening Follow-Up
+- [ ] Implement real `--scope` behavior.
+- [ ] Make no-HEAD `--base` behavior explicit.
+- [ ] Add status and real Claude integration tests.
+- [ ] Add release/upgrade documentation and `0.1.1` changelog.
+- [ ] Validate, tag, and push `v0.1.1`.

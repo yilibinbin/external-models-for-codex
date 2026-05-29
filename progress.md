@@ -3,7 +3,7 @@
 ## Session: 2026-05-29
 
 ### Current Status
-- **Phase:** 5 complete - implementation validated and staged
+- **Phase:** hardening plan complete - awaiting execution choice
 - **Started:** 2026-05-29
 
 ### Actions Taken
@@ -41,6 +41,9 @@
 - Final whole-implementation review requested marketplace command and quoted `$ARGUMENTS` fixes; both were implemented and revalidated.
 - Final whole-implementation re-review approved with one medium discovery issue; renamed test file so default pytest discovers it.
 - Removed generated `tests/__pycache__` and cloned `research/` evidence folder before final staging.
+- Ran installed `claude-for-codex` adversarial review against the plugin.
+- Verified Claude review corrections locally: `dontAsk` is a valid permission mode and real Claude CLI accepted the read-only invocation.
+- Wrote hardening implementation plan to `docs/superpowers/plans/2026-05-29-claude-for-codex-hardening.md`.
 
 ### Test Results
 | Test | Expected | Actual | Status |
@@ -68,6 +71,8 @@
 | Codex plugin validator | Plugin manifest and structure valid | `Plugin validation passed` | PASS |
 | Skill validators | All four skills valid | `Skill is valid!` x4 | PASS |
 | Final implementation review | No blocking/high issues | APPROVED after final fixes | PASS |
+| Claude hardening review | Identify remaining bugs and gaps | Scope/no-HEAD/status/release/test gaps found | ACTIONABLE |
+| Real Claude `dontAsk` smoke | Confirm permission mode value | `CLAUDE_DONTASK_OK` | PASS |
 
 ### Errors
 | Error | Resolution |

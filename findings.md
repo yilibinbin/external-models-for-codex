@@ -37,6 +37,15 @@
 | Final review found quoted `$ARGUMENTS` did not parse as separate flags | Added shell-like single-argument splitting and behavioral test coverage. |
 | Final review found the test file was not discovered by default pytest | Renamed the suite to `tests/test_claude_for_codex_plugin.py` and verified default `pytest` runs it. |
 
+## Claude Hardening Review Findings
+- Confirmed: `--permission-mode dontAsk`, `--tools`, `--disallowedTools`, and `--effort` are valid in the installed Claude CLI; no fix needed for those flags.
+- Fix needed: `--scope` is currently parsed and printed but does not change git context selection.
+- Fix needed: no-HEAD repositories with `--base` fall back to status context without explicitly saying the requested base is unavailable.
+- Fix needed: `status` command lacks test coverage.
+- Fix needed: real Claude CLI behavior should have an opt-in integration test so future flag changes are caught.
+- Fix needed: release/upgrade process needs `CHANGELOG.md`, version bump, and documented validation steps.
+- Non-breaking decision: keep marketplace id `claude-for-codex-local` for compatibility, but document it as the stable id even for remote GitHub installs.
+
 ## Resources
 - https://github.com/openai/codex-plugin-cc
 - https://code.claude.com/docs/en/plugins
