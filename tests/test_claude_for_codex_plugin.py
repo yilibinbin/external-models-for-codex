@@ -496,7 +496,8 @@ def test_runtime_keeps_claude_tools_read_only():
     text = runtime.read_text()
     disallowed = re.search(r'"--disallowedTools",\s*"([^"]+)"', text)
     assert disallowed
-    assert '"Bash"' not in re.search(r"READ_ONLY_CLAUDE_TOOLS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
+    assert '"Bash"' not in re.search(r"READ_ONLY_BUILTIN_TOOLS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
+    assert '"Bash"' not in re.search(r"READ_ONLY_MCP_TOOLS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
     assert "Bash" in disallowed.group(1).split(",")
 
 
@@ -624,10 +625,9 @@ def test_read_only_review_invokes_claude_with_strict_mcp_config(tmp_path):
     argv = json.loads(argv_file.read_text(encoding="utf8"))
     assert "--mcp-config" in argv
     assert "--strict-mcp-config" in argv
-    allowed_tools = argv[argv.index("--tools") + 1].split(",")
-    assert "Read" in allowed_tools
-    assert "Grep" in allowed_tools
-    assert "Glob" in allowed_tools
+    builtin_tools = argv[argv.index("--tools") + 1].split(",")
+    assert builtin_tools == ["Read", "Grep", "Glob"]
+    allowed_tools = argv[argv.index("--allowedTools") + 1].split(",")
     assert "mcp__claude-for-codex-git__git_status" in allowed_tools
     assert "mcp__claude-for-codex-git__git_diff" in allowed_tools
     disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
@@ -640,6 +640,7 @@ def test_read_only_review_invokes_claude_with_strict_mcp_config(tmp_path):
     assert pathlib.Path(server["command"]).name.startswith("node")
     assert server["args"][-1] == "server"
     assert "mcp-git.mjs" in " ".join(server["args"])
+    assert server["cwd"] == str(repo)
     assert server["env"]["PWD"] == str(repo)
 
 

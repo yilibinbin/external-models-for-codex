@@ -22,6 +22,7 @@ export function createGitMcpConfig(cwd = process.cwd(), env = process.env) {
       "claude-for-codex-git": {
         command: process.execPath,
         args: [serverPath, "server"],
+        cwd,
         env: {
           PWD: cwd
         }

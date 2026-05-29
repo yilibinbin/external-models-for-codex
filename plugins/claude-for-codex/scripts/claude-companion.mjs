@@ -104,10 +104,12 @@ const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
   "release",
   "adversarial"
 ]);
-const READ_ONLY_CLAUDE_TOOLS = Object.freeze([
+const READ_ONLY_BUILTIN_TOOLS = Object.freeze([
   "Read",
   "Grep",
-  "Glob",
+  "Glob"
+]);
+const READ_ONLY_MCP_TOOLS = Object.freeze([
   "mcp__claude-for-codex-git__git_status",
   "mcp__claude-for-codex-git__git_diff",
   "mcp__claude-for-codex-git__git_diff_cached",
@@ -541,7 +543,9 @@ function claudePrint(prompt, options) {
     mcpConfig = createGitMcpConfig(process.cwd(), process.env);
     args.push(
       "--tools",
-      READ_ONLY_CLAUDE_TOOLS.join(","),
+      READ_ONLY_BUILTIN_TOOLS.join(","),
+      "--allowedTools",
+      READ_ONLY_MCP_TOOLS.join(","),
       "--disallowedTools",
       "Edit,Write,MultiEdit,Bash",
       "--mcp-config",
@@ -1061,7 +1065,7 @@ function mcpDiagnostics() {
     gitServerPath,
     gitServerExists: fs.existsSync(gitServerPath),
     strictConfigSupported: true,
-    claudeFlags: ["--mcp-config", "--strict-mcp-config"]
+    claudeFlags: ["--mcp-config", "--strict-mcp-config", "--allowedTools"]
   };
 }
 
