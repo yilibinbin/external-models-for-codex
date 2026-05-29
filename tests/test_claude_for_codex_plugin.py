@@ -425,10 +425,29 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.4.0"
+    assert data["version"] == "0.5.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
+
+
+def test_version_and_docs_describe_forwarding_and_mcp():
+    manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
+    assert manifest["version"] == "0.5.0"
+
+    readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
+    zh = (ROOT / "docs" / "README.zh-CN.md").read_text(encoding="utf8")
+    changelog = (PLUGIN / "CHANGELOG.md").read_text(encoding="utf8")
+
+    for text in (readme, en, changelog):
+        assert "host-forwarded" in text
+        assert "MCP" in text
+        assert "read-only Git" in text
+
+    assert "转发" in zh
+    assert "MCP" in zh
+    assert "只读 Git" in zh
 
 
 def test_plugin_stop_hook_manifest_is_autodiscoverable():

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 - 2026-05-30
+
+- Added host-forwarded background job reservations with `reserve-job` and `run-reserved-job`.
+- Added a bundled read-only Git MCP server and strict Claude MCP config wiring for review flows.
+- Added setup diagnostics for hook discovery/trust and MCP availability.
+- Documented upgrade and rollback behavior for the forwarded-job and MCP review path.
+
 ## 0.4.0
 
 - Add repo-external state modules with atomic writes and explicit corrupt-state reporting.

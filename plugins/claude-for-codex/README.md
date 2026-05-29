@@ -156,6 +156,10 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs status
 
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
 
+## Host-forwarded background jobs
+
+`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
+
 `rescue --write` requires a git repository and runs Claude Code with write permissions. The runtime writes a before/after working-tree fingerprint to stderr; Codex must inspect the resulting diff before reporting success.
 
 Default roles:
@@ -201,7 +205,7 @@ If the local Codex runtime does not expose one of these hook events, the plugin 
 
 ## Read-Only Git Boundary
 
-Claude review commands run with `Read,Grep,Glob` only and explicitly disallow `Edit,Write,MultiEdit,Bash`. Git context is collected by the plugin before invoking Claude. A bounded read-only helper exists at `scripts/lib/mcp-git.mjs` for `status`, `diff`, `diff-cached`, and `ls-files`; unsupported git operations are rejected.
+Claude review commands run with `Read,Grep,Glob` only and explicitly disallow `Edit,Write,MultiEdit,Bash`. Read-only Claude review also receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments; unsupported paths, refs, and operations are rejected before Git is invoked.
 
 ## Stop Review Gate
 
