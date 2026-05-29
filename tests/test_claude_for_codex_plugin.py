@@ -1932,10 +1932,19 @@ def test_background_skills_require_forwarding_subagent_contract():
 
     for skill_name, command in skill_commands.items():
         text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text()
+        normalized = re.sub(r"\s+", " ", text)
         assert f'reserve-job {command} "$ARGUMENTS"' in text
         assert "run-reserved-job" in text
         assert text.count("forwarding subagent") == 1
         assert "must not inspect or reinterpret the repository" in text
+        assert "workerCommand` JSON argv array" in text
+        assert "execute that array as argv" in text
+        assert "preserving element boundaries" in text
+        assert "quote every element" in text
+        assert "claude-result <job-id>" in text
+        assert "--wait` only applies to direct `--background` runtime use" in text
+        assert "not part of the host-forwarded `reserve-job` path" in text
+        assert re.search(r"waiting requires .*claude-result <job-id>", normalized)
 
 
 def test_session_and_user_prompt_hooks_write_state_and_report_unread_results(tmp_path):

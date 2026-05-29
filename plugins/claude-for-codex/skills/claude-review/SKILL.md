@@ -21,7 +21,7 @@ Background routing:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job review "$ARGUMENTS"
 ```
 
-- Parse the returned JSON and dispatch exactly one forwarding subagent or child worker with the returned `workerCommand`.
+- Parse the returned JSON and dispatch exactly one forwarding subagent or child worker with the returned `workerCommand` JSON argv array. The child must execute that array as argv while preserving element boundaries; if forced through a shell, quote every element.
 - The child runs `run-reserved-job` once through `workerCommand`; it must not inspect or reinterpret the repository.
 - The parent returns the job id immediately and tells the user to use `claude-result <job-id>`.
 
@@ -37,4 +37,4 @@ Arguments:
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--model <model>` and `--effort <level>` are passed to Claude CLI.
 - `--background` starts a tracked job and returns a job id.
-- `--wait` waits for a background job to finish before returning.
+- `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
