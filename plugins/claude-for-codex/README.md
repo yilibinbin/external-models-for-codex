@@ -12,7 +12,7 @@ This plugin is prepared for a Codex plugin page with:
 - License: MIT
 - Homepage: https://github.com/yilibinbin/claude-for-codex
 - Repository: https://github.com/yilibinbin/claude-for-codex
-- Marketplace id: `claude-for-codex-local`
+- Marketplace id: `external-models-for-codex-local`
 - Plugin id: `claude-for-codex`
 - Current version: `0.4.0`
 
@@ -95,19 +95,19 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 
 ```bash
 codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
 ```
 
-This repository currently keeps `claude-for-codex-local` as its marketplace id for compatibility with existing installs, even when installed from GitHub. If the marketplace id changes later, update the install and upgrade commands together.
+`external-models-for-codex-local` is the local marketplace for this repository's Codex plugins that connect to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
 
 The `yilibinbin/claude-for-codex` owner/repo form assumes this repository remains under that GitHub owner. If your Codex setup requires an explicit Git URL, use `https://github.com/yilibinbin/claude-for-codex.git` or `git@github.com:yilibinbin/claude-for-codex.git`.
 
 ## Upgrade
 
 ```bash
-codex plugin marketplace upgrade claude-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex-local
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
 ```
 
 ## Rollback

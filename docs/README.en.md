@@ -10,16 +10,16 @@ Install from GitHub:
 
 ```bash
 codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@claude-for-codex-local
-codex plugin add gemini-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 Upgrade an existing installation:
 
 ```bash
-codex plugin marketplace upgrade claude-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex-local
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
 ```
 
 Rollback from `0.4.0`: disable the review gate with `setup --disable-review-gate`, remove or downgrade the plugin, then remove stale trusted hook entries for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, or `Stop` if Codex Settings still points at missing files.
@@ -28,7 +28,8 @@ Install from a local checkout:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 ## Requirements
@@ -71,7 +72,7 @@ Install from the same local marketplace:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add gemini-for-codex@claude-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. v0.1.0 uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.

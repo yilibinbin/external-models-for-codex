@@ -1,7 +1,7 @@
 {
-  "name": "claude-for-codex-local",
+  "name": "external-models-for-codex-local",
   "interface": {
-    "displayName": "Claude for Codex Local"
+    "displayName": "External Models for Codex Local"
   },
   "plugins": [
     {

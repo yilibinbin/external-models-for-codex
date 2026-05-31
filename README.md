@@ -14,24 +14,25 @@ Remote install from GitHub:
 
 ```bash
 codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@claude-for-codex-local
-codex plugin add gemini-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 Upgrade an existing install:
 
 ```bash
-codex plugin marketplace upgrade claude-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex-local
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@claude-for-codex-local
-codex plugin add gemini-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 Local development install from this repository:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 ## Requirements

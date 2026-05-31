@@ -57,7 +57,7 @@ def test_gemini_plugin_manifest_is_valid_json():
 
 def test_marketplace_lists_gemini_for_codex():
     marketplace = json.loads((ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf8"))
-    assert marketplace["name"] == "claude-for-codex-local"
+    assert marketplace["name"] == "external-models-for-codex-local"
     plugins = {item["name"]: item for item in marketplace["plugins"]}
     assert plugins["gemini-for-codex"]["source"]["path"] == "./plugins/gemini-for-codex"
     assert plugins["gemini-for-codex"]["source"]["source"] == "local"
@@ -263,6 +263,6 @@ def test_gemini_plugin_files_do_not_ship_claude_residue():
             continue
         text = path.read_text(encoding="utf8")
         if path.name == "README.md":
-            text = text.replace("claude-for-codex-local", "")
+            text = text.replace("external-models-for-codex-local", "")
         for token in forbidden:
             assert token not in text, f"{token} residue in {path}"

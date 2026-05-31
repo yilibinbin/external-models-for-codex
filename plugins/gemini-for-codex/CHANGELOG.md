@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Rename the local repository marketplace to `external-models-for-codex-local` so it can host multiple Codex plugins backed by external model CLIs.
+
 ## 0.1.0 - 2026-05-31
 
 - Initial Gemini for Codex plugin.

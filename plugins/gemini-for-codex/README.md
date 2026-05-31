@@ -13,10 +13,10 @@ Codex plugin that invokes the local Gemini CLI for independent read-only review,
 
 ```bash
 codex plugin marketplace add .
-codex plugin add gemini-for-codex@claude-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
-The local marketplace id is currently `claude-for-codex-local` because this repository already publishes that local marketplace. Gemini plugin files avoid Claude naming residues; this install id is the compatibility exception.
+`external-models-for-codex-local` is the local marketplace for this repository's Codex plugins that connect to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
 
 ## Runtime Safety
 
