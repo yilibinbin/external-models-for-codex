@@ -2,21 +2,24 @@
 
 Claude for Codex 是一个 Codex 插件，用于让 Codex 调用本地 Claude Code CLI，获得独立的第二模型审阅和规划能力。
 
+Gemini for Codex 是同仓库的姊妹 Codex 插件，用于让 Codex 调用本地 Gemini CLI 做独立只读审阅和规划。v0.1.0 使用 Gemini plan mode 和有界 inline git context。
+
 ## 安装
 
 从 GitHub 远端安装：
 
 ```bash
 codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 升级已有安装：
 
 ```bash
-codex plugin marketplace upgrade claude-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex-local
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
 ```
 
 从 `0.4.0` 回滚：先用 `setup --disable-review-gate` 关闭审阅门禁，再移除或降级插件。如果 Codex Settings > Hooks 仍然保留指向缺失文件的 `SessionStart`、`SessionEnd`、`UserPromptSubmit` 或 `Stop` 信任项，请手动移除或禁用。
@@ -25,14 +28,16 @@ codex plugin add claude-for-codex@claude-for-codex-local
 
 ```bash
 codex plugin marketplace add .
-codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
 ## 依赖
 
 - 支持插件的 Codex CLI
 - 本地可执行的 Claude Code CLI：`claude`、`CLAUDE_CODE_PATH` 指向的可执行文件，或 `~/.local/bin/claude`
-- Node.js 18 或更新版本
+- Gemini for Codex 需要本地可执行的 Gemini CLI：`gemini`，或通过 `GEMINI_CLI_PATH` 指定
+- Node.js 20 或更新版本
 - 用于收集审阅上下文的 Git 仓库
 
 运行检查：
@@ -59,6 +64,18 @@ Claude CLI 查找顺序：
 - `claude-status`、`claude-result`、`claude-cancel`：跟踪后台 Claude job。
 - `claude-review-gate`：配置可选 Stop Hook 审阅门禁。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
+- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；v0.1.0 中 Gemini rescue 保持只读。
+
+## Gemini for Codex
+
+从同一个本地 marketplace 安装：
+
+```bash
+codex plugin marketplace add .
+codex plugin add gemini-for-codex@external-models-for-codex-local
+```
+
+Gemini 审阅使用 `gemini --approval-mode=plan --output-format=json --prompt`。v0.1.0 使用有界 inline git context，不依赖 Gemini MCP 或 Gemini extension。
 
 ## 增强对抗性审阅
 

@@ -1,0 +1,5 @@
+interface:
+  display_name: "Gemini Rescue"
+  short_description: "Ask Gemini for read-only recovery diagnosis"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Gemini for Codex to run a read-only rescue diagnosis and recovery checklist."

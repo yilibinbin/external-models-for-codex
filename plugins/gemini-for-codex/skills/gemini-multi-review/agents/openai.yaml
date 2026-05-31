@@ -1,0 +1,5 @@
+interface:
+  display_name: "Gemini Multi Review"
+  short_description: "Run multi-role Gemini review fan-out"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Gemini for Codex multi-review across correctness, security, tests, release, and adversarial perspectives."
