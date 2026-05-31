@@ -111,7 +111,7 @@ function run(command, args, options = {}) {
     encoding: "utf8",
     input: options.input,
     maxBuffer: 20 * 1024 * 1024,
-    timeout: options.timeout
+    timeout: options.timeout ?? 15 * 60 * 1000
   });
 
   return {
@@ -1278,13 +1278,13 @@ function runGeminiTask(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
-    if (kind === "adversarial-review" && args.roles !== undefined) {
+    if (kind !== "multi-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
     }
     if (kind === "adversarial-review") {
       args.resolvedAdversarialLenses = resolveAdversarialLenses(args);
     }
-    if (args.roles !== undefined) {
+    if (kind === "multi-review") {
       args.reviewRoles = resolveReviewRoles(args);
     }
     if (args.write) {

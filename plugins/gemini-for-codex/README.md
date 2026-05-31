@@ -6,7 +6,7 @@ Codex plugin that invokes the local Gemini CLI for independent read-only review,
 
 - Codex with plugin support
 - Gemini CLI available as `gemini`, or set `GEMINI_CLI_PATH`
-- Node.js 18 or newer
+- Node.js 20 or newer
 - Git repository for review context collection
 
 ## Install

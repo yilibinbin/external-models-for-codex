@@ -13,7 +13,14 @@ if (String(process.env.GEMINI_FOR_CODEX_REVIEW_GATE ?? "").toLowerCase() === "of
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const RUNTIME = path.resolve(SCRIPT_DIR, "..", "scripts", "gemini-companion.mjs");
 
-const input = process.stdin.isTTY ? "" : fs.readFileSync(0, "utf8");
+let input = "";
+if (!process.stdin.isTTY) {
+  try {
+    input = fs.readFileSync(0, "utf8");
+  } catch (error) {
+    process.stderr.write(`[gemini-for-codex review-gate] failed to read stdin; allowing stop: ${error.message}\n`);
+  }
+}
 const result = spawnSync(process.execPath, [RUNTIME, "review-gate"], {
   cwd: process.cwd(),
   env: process.env,

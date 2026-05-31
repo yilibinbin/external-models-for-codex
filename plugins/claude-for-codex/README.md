@@ -49,7 +49,7 @@ Important routing note:
 - Codex CLI with plugin support
 - Claude Code CLI available as `claude`, configured with `CLAUDE_CODE_PATH`, or installed at `~/.local/bin/claude`
 - Git repository for review scope collection
-- Node.js 18 or newer
+- Node.js 20 or newer
 
 ## Setup Check
 

@@ -37,7 +37,7 @@ codex plugin add gemini-for-codex@external-models-for-codex-local
 - 支持插件的 Codex CLI
 - 本地可执行的 Claude Code CLI：`claude`、`CLAUDE_CODE_PATH` 指向的可执行文件，或 `~/.local/bin/claude`
 - Gemini for Codex 需要本地可执行的 Gemini CLI：`gemini`，或通过 `GEMINI_CLI_PATH` 指定
-- Node.js 18 或更新版本
+- Node.js 20 或更新版本
 - 用于收集审阅上下文的 Git 仓库
 
 运行检查：

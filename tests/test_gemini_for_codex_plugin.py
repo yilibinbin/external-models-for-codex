@@ -28,7 +28,7 @@ def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=No
     script = tmp_path / "gemini"
     payload = json.dumps({"response": response, "stats": {}})
     if first_line:
-      payload = json.dumps({"response": first_line, "stats": {}})
+        payload = json.dumps({"response": first_line, "stats": {}})
     capture = f"fs.writeFileSync({json.dumps(str(capture_argv))}, JSON.stringify(process.argv.slice(2)));" if capture_argv else ""
     script.write_text(
         "#!/usr/bin/env node\n"
@@ -51,7 +51,10 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
     assert "mcp" not in manifest["keywords"]
+    assert manifest["homepage"] == "https://github.com/yilibinbin/claude-for-codex"
+    assert manifest["repository"] == "https://github.com/yilibinbin/claude-for-codex"
     assert manifest["interface"]["displayName"] == "Gemini for Codex"
+    assert manifest["interface"]["websiteURL"] == "https://github.com/yilibinbin/claude-for-codex"
     assert "lifecycle" not in manifest["interface"]["longDescription"].lower()
 
 
@@ -121,6 +124,20 @@ def test_gemini_rejects_write_mode_for_all_commands(tmp_path):
         result = subprocess.run([NODE, str(runtime), command, "--write"], cwd=repo, env=env, capture_output=True, text=True)
         assert result.returncode == 2
         assert "--write is not supported" in result.stderr
+
+
+def test_gemini_rejects_roles_outside_multi_review(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path))
+
+    for command in ["adversarial-review", "plan", "rescue", "review"]:
+        result = subprocess.run([NODE, str(runtime), command, "--roles", "security"], cwd=repo, env=env, capture_output=True, text=True)
+        assert result.returncode == 2
+        assert "--roles is only valid for multi-review" in result.stderr
 
 
 def test_review_prompt_includes_bounded_git_context(tmp_path):
@@ -263,6 +280,9 @@ def test_gemini_plugin_files_do_not_ship_claude_residue():
             continue
         text = path.read_text(encoding="utf8")
         if path.name == "README.md":
+            text = text.replace("claude-for-codex@external-models-for-codex-local", "")
             text = text.replace("external-models-for-codex-local", "")
+        if path.name == "plugin.json":
+            text = text.replace("https://github.com/yilibinbin/claude-for-codex", "")
         for token in forbidden:
             assert token not in text, f"{token} residue in {path}"

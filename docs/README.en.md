@@ -37,7 +37,7 @@ codex plugin add gemini-for-codex@external-models-for-codex-local
 - Codex CLI with plugin support
 - Claude Code CLI available as `claude`, configured with `CLAUDE_CODE_PATH`, or installed at `~/.local/bin/claude`
 - Gemini CLI available as `gemini`, or configured with `GEMINI_CLI_PATH`, for Gemini for Codex
-- Node.js 18 or newer
+- Node.js 20 or newer
 - A Git repository for review context collection
 
 Check runtime status:

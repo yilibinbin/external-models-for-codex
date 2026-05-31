@@ -6,8 +6,8 @@
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
   },
-  "homepage": "https://github.com/yilibinbin/gemini-for-codex",
-  "repository": "https://github.com/yilibinbin/gemini-for-codex",
+  "homepage": "https://github.com/yilibinbin/claude-for-codex",
+  "repository": "https://github.com/yilibinbin/claude-for-codex",
   "license": "MIT",
   "keywords": [
     "gemini",
@@ -45,7 +45,7 @@
       "Enable the opt-in Gemini Stop review gate for this repository.",
       "Run a Codex-Gemini collaboration loop and reconcile the findings."
     ],
-    "websiteURL": "https://github.com/yilibinbin/gemini-for-codex",
+    "websiteURL": "https://github.com/yilibinbin/claude-for-codex",
     "brandColor": "#4F46E5",
     "composerIcon": "assets/composer-icon.svg",
     "logo": "assets/logo.svg",
