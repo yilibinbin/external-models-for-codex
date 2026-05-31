@@ -1,0 +1,5 @@
+interface:
+  display_name: "Gemini Review Gate"
+  short_description: "Configure the opt-in Gemini Stop review gate"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Gemini for Codex to inspect or configure the opt-in Stop review gate for this repository."

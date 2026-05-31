@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">Gemini for Codex logo</title>
+  <desc id="desc">A rounded square plugin logo showing Codex and Gemini collaboration.</desc>
+  <rect width="1024" height="1024" rx="192" fill="#111827"/>
+  <circle cx="340" cy="512" r="168" fill="#4F46E5"/>
+  <circle cx="684" cy="512" r="168" fill="#F59E0B"/>
+  <path d="M414 512c0-62 50-112 112-112s112 50 112 112-50 112-112 112-112-50-112-112Z" fill="#F9FAFB"/>
+  <path d="M300 430h92v52h-92c-17 0-30 13-30 30s13 30 30 30h92v52h-92c-46 0-82-36-82-82s36-82 82-82Z" fill="#F9FAFB"/>
+  <path d="M632 430h92c46 0 82 36 82 82s-36 82-82 82h-92v-52h92c17 0 30-13 30-30s-13-30-30-30h-92v-52Z" fill="#111827"/>
+  <path d="M516 463l53 49-53 49-35-35 16-14-16-14 35-35Z" fill="#111827"/>
+</svg>

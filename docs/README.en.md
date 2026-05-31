@@ -2,6 +2,8 @@
 
 Claude for Codex is a Codex plugin that lets Codex call the local Claude Code CLI for independent review and planning.
 
+Gemini for Codex is the sibling Codex plugin that calls the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode and bounded inline git context in v0.1.0.
+
 ## Installation
 
 Install from GitHub:
@@ -9,6 +11,7 @@ Install from GitHub:
 ```bash
 codex plugin marketplace add yilibinbin/claude-for-codex --ref main
 codex plugin add claude-for-codex@claude-for-codex-local
+codex plugin add gemini-for-codex@claude-for-codex-local
 ```
 
 Upgrade an existing installation:
@@ -32,6 +35,7 @@ codex plugin add claude-for-codex@claude-for-codex-local
 
 - Codex CLI with plugin support
 - Claude Code CLI available as `claude`, configured with `CLAUDE_CODE_PATH`, or installed at `~/.local/bin/claude`
+- Gemini CLI available as `gemini`, or configured with `GEMINI_CLI_PATH`, for Gemini for Codex
 - Node.js 18 or newer
 - A Git repository for review context collection
 
@@ -59,6 +63,18 @@ If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set
 - `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only in v0.1.0.
+
+## Gemini for Codex
+
+Install from the same local marketplace:
+
+```bash
+codex plugin marketplace add .
+codex plugin add gemini-for-codex@claude-for-codex-local
+```
+
+Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. v0.1.0 uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
 
 ## Enhanced Adversarial Review
 

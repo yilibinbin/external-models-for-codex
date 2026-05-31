@@ -1,0 +1,16 @@
+{
+  "description": "Optional Stop-time Gemini review gate for Gemini for Codex.",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${GEMINI_PLUGIN_ROOT:-$CODEX_PLUGIN_ROOT}/hooks/gemini-review-gate.mjs\"",
+            "timeout": 900
+          }
+        ]
+      }
+    ]
+  }
+}

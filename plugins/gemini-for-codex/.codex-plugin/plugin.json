@@ -1,0 +1,57 @@
+{
+  "name": "gemini-for-codex",
+  "version": "0.1.0",
+  "description": "Use Gemini CLI from Codex for read-only review, adversarial review, planning, rescue, and tracked job workflows.",
+  "author": {
+    "name": "fanghao",
+    "url": "https://github.com/yilibinbin"
+  },
+  "homepage": "https://github.com/yilibinbin/gemini-for-codex",
+  "repository": "https://github.com/yilibinbin/gemini-for-codex",
+  "license": "MIT",
+  "keywords": [
+    "gemini",
+    "codex",
+    "review",
+    "planning",
+    "multi-model",
+    "code-review",
+    "hooks",
+    "multi-agent"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Gemini for Codex",
+    "shortDescription": "Gemini CLI reviews, planning, and stop-gate workflows for Codex.",
+    "longDescription": "Gemini for Codex connects Codex to the local Gemini CLI for independent read-only code review, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, background job tracking, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Gemini provides a separate reviewer or planner perspective. Gemini invocations use plan mode and bounded inline git context for review workflows, and the Stop gate fails open on Gemini runtime errors unless Gemini explicitly returns a blocking verdict.",
+    "developerName": "fanghao",
+    "category": "Productivity",
+    "capabilities": [
+      "Read-only Gemini CLI review",
+      "Adversarial review",
+      "Implementation planning",
+      "Read-only rescue diagnosis",
+      "Multi-role review orchestration",
+      "Structured adversarial verdicts",
+      "Tracked background job status/result/cancel commands",
+      "Opt-in Stop hook gate",
+      "Codex-Gemini collaboration"
+    ],
+    "defaultPrompt": [
+      "Use Gemini to review the current git changes.",
+      "Ask Gemini to challenge this implementation plan.",
+      "Run a multi-role Gemini review across correctness, security, tests, release, and adversarial perspectives.",
+      "Check tracked Gemini jobs and retrieve a stored result by job id.",
+      "Enable the opt-in Gemini Stop review gate for this repository.",
+      "Run a Codex-Gemini collaboration loop and reconcile the findings."
+    ],
+    "websiteURL": "https://github.com/yilibinbin/gemini-for-codex",
+    "brandColor": "#4F46E5",
+    "composerIcon": "assets/composer-icon.svg",
+    "logo": "assets/logo.svg",
+    "screenshots": [
+      "assets/review-workflow.svg",
+      "assets/stop-gate.svg"
+    ]
+  }
+}

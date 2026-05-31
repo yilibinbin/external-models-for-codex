@@ -1,0 +1,5 @@
+interface:
+  display_name: "Gemini Collaboration Loop"
+  short_description: "Run a Codex-Gemini plan, review, and reconciliation loop"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Gemini for Codex to run a full Codex-Gemini collaboration loop and reconcile Gemini findings before final reporting."

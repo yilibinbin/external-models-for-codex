@@ -1,0 +1,5 @@
+interface:
+  display_name: "Gemini Job Result"
+  short_description: "Retrieve a tracked Gemini job result"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Gemini for Codex to retrieve the result for a tracked Gemini job id."
