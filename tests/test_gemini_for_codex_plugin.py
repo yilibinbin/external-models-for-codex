@@ -8,6 +8,7 @@ import subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "gemini-for-codex"
 NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/Codex.app/Contents/Resources/node"
+NODE_DIR = str(pathlib.Path(NODE).resolve().parent)
 FAKE_GEMINI_HELP = (
     "Usage: gemini\n"
     "  -p, --prompt TEXT\n"
@@ -18,18 +19,12 @@ FAKE_GEMINI_HELP = (
 )
 
 
-def init_git_repo(repo):
-    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
-
-
-def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=None):
-    script = tmp_path / "gemini"
+def write_fake_gemini(script, response="GEMINI_OK", capture_argv=None, first_line=None):
     payload = json.dumps({"response": response, "stats": {}})
     if first_line:
         payload = json.dumps({"response": first_line, "stats": {}})
     capture = f"fs.writeFileSync({json.dumps(str(capture_argv))}, JSON.stringify(process.argv.slice(2)));" if capture_argv else ""
+    script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         "#!/usr/bin/env node\n"
         "const fs = require('fs');\n"
@@ -43,10 +38,20 @@ def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=No
     return script
 
 
+def init_git_repo(repo):
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=None):
+    return write_fake_gemini(tmp_path / "gemini", response=response, capture_argv=capture_argv, first_line=first_line)
+
+
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.1.1"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -75,6 +80,45 @@ def test_setup_reports_gemini_availability_with_fake_binary(tmp_path):
     fake = fake_gemini(tmp_path)
     env = os.environ.copy()
     env["GEMINI_CLI_PATH"] = str(fake)
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+
+    result = subprocess.run([NODE, str(runtime), "setup"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["geminiAvailable"] is True
+    assert payload["geminiCommand"] == str(fake)
+    assert payload["geminiPreflight"]["ok"] is True
+
+
+def test_setup_discovers_gemini_from_node_manager_paths_when_path_is_reduced(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    home = tmp_path / "home"
+    fake = write_fake_gemini(home / ".nvm" / "versions" / "node" / "v22.0.0" / "bin" / "gemini")
+    env = os.environ.copy()
+    env.pop("GEMINI_CLI_PATH", None)
+    env["HOME"] = str(home)
+    env["PATH"] = f"{NODE_DIR}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+
+    result = subprocess.run([NODE, str(runtime), "setup"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["geminiAvailable"] is True
+    assert payload["geminiCommand"] == str(fake)
+    assert payload["geminiPreflight"]["ok"] is True
+
+
+def test_setup_discovers_gemini_from_package_manager_prefix(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    prefix = tmp_path / "prefix"
+    fake = write_fake_gemini(prefix / "bin" / "gemini")
+    env = os.environ.copy()
+    env.pop("GEMINI_CLI_PATH", None)
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = f"{NODE_DIR}:/usr/bin:/bin:/usr/sbin:/sbin"
+    env["HOMEBREW_PREFIX"] = str(prefix)
     env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
 
     result = subprocess.run([NODE, str(runtime), "setup"], env=env, capture_output=True, text=True)

@@ -9,6 +9,13 @@ Codex plugin that invokes the local Gemini CLI for independent read-only review,
 - Node.js 20 or newer
 - Git repository for review context collection
 
+Gemini CLI resolution order:
+
+1. `GEMINI_CLI_PATH` when it points to an executable file.
+2. `gemini` from the current `PATH`.
+3. Common user and JavaScript toolchain locations, including `~/.local/bin`, `~/bin`, npm global prefix, pnpm, Volta, asdf, bun, deno, nvm, and fnm paths.
+4. Common package-manager/system locations such as the configured Homebrew prefix, `/opt/homebrew/bin`, `/usr/local/bin`, and `/usr/bin`.
+
 ## Install
 
 ```bash
@@ -26,7 +33,7 @@ Gemini review runs in headless JSON mode with:
 gemini --approval-mode=plan --output-format=json --prompt
 ```
 
-v0.1.0 sends bounded inline git context and does not depend on Gemini MCP or a Gemini extension. Gemini extension and MCP support are deferred until their current CLI configuration path is validated.
+v0.1.x sends bounded inline git context and does not depend on Gemini MCP or a Gemini extension. Gemini extension and MCP support are deferred until their current CLI configuration path is validated.
 
 ## Commands
 

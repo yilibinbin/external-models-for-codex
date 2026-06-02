@@ -150,6 +150,83 @@ function findOnPath(commandName) {
   return "";
 }
 
+function expandExecutableCandidates(pattern) {
+  const parts = path.resolve(pattern).split(path.sep);
+  const results = [];
+
+  function visit(index, current) {
+    if (index >= parts.length) {
+      results.push(current || path.sep);
+      return;
+    }
+    const part = parts[index];
+    if (!part) {
+      visit(index + 1, path.sep);
+      return;
+    }
+    if (part !== "*") {
+      visit(index + 1, path.join(current || path.sep, part));
+      return;
+    }
+    const dir = current || path.sep;
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory()) {
+        visit(index + 1, path.join(dir, entry.name));
+      }
+    }
+  }
+
+  visit(0, "");
+  return results;
+}
+
+function candidateGeminiCommands() {
+  const executableNames = process.platform === "win32" ? ["gemini.cmd", "gemini.exe", "gemini"] : ["gemini"];
+  const home = process.env.HOME || os.homedir();
+  const candidates = [];
+  const add = (candidate) => {
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  };
+  const addBin = (dir) => {
+    for (const name of executableNames) {
+      add(dir ? path.join(dir, name) : "");
+    }
+  };
+
+  addBin(path.join(home, ".local", "bin"));
+  addBin(path.join(home, "bin"));
+  addBin(path.join(home, ".npm-global", "bin"));
+  addBin(path.join(home, ".volta", "bin"));
+  addBin(path.join(home, ".asdf", "shims"));
+  addBin(path.join(home, ".bun", "bin"));
+  addBin(path.join(home, ".deno", "bin"));
+  addBin(process.env.PNPM_HOME);
+  addBin(process.env.NPM_CONFIG_PREFIX ? path.join(process.env.NPM_CONFIG_PREFIX, "bin") : "");
+  addBin(process.env.npm_config_prefix ? path.join(process.env.npm_config_prefix, "bin") : "");
+  addBin(process.env.HOMEBREW_PREFIX ? path.join(process.env.HOMEBREW_PREFIX, "bin") : "");
+
+  for (const pattern of [
+    path.join(home, ".nvm", "versions", "node", "*", "bin", "gemini"),
+    path.join(home, ".fnm", "node-versions", "*", "installation", "bin", "gemini"),
+    path.join(home, ".asdf", "installs", "nodejs", "*", "bin", "gemini")
+  ]) {
+    candidates.push(...expandExecutableCandidates(pattern));
+  }
+
+  for (const dir of ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"]) {
+    addBin(dir);
+  }
+  return [...new Set(candidates)];
+}
+
 function geminiCommand() {
   const configuredPath = process.env[GEMINI_CLI_PATH_ENV];
   if (configuredPath && isExecutable(configuredPath)) {
@@ -159,9 +236,10 @@ function geminiCommand() {
   if (pathCommand) {
     return pathCommand;
   }
-  const homeFallback = path.join(os.homedir(), ".local", "bin", "gemini");
-  if (isExecutable(homeFallback)) {
-    return homeFallback;
+  for (const candidate of candidateGeminiCommands()) {
+    if (isExecutable(candidate)) {
+      return candidate;
+    }
   }
   return "gemini";
 }
@@ -1288,10 +1366,10 @@ function runGeminiTask(kind, rawArgs) {
       args.reviewRoles = resolveReviewRoles(args);
     }
     if (args.write) {
-      throw new Error("Gemini for Codex is read-only in v0.1.0; --write is not supported.");
+      throw new Error("Gemini for Codex is read-only; --write is not supported.");
     }
     if (args.effort) {
-      throw new Error("--effort is not supported by Gemini for Codex v0.1.0.");
+      throw new Error("--effort is not supported by Gemini for Codex.");
     }
   } catch (error) {
     console.error(error.message || String(error));
@@ -1336,10 +1414,10 @@ function runGeminiMultiReview(rawArgs) {
   try {
     args = parseArgs(rawArgs);
     if (args.write) {
-      throw new Error("Gemini for Codex is read-only in v0.1.0; --write is not supported.");
+      throw new Error("Gemini for Codex is read-only; --write is not supported.");
     }
     if (args.effort) {
-      throw new Error("--effort is not supported by Gemini for Codex v0.1.0.");
+      throw new Error("--effort is not supported by Gemini for Codex.");
     }
     args.reviewRoles = args.roles === undefined
       ? DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({

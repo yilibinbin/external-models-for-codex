@@ -57,7 +57,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `claude-multi-review`: run role-based review across correctness, security, tests, release, and adversarial perspectives.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a plan, reconcile, implement, review, and report workflow.
-- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents that stay read-only in v0.1.0.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents that stay read-only in v0.1.x.
 
 This is a skills-and-hook plugin, not an MCP/app tool plugin. It is expected that `tool_search` will not expose a `claude-for-codex` callable tool. Codex should route through the `claude-for-codex:*` skills.
 

@@ -1,6 +1,6 @@
 {
   "name": "gemini-for-codex",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Use Gemini CLI from Codex for read-only review, adversarial review, planning, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",

@@ -2,7 +2,7 @@
 
 Claude for Codex is a Codex plugin that lets Codex call the local Claude Code CLI for independent review and planning.
 
-Gemini for Codex is the sibling Codex plugin that calls the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode and bounded inline git context in v0.1.0.
+Gemini for Codex is the sibling Codex plugin that calls the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode and bounded inline git context in v0.1.x.
 
 ## Installation
 
@@ -54,6 +54,13 @@ Claude CLI resolution order:
 
 If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set `CLAUDE_CODE_PATH` to the absolute executable path.
 
+Gemini CLI resolution order:
+
+1. `GEMINI_CLI_PATH` when it points to an executable file.
+2. `gemini` from the current `PATH`.
+3. Common user and JavaScript toolchain locations, including `~/.local/bin`, `~/bin`, npm global prefix, pnpm, Volta, asdf, bun, deno, nvm, and fnm paths.
+4. Common package-manager/system locations such as the configured Homebrew prefix, `/opt/homebrew/bin`, `/usr/local/bin`, and `/usr/bin`.
+
 ## Capabilities
 
 - `claude-review`: read-only Claude review of local git changes or branch diffs.
@@ -64,7 +71,7 @@ If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set
 - `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
-- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only in v0.1.0.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only in v0.1.x.
 
 ## Gemini for Codex
 
@@ -75,7 +82,7 @@ codex plugin marketplace add .
 codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
-Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. v0.1.0 uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
+Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. v0.1.x uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
 
 ## Enhanced Adversarial Review
 

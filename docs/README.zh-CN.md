@@ -2,7 +2,7 @@
 
 Claude for Codex 是一个 Codex 插件，用于让 Codex 调用本地 Claude Code CLI，获得独立的第二模型审阅和规划能力。
 
-Gemini for Codex 是同仓库的姊妹 Codex 插件，用于让 Codex 调用本地 Gemini CLI 做独立只读审阅和规划。v0.1.0 使用 Gemini plan mode 和有界 inline git context。
+Gemini for Codex 是同仓库的姊妹 Codex 插件，用于让 Codex 调用本地 Gemini CLI 做独立只读审阅和规划。v0.1.x 使用 Gemini plan mode 和有界 inline git context。
 
 ## 安装
 
@@ -54,6 +54,13 @@ Claude CLI 查找顺序：
 
 如果 `setup` 显示 `claudeAvailable: false`，但本机已安装 Claude，请将 `CLAUDE_CODE_PATH` 设置为 Claude 可执行文件的绝对路径。
 
+Gemini CLI 查找顺序：
+
+1. `GEMINI_CLI_PATH` 指向的可执行文件。
+2. 当前 `PATH` 中的 `gemini`。
+3. 常见用户级和 JavaScript 工具链路径，包括 `~/.local/bin`、`~/bin`、npm global prefix、pnpm、Volta、asdf、bun、deno、nvm 和 fnm 路径。
+4. 常见包管理器或系统路径，例如已配置的 Homebrew prefix、`/opt/homebrew/bin`、`/usr/local/bin` 和 `/usr/bin`。
+
 ## 能力
 
 - `claude-review`：对当前 git 变更或分支 diff 执行只读 Claude 审阅。
@@ -64,7 +71,7 @@ Claude CLI 查找顺序：
 - `claude-status`、`claude-result`、`claude-cancel`：跟踪后台 Claude job。
 - `claude-review-gate`：配置可选 Stop Hook 审阅门禁。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
-- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；v0.1.0 中 Gemini rescue 保持只读。
+- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；v0.1.x 中 Gemini rescue 保持只读。
 
 ## Gemini for Codex
 
@@ -75,7 +82,7 @@ codex plugin marketplace add .
 codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
-Gemini 审阅使用 `gemini --approval-mode=plan --output-format=json --prompt`。v0.1.0 使用有界 inline git context，不依赖 Gemini MCP 或 Gemini extension。
+Gemini 审阅使用 `gemini --approval-mode=plan --output-format=json --prompt`。v0.1.x 使用有界 inline git context，不依赖 Gemini MCP 或 Gemini extension。
 
 ## 增强对抗性审阅
 
