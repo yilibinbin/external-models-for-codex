@@ -57,7 +57,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `claude-multi-review`: run role-based review across correctness, security, tests, release, and adversarial perspectives.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a plan, reconcile, implement, review, and report workflow.
-- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents that stay read-only. `gemini-multi-review` runs parallel role fan-out and supports `--native-agents` for Gemini CLI native subagents.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents that stay read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini session flags are capability-gated from the installed CLI.
 
 This is a skills-and-hook plugin, not an MCP/app tool plugin. It is expected that `tool_search` will not expose a `claude-for-codex` callable tool. Codex should route through the `claude-for-codex:*` skills.
 
@@ -90,3 +90,5 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Review workflows invoke Claude with read-only permissions. Codex remains responsible for applying or rejecting Claude findings. The Stop gate blocks only when Claude explicitly returns `BLOCK:`; Claude runtime failures, authentication failures, rate limits, invalid output, or timeouts fail open with warnings.
 
 Gemini workflows invoke Gemini with `--approval-mode=plan --output-format=json --prompt` and bounded inline git context. Gemini MCP and native extension packaging are deferred until their CLI configuration path is validated.
+
+Gemini for Codex also includes lifecycle hooks for same-session cleanup and unread-result reminders, a noninteractive `recommend-execution-mode` helper, and optional Gemini-native session flags such as `--resume`, `--session-id`, and `--worktree` when the local Gemini CLI reports support.

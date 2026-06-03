@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.0 - 2026-06-03
+
+- Add SessionStart, SessionEnd, and UserPromptSubmit hooks for session tracking, conservative same-session cleanup, turn baselines, and unread result reminders.
+- Move Gemini review prompts into plugin-local prompt templates and add schema-backed `review --structured` output validation.
+- Add `recommend-execution-mode` for noninteractive foreground/background sizing guidance.
+- Add Gemini session capability reporting plus explicit `--resume`, `--session-id`, `--worktree`, and `sessions` handling gated by current Gemini CLI help output.
+- Keep all Gemini execution read-only through plan mode.
+
 ## 0.2.0 - 2026-06-03
 
 - Run `multi-review` role fan-out in parallel Gemini CLI invocations by default.

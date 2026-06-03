@@ -29,11 +29,16 @@ Rules:
 - Default mode is read-only.
 - Gemini must diagnose and propose recovery steps, not edit files.
 - Codex remains responsible for applying any fixes after reviewing the diagnosis.
+- Gemini native session flags are opt-in and capability-gated by the runtime; unsupported flags fail before Gemini invocation.
 
 Arguments:
 - `--base <ref>` includes branch diff context when available.
 - `--scope auto|working-tree|branch` controls git context selection.
 - `--path <path>` or `--paths <path>` filters git context.
 - `--model <model>` is passed to Gemini CLI.
+- `--resume [latest|id]` asks Gemini CLI to resume when supported.
+- `--fresh` avoids resume routing.
+- `--session-id <uuid>` asks Gemini CLI to use an explicit session id when supported.
+- `--worktree [name]` asks Gemini CLI to use its native worktree mode when supported.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `gemini-result <job-id>`.

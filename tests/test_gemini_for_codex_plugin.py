@@ -17,19 +17,35 @@ FAKE_GEMINI_HELP = (
     "  --skip-trust\n"
     "  -s, --sandbox\n"
 )
+FAKE_GEMINI_HELP_WITH_SESSIONS = (
+    FAKE_GEMINI_HELP
+    + "  --resume latest\n"
+    + "  --session-id UUID\n"
+    + "  --session-file FILE\n"
+    + "  --list-sessions\n"
+    + "  --worktree NAME\n"
+    + "  --include-directories DIR\n"
+)
 
 
-def write_fake_gemini(script, response="GEMINI_OK", capture_argv=None, first_line=None):
+def write_fake_gemini(script, response="GEMINI_OK", capture_argv=None, first_line=None, help_text=FAKE_GEMINI_HELP, exit_on=None):
     payload = json.dumps({"response": response, "stats": {}})
     if first_line:
         payload = json.dumps({"response": first_line, "stats": {}})
     capture = f"fs.writeFileSync({json.dumps(str(capture_argv))}, JSON.stringify(process.argv.slice(2)));" if capture_argv else ""
+    exit_block = ""
+    if exit_on:
+        exit_block = (
+            f"if (process.argv.slice(2).includes({json.dumps(exit_on)})) "
+            "{ console.error('fake unsupported or missing session'); process.exit(7); }\n"
+        )
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         "#!/usr/bin/env node\n"
         "const fs = require('fs');\n"
         "if (process.argv.slice(2).join(' ') === '--version') { console.log('0.0.0-fake'); process.exit(0); }\n"
-        f"if (process.argv.slice(2).join(' ') === '--help') {{ process.stdout.write({json.dumps(FAKE_GEMINI_HELP)}); process.exit(0); }}\n"
+        f"if (process.argv.slice(2).join(' ') === '--help') {{ process.stdout.write({json.dumps(help_text)}); process.exit(0); }}\n"
+        f"{exit_block}"
         f"{capture}\n"
         f"process.stdout.write({json.dumps(payload)});\n",
         encoding="utf8",
@@ -44,8 +60,8 @@ def init_git_repo(repo):
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
 
 
-def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=None):
-    return write_fake_gemini(tmp_path / "gemini", response=response, capture_argv=capture_argv, first_line=first_line)
+def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=None, help_text=FAKE_GEMINI_HELP, exit_on=None):
+    return write_fake_gemini(tmp_path / "gemini", response=response, capture_argv=capture_argv, first_line=first_line, help_text=help_text, exit_on=exit_on)
 
 
 def fake_gemini_jsonl(tmp_path, log_file, delay_ms=0):
@@ -75,7 +91,7 @@ def fake_gemini_jsonl(tmp_path, log_file, delay_ms=0):
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.2.0"
+    assert manifest["version"] == "0.3.0"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -84,7 +100,9 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert manifest["repository"] == "https://github.com/yilibinbin/claude-for-codex"
     assert manifest["interface"]["displayName"] == "Gemini for Codex"
     assert manifest["interface"]["websiteURL"] == "https://github.com/yilibinbin/claude-for-codex"
-    assert "lifecycle" not in manifest["interface"]["longDescription"].lower()
+    assert "schema-validated structured review" in manifest["interface"]["longDescription"].lower()
+    assert "session lifecycle hooks" in manifest["interface"]["longDescription"].lower()
+    assert "Gemini native session and worktree capability gating" in manifest["interface"]["capabilities"]
 
 
 def test_marketplace_lists_gemini_for_codex():
@@ -113,6 +131,7 @@ def test_setup_reports_gemini_availability_with_fake_binary(tmp_path):
     assert payload["geminiAvailable"] is True
     assert payload["geminiCommand"] == str(fake)
     assert payload["geminiPreflight"]["ok"] is True
+    assert payload["geminiCapabilities"]["resume"] is False
 
 
 def test_setup_discovers_gemini_from_node_manager_paths_when_path_is_reduced(tmp_path):
@@ -132,6 +151,22 @@ def test_setup_discovers_gemini_from_node_manager_paths_when_path_is_reduced(tmp
     assert payload["geminiAvailable"] is True
     assert payload["geminiCommand"] == str(fake)
     assert payload["geminiPreflight"]["ok"] is True
+
+
+def test_setup_reports_gemini_session_capabilities(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    fake = fake_gemini(tmp_path, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake)
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+
+    result = subprocess.run([NODE, str(runtime), "setup"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["geminiCapabilities"]["resume"] is True
+    assert payload["geminiCapabilities"]["sessionId"] is True
+    assert payload["geminiCapabilities"]["worktree"] is True
 
 
 def test_setup_discovers_gemini_from_package_manager_prefix(tmp_path):
@@ -180,6 +215,54 @@ def test_review_invokes_gemini_plan_mode_json_with_fake_binary(tmp_path):
     assert "--mcp-config" not in argv
 
 
+def test_review_structured_validates_and_renders_json(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    response = (
+        "Here is the review:\n```json\n"
+        + json.dumps({
+            "verdict": "needs-attention",
+            "summary": "One issue.",
+            "findings": [{
+                "severity": "high",
+                "title": "Broken edge case",
+                "body": "The changed path can fail.",
+                "file": "file.txt",
+                "line_start": 1,
+                "line_end": 2,
+                "confidence": 0.9,
+                "recommendation": "Add a guard."
+            }],
+            "next_steps": ["Fix the guard."]
+        })
+        + "\n```"
+    )
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response=response))
+
+    result = subprocess.run([NODE, str(runtime), "review", "--structured", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "## Verdict: needs-attention" in result.stdout
+    assert "[high] file.txt:1-2 - Broken edge case" in result.stdout
+
+
+def test_review_structured_invalid_output_fails_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="No JSON here"))
+
+    result = subprocess.run([NODE, str(runtime), "review", "--structured"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "Invalid structured review output" in result.stderr
+
+
 def test_gemini_rejects_write_mode_for_all_commands(tmp_path):
     runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
     repo = tmp_path / "repo"
@@ -194,6 +277,70 @@ def test_gemini_rejects_write_mode_for_all_commands(tmp_path):
         assert "--write is not supported" in result.stderr
 
 
+def test_session_flags_are_capability_gated_and_forwarded(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, capture_argv=argv_file, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+    ok = subprocess.run(
+        [NODE, str(runtime), "rescue", "--resume=latest", "--session-id", "abc-123", "--worktree=scratch", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert ok.returncode == 0, ok.stderr
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    assert "--resume" in argv and argv[argv.index("--resume") + 1] == "latest"
+    assert "--session-id" in argv and argv[argv.index("--session-id") + 1] == "abc-123"
+    assert "--worktree" in argv and argv[argv.index("--worktree") + 1] == "scratch"
+    assert "--prompt" in argv and "<rescue_request>focus</rescue_request>" in argv[argv.index("--prompt") + 1]
+    assert "--approval-mode" in argv and argv[argv.index("--approval-mode") + 1] == "plan"
+    assert "yolo" not in argv
+
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path / "limited"))
+    blocked = subprocess.run([NODE, str(runtime), "rescue", "--resume=latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert blocked.returncode == 2
+    assert "does not report support for --resume" in blocked.stderr
+
+
+def test_resume_failure_is_reported_without_fake_success(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS, exit_on="--resume"))
+
+    result = subprocess.run([NODE, str(runtime), "rescue", "--resume=latest"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 7
+    assert "fake unsupported or missing session" in result.stderr
+
+
+def test_sessions_command_is_capability_gated(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path / "limited"))
+    blocked = subprocess.run([NODE, str(runtime), "sessions"], cwd=repo, env=env, capture_output=True, text=True)
+    assert blocked.returncode == 1
+    assert json.loads(blocked.stdout)["available"] is False
+
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS, response="session-list"))
+    ok = subprocess.run([NODE, str(runtime), "sessions"], cwd=repo, env=env, capture_output=True, text=True)
+    assert ok.returncode == 0
+    payload = json.loads(ok.stdout)
+    assert payload["available"] is True
+    assert "session-list" in payload["stdout"]
+
+
 def test_gemini_rejects_roles_outside_multi_review(tmp_path):
     runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
     repo = tmp_path / "repo"
@@ -206,6 +353,23 @@ def test_gemini_rejects_roles_outside_multi_review(tmp_path):
         result = subprocess.run([NODE, str(runtime), command, "--roles", "security"], cwd=repo, env=env, capture_output=True, text=True)
         assert result.returncode == 2
         assert "--roles is only valid for multi-review" in result.stderr
+
+
+def test_gemini_rejects_structured_outside_review_and_resume_with_fresh(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+
+    structured = subprocess.run([NODE, str(runtime), "plan", "--structured"], cwd=repo, env=env, capture_output=True, text=True)
+    assert structured.returncode == 2
+    assert "--structured is only valid for review" in structured.stderr
+
+    resume_fresh = subprocess.run([NODE, str(runtime), "rescue", "--resume=latest", "--fresh"], cwd=repo, env=env, capture_output=True, text=True)
+    assert resume_fresh.returncode == 2
+    assert "Choose either --resume or --fresh" in resume_fresh.stderr
 
 
 def test_review_prompt_includes_bounded_git_context(tmp_path):
@@ -318,6 +482,65 @@ def test_multi_review_native_agents_uses_gemini_subagent_prompt_and_workspace(tm
     assert "orchestration: Gemini native subagents" in result.stdout
 
 
+def test_recommend_execution_mode_handles_small_large_and_invalid_git(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    clean = subprocess.run([NODE, str(runtime), "recommend-execution-mode"], cwd=repo, capture_output=True, text=True)
+    assert clean.returncode == 0
+    clean_payload = json.loads(clean.stdout)
+    assert clean_payload["recommendation"] == "foreground"
+    assert clean_payload["reviewable"] is False
+
+    (repo / "one.txt").write_text("one\n", encoding="utf8")
+    small = subprocess.run([NODE, str(runtime), "recommend-execution-mode"], cwd=repo, capture_output=True, text=True)
+    small_payload = json.loads(small.stdout)
+    assert small_payload["recommendation"] == "background"
+    assert small_payload["hasUntracked"] is True
+
+    nongit = tmp_path / "nongit"
+    nongit.mkdir()
+    not_repo = subprocess.run([NODE, str(runtime), "recommend-execution-mode"], cwd=nongit, capture_output=True, text=True)
+    not_repo_payload = json.loads(not_repo.stdout)
+    assert not_repo_payload["git"]["repository"] is False
+
+
+def test_recommend_execution_mode_uses_changed_line_threshold(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("\n".join(f"line {i}" for i in range(80)) + "\n", encoding="utf8")
+
+    result = subprocess.run([NODE, str(runtime), "recommend-execution-mode"], cwd=repo, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["changedLineEstimate"] > 50
+
+
+def test_recommend_execution_mode_invalid_base_fails_safe(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+
+    result = subprocess.run([NODE, str(runtime), "recommend-execution-mode", "--base", "missing"], cwd=repo, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["git"]["branch"]["available"] is False
+
+
 def test_setup_review_gate_enable_disable_persists_state(tmp_path):
     runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
     repo = tmp_path / "repo"
@@ -334,6 +557,57 @@ def test_setup_review_gate_enable_disable_persists_state(tmp_path):
     disabled = subprocess.run([NODE, str(runtime), "setup", "--disable-review-gate"], cwd=repo, env=env, capture_output=True, text=True)
     assert disabled.returncode == 0, disabled.stderr
     assert json.loads(disabled.stdout)["reviewGate"]["enabled"] is False
+
+
+def test_lifecycle_hooks_track_session_cancel_only_same_session_and_unread_results(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    lifecycle = PLUGIN / "hooks" / "session-lifecycle.mjs"
+    unread = PLUGIN / "hooks" / "unread-result.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path))
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+
+    start_payload = {"cwd": str(repo), "session_id": "s1", "hook_event_name": "SessionStart", "extra": "kept"}
+    start = subprocess.run([NODE, str(lifecycle), "SessionStart"], cwd=repo, env=env, input=json.dumps(start_payload), capture_output=True, text=True)
+    assert start.returncode == 0
+    current_files = list((tmp_path / "data" / "state").glob("*/current-session.json"))
+    assert current_files
+    current = json.loads(current_files[0].read_text(encoding="utf8"))
+    assert current["sessionId"] == "s1"
+    assert "extra" in current["hookPayloadKeys"]
+
+    reserved_same = subprocess.run([NODE, str(runtime), "reserve-job", "review", "--background"], cwd=repo, env=env, capture_output=True, text=True)
+    same_job = json.loads(reserved_same.stdout)["job"]["id"]
+    # Create a second sessionless job after removing the current session file.
+    current_files[0].unlink()
+    reserved_other = subprocess.run([NODE, str(runtime), "reserve-job", "review", "--background"], cwd=repo, env=env, capture_output=True, text=True)
+    other_job = json.loads(reserved_other.stdout)["job"]["id"]
+
+    no_session_end = subprocess.run([NODE, str(lifecycle), "SessionEnd"], cwd=repo, env=env, input=json.dumps({"cwd": str(repo)}), capture_output=True, text=True)
+    assert no_session_end.returncode == 0
+    assert "missing session id" in no_session_end.stderr
+
+    end = subprocess.run([NODE, str(lifecycle), "SessionEnd"], cwd=repo, env=env, input=json.dumps({"cwd": str(repo), "session_id": "s1"}), capture_output=True, text=True)
+    assert end.returncode == 0
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+    job_map = {job["id"]: job for job in json.loads(jobs.stdout)["jobs"]}
+    assert job_map[same_job]["status"] == "cancelled"
+    assert job_map[other_job]["status"] == "queued"
+
+    # Mark the untouched job as a terminal unread result and verify the prompt hook reminds without corrupting baseline JSON.
+    job_file = next((tmp_path / "data" / "state").glob(f"*/jobs/{other_job}.json"))
+    job_data = json.loads(job_file.read_text(encoding="utf8"))
+    job_data.update({"status": "succeeded", "sessionId": ""})
+    job_file.write_text(json.dumps(job_data), encoding="utf8")
+    prompt = subprocess.run([NODE, str(unread)], cwd=repo, env=env, input=json.dumps({"cwd": str(repo), "hook_event_name": "UserPromptSubmit"}), capture_output=True, text=True)
+    assert prompt.returncode == 0
+    assert "Unread Gemini job result" in prompt.stderr
+    baseline_files = list((tmp_path / "data" / "state").glob("*/turn-baseline.json"))
+    assert baseline_files
+    json.loads(baseline_files[0].read_text(encoding="utf8"))
 
 
 def test_review_gate_blocks_only_explicit_block(tmp_path):
@@ -369,11 +643,21 @@ def test_hook_wrapper_forwards_stdin_and_fails_open(tmp_path):
     assert result.returncode == 0
 
 
-def test_gemini_hooks_manifest_only_registers_stop_hook():
+def test_gemini_hooks_manifest_registers_required_hooks():
     manifest = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf8"))
-    assert sorted(manifest["hooks"].keys()) == ["Stop"]
+    assert sorted(manifest["hooks"].keys()) == ["SessionEnd", "SessionStart", "Stop", "UserPromptSubmit"]
     assert "GEMINI_PLUGIN_ROOT" in json.dumps(manifest)
     assert "CLAUDE_" not in json.dumps(manifest)
+
+
+def test_gemini_prompt_templates_and_schema_are_packaged():
+    for name in ["review", "adversarial-review", "multi-review-role", "native-multi-agent", "stop-review-gate"]:
+        text = (PLUGIN / "prompts" / f"{name}.md").read_text(encoding="utf8")
+        assert "{{" in text
+        assert "<task>" in text
+    schema = json.loads((PLUGIN / "schemas" / "review-output.schema.json").read_text(encoding="utf8"))
+    assert schema["required"] == ["verdict", "summary", "findings", "next_steps"]
+    assert schema["properties"]["verdict"]["enum"] == ["approve", "needs-attention"]
 
 
 def test_gemini_skills_have_frontmatter_and_runtime_calls():
