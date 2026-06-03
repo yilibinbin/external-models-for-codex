@@ -110,6 +110,10 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 
 需要机器可解析输出时使用 `--json`，会验证 `{verdict, summary, findings, next_steps}`。长耗时任务可以在 `review`、`adversarial-review`、`multi-review`、`rescue` 上加 `--background`，之后用 `claude-result` 取回结果。`rescue --write` 是显式 opt-in，并会记录 git 指纹前后变化。
 
+`review --json` 返回普通审阅的规范化对象，verdict 使用 `approve|needs-attention`。`multi-review --json` 返回一个聚合对象，保留 role 标记的 findings 和每个 role 的结果。`adversarial-review --json` 保留专用的 `PASS|CONTESTED|REJECT` verdict 语义。
+
+在 `--json` 模式下，退出码表示命令和 JSON 解析是否成功；是否需要处理发现要读取返回体里的 `verdict`。
+
 ## Codex 转发式后台任务
 
 `--background` 支持 Codex host-forwarded 路径：skill 先通过 `reserve-job` 预留任务，然后 Codex 只派发一个转发子代理执行返回的 `workerCommand`。子代理只运行 `run-reserved-job`，不重新审阅、不解释仓库、不改写上下文。旧的 runtime detached 后台任务保留为兼容 fallback。
@@ -119,6 +123,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 只读 Claude 审阅会获得严格 MCP 配置。插件内置只读 Git MCP server，提供 status、diff、cached diff、log、show、blame、grep、ls-files 等只读能力，并在进入 Git 前校验 path/ref。`Bash`、`Edit`、`Write`、`MultiEdit` 仍然被禁用。
 
 `multi-review` 默认并行运行角色 reviewer。`adversarial-review --parallel` 会将 skeptic、architect、minimalist 等 lens 作为独立 Claude CLI reviewer 并行执行并聚合输出。需要逐个运行排查问题或降低速率压力时使用 `--sequential`。
+
+Claude 审阅输出是审阅材料，不是自动实施授权。报告时要保留文件路径、行号、role 名、uncertainty 标记和 residual risk；除非用户明确要求采纳并修复哪些发现，否则不要在同一步自动修复审阅发现。
 
 ## 正确调用方式
 
@@ -152,6 +158,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup --disable-revie
 ```
 
 安装或升级后，请在 Codex Settings > Hooks 中信任或启用 `Claude for Codex` hooks。若本地 Codex runtime 支持，`SessionStart`、`SessionEnd` 和 `UserPromptSubmit` 会用于记录会话、提示未读结果和保存 turn baseline。
+
+Stop gate 使用 `UserPromptSubmit` 保存的 turn-baseline 指纹，避免当前轮没有改变工作区时反复审阅旧的脏变更。基于 Stop payload 区分 status/setup/report-only 轮次的逻辑会等到真实 Codex Stop payload 暴露可验证 edit/no-edit 信号后再启用。
 
 ## 安全边界
 

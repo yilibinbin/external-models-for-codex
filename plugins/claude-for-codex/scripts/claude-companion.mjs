@@ -20,6 +20,12 @@ import {
   updateJob
 } from "./lib/jobs.mjs";
 import { createGitMcpConfig } from "./lib/mcp-config.mjs";
+import { renderPromptTemplate } from "./lib/prompt-template.mjs";
+import {
+  aggregateRoleReviewOutputs,
+  normalizeAdversarialOutput,
+  normalizeReviewOutput
+} from "./lib/render-review.mjs";
 import {
   StateReadError,
   canonicalWorkspaceRoot,
@@ -860,6 +866,36 @@ function adversarialJsonContract() {
   ].join("\n");
 }
 
+function reviewMarkdownContract() {
+  return [
+    "<output_contract>",
+    "## Findings",
+    "- [Severity] file:line - issue, evidence, impact, suggested direction",
+    "## Open Questions",
+    "## Residual Risk",
+    "</output_contract>"
+  ].join("\n");
+}
+
+function reviewJsonContract() {
+  return [
+    "<output_contract>",
+    "Return exactly one JSON object and no Markdown.",
+    "Schema:",
+    "{",
+    '  "verdict": "approve | needs-attention",',
+    '  "summary": "short review judgment",',
+    '  "findings": [',
+    '    {"severity": "critical|high|medium|low", "title": "issue title", "body": "issue, evidence, and impact", "file": "path", "line_start": 1, "line_end": 1, "confidence": 0.8, "recommendation": "concrete action"}',
+    "  ],",
+    '  "next_steps": ["concrete next step"]',
+    "}",
+    "Use verdict approve only when there are no material findings.",
+    "Use an empty findings array when there are no findings.",
+    "</output_contract>"
+  ].join("\n");
+}
+
 function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -870,160 +906,62 @@ function reviewPrompt(kind, args) {
 
   if (adversarial) {
     const adversarialLenses = args.resolvedAdversarialLenses ?? resolveAdversarialLenses(args);
-    return [
-      "<task>Run an adversarial read-only code and design review.</task>",
-      gitContext,
-      adversarialLensSection(adversarialLenses),
-      "<scale_guidance>",
-      "If the diff is small, emphasize Skeptic findings.",
-      "If the diff is medium, weigh Skeptic and Architect findings.",
-      "If the diff is large or spans many files, use Skeptic, Architect, and Minimalist lenses.",
-      "When explicit lenses are provided, use only those lenses.",
-      "Small means fewer than 50 changed lines across one or two files; medium means roughly 50 to 200 changed lines or three to five files; large means more than 200 changed lines or more than five files.",
-      "</scale_guidance>",
-      "<rules>",
-      "- Do not edit files.",
-      "- Do not suggest that you are about to apply fixes.",
-      "- First infer the author's intent from the request, focus text, git context, and changed files.",
-      "- Challenge whether the work achieves that intent well.",
-      "- Find real problems, not validation or style preferences.",
-      "- Ground every finding in concrete evidence from changed files or explicit git context.",
-      "- Include exact file paths and line numbers when available.",
-      "- Deduplicate overlapping lens findings.",
-      "- Apply lead judgment: accept strong findings and reject false positives or overreach.",
-      "- Use PASS only when there are no high-severity findings.",
-      "- Use CONTESTED when high-severity findings exist but lens evidence or agreement is mixed.",
-      "- Use REJECT when high-severity findings have strong evidence or consensus across lenses.",
-      "</rules>",
-      focus ? `<focus>${focus}</focus>` : "",
-      args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
-    ].filter(Boolean).join("\n");
+    return renderPromptTemplate(pluginRoot(), "adversarial-review", {
+      GIT_CONTEXT: gitContext,
+      ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
+      FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
+      OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
+    });
   }
 
-  return [
-    "<task>Run a read-only code review.</task>",
-    gitContext,
-    reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
-    "<rules>",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Put findings first, ordered by severity.",
-    "- Ground every finding in concrete evidence from changed files or explicit git context.",
-    "- Include exact file paths and line numbers when available.",
-    "- If there are no findings, say so and list residual risks briefly.",
-    "- Focus on concrete bugs, regressions, missing tests, and maintainability risks.",
-    "</rules>",
-    focus ? `<focus>${focus}</focus>` : "",
-    "<output_contract>",
-    "## Findings",
-    "- [Severity] file:line - issue, evidence, impact, suggested direction",
-    "## Open Questions",
-    "## Residual Risk",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(pluginRoot(), "review", {
+    GIT_CONTEXT: gitContext,
+    REVIEW_ROLES_BLOCK: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
+    FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
+    OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
+  });
 }
 
 function multiReviewRolePrompt(role, args, gitContext) {
   const focus = args._.join(" ").trim();
 
-  return [
-    "<task>Run a role-specialized read-only code review.</task>",
-    `<role_name>${role.name}</role_name>`,
-    `<role_directive>${role.directive}</role_directive>`,
-    gitContext,
-    "<rules>",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Put findings first, ordered by severity.",
-    "- Ground every finding in concrete evidence from changed files or explicit git context.",
-    "- Include exact file paths and line numbers when available.",
-    "- If there are no findings, say so and list residual risks briefly.",
-    "- Focus only on this role's directive; do not broaden into unrelated review areas.",
-    "</rules>",
-    focus ? `<focus>${focus}</focus>` : "",
-    "<output_contract>",
-    "## Findings",
-    "- [Severity] file:line - issue, evidence, impact, suggested direction",
-    "## Open Questions",
-    "## Residual Risk",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(pluginRoot(), "multi-review-role", {
+    ROLE_NAME: role.name,
+    ROLE_DIRECTIVE: role.directive,
+    GIT_CONTEXT: gitContext,
+    FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
+    OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
+  });
 }
 
 function reviewGateRolePrompt(role, args, gitContext) {
-  return [
-    "<task>Run a stop-gate review of the current git changes.</task>",
-    `<role_name>${role.name}</role_name>`,
-    `<role_directive>${role.directive}</role_directive>`,
-    gitContext,
-    "<rules>",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Review only the current git working-tree changes shown in the git context.",
-    "- Use BLOCK only for concrete issues that should prevent stopping now.",
-    "- Use ALLOW if you do not see a blocking issue for this role.",
-    "- Ground every BLOCK claim in concrete changed-file evidence when possible.",
-    "</rules>",
-    "<output_contract>",
-    "Your first line must be exactly one of:",
-    "ALLOW: <short reason>",
-    "BLOCK: <short reason>",
-    "Do not put anything before that first line.",
-    "After the first line, include concise evidence for BLOCK results.",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(pluginRoot(), "review-gate-role", {
+    ROLE_NAME: role.name,
+    ROLE_DIRECTIVE: role.directive,
+    GIT_CONTEXT: gitContext
+  });
 }
 
 function planPrompt(args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
 
-  return [
-    "<task>Create an independent implementation plan for Codex to compare against its own plan.</task>",
-    gitContext,
-    "<rules>",
-    "- Do not edit files.",
-    "- Separate observed facts from inferences.",
-    "- Prefer small verifiable implementation steps.",
-    "- Include tests for each meaningful behavior or risk area.",
-    "- Identify risks, blind spots, rollback concerns, and unresolved assumptions.",
-    "- End with a reconciliation checklist Codex can use against its own plan.",
-    "</rules>",
-    focus ? `<planning_request>${focus}</planning_request>` : "",
-    "<output_contract>",
-    "## Observed Facts",
-    "## Inferences",
-    "## Independent Implementation Plan",
-    "## Tests",
-    "## Risks And Blind Spots",
-    "## Reconciliation Checklist",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(pluginRoot(), "plan", {
+    GIT_CONTEXT: gitContext,
+    PLANNING_REQUEST_BLOCK: focus ? `<planning_request>${focus}</planning_request>` : ""
+  });
 }
 
 function rescuePrompt(args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
 
-  return [
-    "<task>Diagnose a stuck or failed Codex implementation from Claude's independent read-only perspective.</task>",
-    gitContext,
-    "<rules>",
-    args.write ? "- You may edit files because the user explicitly requested rescue --write." : "- Do not edit files.",
-    args.write ? "- Keep changes narrowly scoped and report every modified file." : "- Do not suggest that you are currently applying fixes.",
-    "- Identify the likely failure mode, missing context, or incorrect assumption.",
-    "- Prefer a short recovery checklist Codex can execute.",
-    "- Ground claims in current git state, changed files, and visible evidence.",
-    "- If evidence is insufficient, say exactly what Codex should inspect next.",
-    "</rules>",
-    focus ? `<rescue_request>${focus}</rescue_request>` : "",
-    "<output_contract>",
-    "## Diagnosis",
-    "## Evidence",
-    "## Recovery Steps",
-    "## Risks",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(pluginRoot(), "rescue", {
+    GIT_CONTEXT: gitContext,
+    EDIT_RULE: args.write ? "- You may edit files because the user explicitly requested rescue --write." : "- Do not edit files.",
+    REPORT_RULE: args.write ? "- Keep changes narrowly scoped and report every modified file." : "- Do not suggest that you are currently applying fixes.",
+    RESCUE_REQUEST_BLOCK: focus ? `<rescue_request>${focus}</rescue_request>` : ""
+  });
 }
 
 function setupOptions(rawArgs) {
@@ -1356,6 +1294,10 @@ function runReviewGate(rawArgs) {
   setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
 }
 
+function parseStructuredReviewResult(stdout, options = {}) {
+  return normalizeReviewOutput(extractJsonObject(stdout), options);
+}
+
 function renderRoleReviewSections(title, results, roleLabel = "Role") {
   const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
   const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
@@ -1388,6 +1330,35 @@ async function runParallelRoleReviews(roles, args, gitContext, promptBuilder) {
     result: await claudePrintAsync(promptBuilder(role, args, gitContext), args)
   }));
   return Promise.all(pending);
+}
+
+function renderStructuredRoleReview(results) {
+  const parsedResults = [];
+  const failures = [];
+  for (const { role, result } of results) {
+    if (result.status !== 0) {
+      failures.push(`${role.name}: Claude exited ${result.status}: ${(result.stderr || result.error || "").trim()}`);
+      continue;
+    }
+    try {
+      parsedResults.push({
+        role,
+        result: parseStructuredReviewResult(result.stdout, { role: role.name })
+      });
+    } catch (error) {
+      failures.push(`${role.name}: ${error.message || String(error)}; raw output: ${result.stdout.trim()}`);
+    }
+  }
+  if (failures.length) {
+    return {
+      ok: false,
+      text: `Invalid structured multi-review output:\n${failures.map((failure) => `- ${failure}`).join("\n")}\n`
+    };
+  }
+  return {
+    ok: true,
+    text: `${JSON.stringify(aggregateRoleReviewOutputs(parsedResults), null, 2)}\n`
+  };
 }
 
 async function runClaudeTask(kind, rawArgs) {
@@ -1451,10 +1422,21 @@ async function runClaudeTask(kind, rawArgs) {
   }
   if (kind === "adversarial-review" && args.jsonOutput) {
     try {
-      const parsed = validateAdversarialJson(extractJsonObject(result.stdout));
+      const parsed = normalizeAdversarialOutput(validateAdversarialJson(extractJsonObject(result.stdout)));
       process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
     } catch (error) {
       process.stderr.write(`Invalid structured adversarial output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
+  if (kind === "review" && args.jsonOutput) {
+    try {
+      const parsed = parseStructuredReviewResult(result.stdout);
+      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`Invalid structured review output: ${error.message || String(error)}\n`);
       process.stdout.write(result.stdout);
       process.exit(1);
     }
@@ -1506,6 +1488,16 @@ async function runClaudeMultiReview(rawArgs) {
       const result = claudePrint(prompt, args);
       results.push({ role, result });
     }
+  }
+
+  if (args.jsonOutput) {
+    const renderedJson = renderStructuredRoleReview(results);
+    if (!renderedJson.ok) {
+      process.stderr.write(renderedJson.text);
+      process.exit(1);
+    }
+    process.stdout.write(renderedJson.text);
+    process.exit(0);
   }
 
   const rendered = renderRoleReviewSections("# Claude Multi-Agent Review", results, "Role");

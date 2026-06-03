@@ -31,6 +31,8 @@ Rules:
 - Codex remains responsible for applying any fixes after reviewing the diagnosis.
 - Use `--write` only when the user explicitly asks Claude to modify files.
 - In write mode, report Claude's output and inspect the resulting git diff before claiming the task is fixed.
+- Preserve Claude's evidence, uncertainty markers, file paths, and recovery assumptions.
+- If Claude fails, reports setup/auth problems, or cannot inspect enough evidence, report that directly instead of inventing a substitute diagnosis.
 
 Arguments:
 - `--base <ref>` includes branch diff context when available.

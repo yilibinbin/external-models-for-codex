@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/claude-for-codex
 - Marketplace id: `external-models-for-codex-local`
 - Plugin id: `claude-for-codex`
-- Current version: `0.4.0`
+- Current version: `0.7.0`
 
 Published capabilities:
 
@@ -23,6 +23,7 @@ Published capabilities:
 - Claude implementation planning for Codex to reconcile before editing.
 - Read-only Claude rescue diagnosis when Codex is stuck or validation is failing.
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
+- Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
 - Background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
 - Session/UserPrompt hooks for session state, turn baselines, and unread-result reminders.
@@ -139,8 +140,10 @@ Run from the repository root:
 
 ```bash
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs review --json --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles correctness,security --scope branch --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs rescue diagnose the failing release validation
 node plugins/claude-for-codex/scripts/claude-companion.mjs rescue --write fix the failing test
@@ -153,6 +156,10 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
 `multi-review` runs several role-specialized Claude review prompts in parallel by default and prints one section per role plus an orchestration summary. This is plugin-managed parallel Claude CLI orchestration, not Claude native background agents. It is read-only; Codex must reconcile findings before any follow-up changes. Use `--sequential` to run one role at a time for debugging or rate-limit-sensitive environments.
+
+`review --json` asks Claude for a normalized `{verdict, summary, findings, next_steps}` object using `approve` or `needs-attention`. `multi-review --json` asks every role for the same schema and returns one aggregate object with role-tagged findings and per-role results. Invalid or malformed structured output exits non-zero and includes the raw Claude output for diagnosis.
+
+For `--json` modes, exit status reports whether the Claude invocation and JSON parsing succeeded. Callers must inspect the returned `verdict` to decide whether findings need attention.
 
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
 
@@ -197,13 +204,13 @@ Use structured adversarial output when Codex needs a machine-checked verdict:
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --json --base main
 ```
 
-The JSON contract is `{ "verdict": "PASS|CONTESTED|REJECT", "summary": "...", "findings": [], "next_steps": [] }`. Mixed or fenced Claude output is parsed and validated before being returned.
+The adversarial JSON contract is `{ "verdict": "PASS|CONTESTED|REJECT", "summary": "...", "findings": [], "next_steps": [] }`. It intentionally keeps adversarial verdict semantics separate from normal `review --json`, which uses `approve|needs-attention`. Mixed or fenced Claude output is parsed and validated before being returned.
 
 ## Hooks And Background Jobs
 
 `hooks/hooks.json` registers `SessionStart`, `SessionEnd`, `UserPromptSubmit`, and `Stop` hooks. Session hooks record the active session and attempt safe cleanup of tracked queued/running jobs at session end. The prompt-submit hook records a turn baseline fingerprint and emits a short stderr reminder for unread terminal job results.
 
-If the local Codex runtime does not expose one of these hook events, the plugin degrades to explicit `jobs`, `result`, and `cancel` commands. The Stop hook remains opt-in through setup state.
+If the local Codex runtime does not expose one of these hook events, the plugin degrades to explicit `jobs`, `result`, and `cancel` commands. The Stop hook remains opt-in through setup state. The review gate uses the `UserPromptSubmit` turn-baseline fingerprint to avoid reviewing old dirty workspace changes when the current turn did not change the working tree. Payload-based classification of status/setup/report-only Stop turns is intentionally deferred until a real Codex Stop payload exposes a verified edit/no-edit signal.
 
 ## Read-Only Git Boundary
 
@@ -227,7 +234,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup --disable-revie
 
 When enabled, Stop runs a multi-role Claude gate over current git working-tree changes. It blocks only when Claude explicitly returns `BLOCK:`. Claude CLI failures, timeouts, invalid output, missing auth, or missing Claude warn to stderr and allow Stop to continue.
 
-The v1 gate reviews current git changes, not the exact files changed by the immediately previous Codex turn. It skips non-git directories, clean working trees, recursive Stop-hook invocations, and unchanged diffs that already received an all-`ALLOW:` gate result. Each Claude role has a two-minute timeout inside the overall 15-minute Stop hook budget.
+The v1 gate reviews current git changes, not the exact files changed by the immediately previous Codex turn. It skips non-git directories, clean working trees, recursive Stop-hook invocations, unchanged turn-baseline fingerprints, and unchanged diffs that already received an all-`ALLOW:` gate result. Each Claude role has a two-minute timeout inside the overall 15-minute Stop hook budget.
 
 Emergency bypass for the shell environment that launches Codex hooks:
 
@@ -236,6 +243,12 @@ export CLAUDE_FOR_CODEX_REVIEW_GATE=off
 ```
 
 The setup output prints the per-workspace `stateFile`; deleting that file also resets the gate to disabled. After installing or upgrading, check Codex Settings > Hooks and trust or enable the `Claude for codex` Stop hook if prompted.
+
+## Review Result Handling
+
+Claude review output is a review artifact, not implementation authority. Preserve file paths, line numbers, role names, uncertainty markers, and residual-risk notes when reporting results. Do not auto-fix review findings in the same step unless the user explicitly asks which findings to adopt. If Claude fails, returns malformed structured output, or reports setup/auth problems, report that failure directly instead of substituting Codex guesses.
+
+Tiny one-to-two file reviews can run foreground. Broader reviews, unclear scope, untracked directories, or multi-role/adversarial reviews should normally use `--background` and retrieve results with `claude-result`.
 
 ## Verification
 
@@ -258,6 +271,7 @@ RUN_CLAUDE_INTEGRATION=1 python3 -m pytest tests/test_claude_for_codex_plugin.py
 3. Run default tests: `python3 -m pytest -q`.
 4. Run the real Claude CLI compatibility check: `RUN_CLAUDE_INTEGRATION=1 python3 -m pytest tests/test_claude_for_codex_plugin.py::test_real_claude_permission_mode_when_enabled -q`.
 5. Run hook syntax validation: `node --check plugins/claude-for-codex/hooks/claude-review-gate.mjs`.
-6. Run plugin validation: `python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/claude-for-codex`.
-7. Run skill validation: `for d in plugins/claude-for-codex/skills/*; do python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" "$d"; done`.
-8. Commit, tag, and push.
+6. Run runtime syntax validation: `node --check plugins/claude-for-codex/scripts/claude-companion.mjs`.
+7. Run plugin validation: `python3 "$HOME/.codex/skills/.system/plugin-creator/scripts/validate_plugin.py" plugins/claude-for-codex`.
+8. Run skill validation: `for d in plugins/claude-for-codex/skills/*; do python3 "$HOME/.codex/skills/.system/skill-creator/scripts/quick_validate.py" "$d"; done`.
+9. Commit, tag, and push.

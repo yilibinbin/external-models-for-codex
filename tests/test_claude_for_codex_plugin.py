@@ -16,7 +16,7 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
 
 
-def run_fake_claude_review(tmp_path, args, commit_head=False):
+def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -83,7 +83,7 @@ if sys.argv[1:] == ["--version"]:
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 (capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
 (capture / "prompt.txt").write_text(sys.argv[-1])
-print("FAKE_CLAUDE_OK")
+print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
 """
     )
     fake_claude.chmod(0o755)
@@ -91,6 +91,8 @@ print("FAKE_CLAUDE_OK")
     env = os.environ.copy()
     env["CAPTURE_DIR"] = str(capture_dir)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         ["node", str(runtime), "review", *args],
         cwd=repo,
@@ -186,7 +188,7 @@ print("FAKE_CLAUDE_ADVERSARIAL_OK")
     return result, prompt, argv
 
 
-def run_fake_claude_multi_review(tmp_path, args, commit_head=False, fail_roles=None):
+def run_fake_claude_multi_review(tmp_path, args, commit_head=False, fail_roles=None, extra_env=None):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -264,6 +266,10 @@ for fail_role in fail_roles:
         print(f"FAKE_CLAUDE_FAIL role {role} call {role}")
         print(f"diagnostic for failed role {role}", file=sys.stderr)
         raise SystemExit(17)
+json_by_role = json.loads(os.environ.get("JSON_BY_ROLE", "{}") or "{}")
+if role in json_by_role:
+    print(json.dumps(json_by_role[role]))
+    raise SystemExit(0)
 print(f"FAKE_CLAUDE_OK call {role}")
 """
     )
@@ -274,6 +280,8 @@ print(f"FAKE_CLAUDE_OK call {role}")
     if fail_roles:
         env["FAIL_ROLES"] = ",".join(fail_roles)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    if extra_env:
+        env.update(extra_env)
     result = subprocess.run(
         ["node", str(runtime), "multi-review", *args],
         cwd=repo,
@@ -616,7 +624,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.6.0"
+    assert data["version"] == "0.7.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -624,7 +632,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.7.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -635,6 +643,7 @@ def test_version_and_docs_describe_forwarding_and_mcp():
         assert "host-forwarded" in text
         assert "MCP" in text
         assert "read-only Git" in text
+        assert "review --json" in text
 
     assert "转发" in zh
     assert "MCP" in zh
@@ -665,6 +674,202 @@ def test_runtime_has_required_commands():
     assert "--path" in text
     assert "--paths" in text
     assert "pathArgs" in text
+
+
+def test_prompt_templates_and_review_schema_are_packaged():
+    expected_prompts = {
+        "review.md",
+        "adversarial-review.md",
+        "multi-review-role.md",
+        "review-gate-role.md",
+        "plan.md",
+        "rescue.md",
+    }
+    prompt_dir = PLUGIN / "prompts"
+    assert {path.name for path in prompt_dir.glob("*.md")} == expected_prompts
+    for prompt in expected_prompts:
+        text = (prompt_dir / prompt).read_text(encoding="utf8")
+        assert "<task>" in text
+        assert "{{" in text
+        assert "</output>" not in text
+    gate_template = (prompt_dir / "review-gate-role.md").read_text(encoding="utf8")
+    assert "{{ROLE_NAME}}" in gate_template
+    assert "{{ROLE_DIRECTIVE}}" in gate_template
+    assert "{{GIT_CONTEXT}}" in gate_template
+
+    schema = json.loads((PLUGIN / "schemas" / "review-output.schema.json").read_text(encoding="utf8"))
+    assert schema["properties"]["verdict"]["enum"] == ["approve", "needs-attention"]
+    assert schema["properties"]["findings"]["items"]["properties"]["severity"]["enum"] == [
+        "critical",
+        "high",
+        "medium",
+        "low",
+    ]
+
+
+def test_review_prompt_is_loaded_from_template(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree", "template marker"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "<task>Run a read-only code review.</task>" in prompt
+    assert "template marker" in prompt
+    assert "## Residual Risk" in prompt
+
+
+def test_prompt_template_allows_placeholder_like_user_content(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree", "literal {{ROLE_NAME}} should stay in focus"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "literal {{ROLE_NAME}} should stay in focus" in prompt
+
+
+def test_review_json_valid_output_is_normalized(tmp_path):
+    payload = {
+        "verdict": "needs-attention",
+        "summary": "Blocking issue found.",
+        "findings": [
+            {
+                "severity": "medium",
+                "title": "Second",
+                "body": "medium issue",
+                "file": "b.js",
+                "line_start": 4,
+                "line_end": 4,
+                "confidence": 0.4,
+                "recommendation": "fix b",
+            },
+            {
+                "severity": "critical",
+                "title": "First",
+                "body": "critical issue",
+                "file": "a.js",
+                "line_start": 2,
+                "line_end": 3,
+                "confidence": 0.9,
+                "recommendation": "fix a",
+            },
+        ],
+        "next_steps": ["patch"],
+    }
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--json", "--scope", "working-tree"],
+        extra_env={"FAKE_CLAUDE_STDOUT": json.dumps(payload)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '"verdict": "approve | needs-attention"' in prompt
+    normalized = json.loads(result.stdout)
+    assert normalized["verdict"] == "needs-attention"
+    assert [finding["title"] for finding in normalized["findings"]] == ["First", "Second"]
+
+
+def test_review_json_invalid_output_returns_raw_output(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--json", "--scope", "working-tree"],
+        extra_env={"FAKE_CLAUDE_STDOUT": "not json"},
+    )
+
+    assert result.returncode == 1
+    assert "Invalid structured review output" in result.stderr
+    assert "not json" in result.stdout
+    assert '"verdict": "approve | needs-attention"' in prompt
+
+
+def test_review_json_extracts_fenced_mixed_output(tmp_path):
+    payload = {
+        "verdict": "approve",
+        "summary": "ok",
+        "findings": [],
+        "next_steps": [],
+    }
+    mixed = f"Here is JSON:\n```json\n{json.dumps(payload)}\n```"
+    result, _prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--json", "--scope", "working-tree"],
+        extra_env={"FAKE_CLAUDE_STDOUT": mixed},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == payload
+
+
+def test_multi_review_json_aggregates_role_tagged_results(tmp_path):
+    role_json = {
+        "correctness": {
+            "verdict": "approve",
+            "summary": "correctness ok",
+            "findings": [],
+            "next_steps": [],
+        },
+        "security": {
+            "verdict": "needs-attention",
+            "summary": "security issue",
+            "findings": [
+                {
+                    "severity": "high",
+                    "title": "Unsafe path",
+                    "body": "path can escape",
+                    "file": "runtime.js",
+                    "line_start": 10,
+                    "line_end": 11,
+                    "confidence": 0.8,
+                    "recommendation": "validate",
+                }
+            ],
+            "next_steps": ["add validation"],
+        },
+    }
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--json", "--roles", "correctness,security", "--scope", "working-tree"],
+        extra_env={"JSON_BY_ROLE": json.dumps(role_json)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert all('"verdict": "approve | needs-attention"' in prompt for prompt in prompts)
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "needs-attention"
+    assert payload["findings"][0]["role"] == "security"
+    assert payload["roles"][0]["role"] == "correctness"
+    assert payload["roles"][1]["role"] == "security"
+
+
+def test_multi_review_json_invalid_role_output_fails(tmp_path):
+    result, _prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--json", "--roles", "correctness", "--scope", "working-tree"],
+        extra_env={"JSON_BY_ROLE": json.dumps({"correctness": {"verdict": "maybe"}})},
+    )
+
+    assert result.returncode == 1
+    assert "Invalid structured multi-review output" in result.stderr
+    assert "correctness:" in result.stderr
+
+
+def test_adversarial_json_keeps_specialized_verdict_vocabulary(tmp_path):
+    result, prompt, _argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--json"],
+    )
+
+    assert result.returncode == 1
+    assert '"verdict": "PASS | CONTESTED | REJECT"' in prompt
+    assert "approve | needs-attention" not in prompt
+
+
+def test_no_public_review_size_command_ships_without_consumer():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    text = runtime.read_text(encoding="utf8")
+    assert '"review-size"' not in text
+    assert 'case "review-size"' not in text
 
 
 def test_runtime_applies_pathspec_to_git_context_commands():
@@ -2311,6 +2516,63 @@ def test_background_skills_require_forwarding_subagent_contract():
         assert "--wait` only applies to direct `--background` runtime use" in text
         assert "not part of the host-forwarded `reserve-job` path" in text
         assert re.search(r"waiting requires .*claude-result <job-id>", normalized)
+
+
+def test_review_skills_preserve_result_handling_discipline():
+    for skill_name in ["claude-review", "claude-multi-review", "claude-adversarial-review", "claude-rescue"]:
+        text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(encoding="utf8")
+        assert "Do not fix" in text or "not apply fixes" in text or "not edit files" in text
+        assert "file paths" in text
+        assert "line numbers" in text or skill_name == "claude-rescue"
+        assert "uncertainty" in text or "Evidence" in text or "evidence" in text
+        assert "background" in text
+
+    review = (PLUGIN / "skills" / "claude-review" / "SKILL.md").read_text(encoding="utf8")
+    multi = (PLUGIN / "skills" / "claude-multi-review" / "SKILL.md").read_text(encoding="utf8")
+    assert "Tiny one-to-two file reviews can run foreground" in review
+    assert "broader or unclear reviews should use background" in review
+    assert "Tiny one-to-two file reviews can run foreground" in multi
+
+
+def test_render_review_module_normalizes_review_and_adversarial_shapes():
+    module = (PLUGIN / "scripts" / "lib" / "render-review.mjs").as_uri()
+    script = f"""
+import assert from "node:assert/strict";
+import {{ normalizeReviewOutput, normalizeAdversarialOutput, aggregateRoleReviewOutputs }} from {json.dumps(module)};
+
+const review = normalizeReviewOutput({{
+  verdict: "needs-attention",
+  summary: "sum",
+  findings: [
+    {{ severity: "low", title: "low", body: "body", file: "b", line_start: 2, line_end: 2, confidence: 0.4, recommendation: "" }},
+    {{ severity: "critical", title: "critical", body: "body", file: "a", line_start: 1, line_end: 1, confidence: 0.5, recommendation: "fix" }}
+  ],
+  next_steps: ["next"]
+}}, {{ role: "security" }});
+assert.equal(review.findings[0].severity, "critical");
+assert.equal(review.findings[0].role, "security");
+assert.equal(review.findings[1].confidence, 0.4);
+    assert.throws(() => normalizeReviewOutput({{
+      verdict: "approve",
+      summary: "sum",
+      findings: [{{ severity: "unknown", title: "bad", body: "body", file: "a", line_start: 1, line_end: 1, confidence: 0.5, recommendation: "" }}],
+      next_steps: []
+    }}), /severity/);
+
+const adversarial = normalizeAdversarialOutput({{ verdict: "CONTESTED", summary: "s", findings: [], next_steps: [] }});
+assert.equal(adversarial.verdict, "CONTESTED");
+
+const aggregate = aggregateRoleReviewOutputs([{{ role: {{ name: "security" }}, result: review }}]);
+assert.equal(aggregate.verdict, "needs-attention");
+assert.equal(aggregate.roles[0].role, "security");
+"""
+    result = subprocess.run(
+        [NODE, "--input-type=module", "--eval", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_session_and_user_prompt_hooks_write_state_and_report_unread_results(tmp_path):

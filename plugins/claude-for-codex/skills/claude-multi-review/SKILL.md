@@ -32,7 +32,10 @@ Rules:
 - Role reviewers run in parallel unless `--sequential` is explicitly supplied.
 - Codex remains responsible for deciding which findings to adopt, reject, or report as residual risk.
 - Preserve role headers, file paths, line numbers, uncertainty markers, failed-role diagnostics, and the orchestration summary.
+- Preserve evidence boundaries; do not collapse role-specific uncertainty into a stronger claim.
+- Do not fix review findings in the same turn unless the user explicitly asks which findings to adopt.
 - Use `--background` for long multi-role reviews through the background routing contract above and retrieve the job with `claude-result`.
+- Tiny one-to-two file reviews can run foreground; broader or unclear reviews should use background.
 
 Default roles:
 - `correctness`: bugs, regressions, edge cases, and contract breaks.
@@ -53,6 +56,7 @@ Arguments:
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
+- `--json` asks every role for a normalized review object and returns one role-tagged aggregate object.
 - `--parallel` is the default execution mode for foreground role fan-out.
 - `--sequential` runs roles one at a time for debugging or rate-limit-sensitive environments.
 - `--background` starts a tracked job and returns a job id.

@@ -1,6 +1,6 @@
 {
   "name": "claude-for-codex",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",
@@ -32,6 +32,7 @@
       "Implementation planning",
       "Read-only rescue diagnosis",
       "Multi-role review orchestration",
+      "Structured review JSON output",
       "Structured adversarial verdicts",
       "Tracked background job status/result/cancel commands",
       "Session lifecycle and unread-result hooks",

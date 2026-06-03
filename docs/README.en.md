@@ -110,6 +110,10 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 
 Use `--json` for a validated `{verdict, summary, findings, next_steps}` object. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job, and retrieve it with `claude-result`. `rescue --write` is explicit opt-in and records before/after git fingerprints.
 
+`review --json` returns a normalized normal-review object using `approve|needs-attention`. `multi-review --json` returns one aggregate object with role-tagged findings and per-role results. `adversarial-review --json` intentionally keeps the specialized `PASS|CONTESTED|REJECT` verdict vocabulary.
+
+For `--json` modes, exit status reports command/parsing success. Inspect `verdict` to decide whether findings need attention.
+
 ## Host-forwarded background jobs
 
 `--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
@@ -119,6 +123,8 @@ Use `--json` for a validated `{verdict, summary, findings, next_steps}` object. 
 Read-only Claude review receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments while `Bash`, `Edit`, `Write`, and `MultiEdit` remain disallowed.
 
 `multi-review` runs role reviewers in parallel by default. `adversarial-review --parallel` runs skeptic, architect, and minimalist lens reviewers as independent Claude CLI processes and aggregates their outputs. Use `--sequential` when a deterministic one-at-a-time run is needed.
+
+Claude review output is a review artifact, not implementation authority. Preserve file paths, line numbers, role names, uncertainty markers, and residual-risk notes. Do not auto-fix review findings in the same step unless the user explicitly asks which findings to adopt.
 
 ## Routing
 
@@ -152,6 +158,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup --disable-revie
 ```
 
 After installing or upgrading, open Codex Settings > Hooks and trust or enable the `Claude for Codex` hooks. `SessionStart`, `SessionEnd`, and `UserPromptSubmit` provide session tracking, unread-result reminders, and turn-baseline capture when supported by the local Codex runtime.
+
+The Stop gate uses the `UserPromptSubmit` turn-baseline fingerprint to avoid reviewing old dirty workspace changes when the current turn did not change the working tree. Payload-based classification of status/setup/report-only Stop turns is deferred until a real Codex Stop payload exposes a verified edit/no-edit signal.
 
 ## Safety Model
 

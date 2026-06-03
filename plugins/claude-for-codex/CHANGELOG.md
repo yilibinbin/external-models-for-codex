@@ -4,6 +4,14 @@
 
 - Rename the local repository marketplace to `external-models-for-codex-local` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.7.0 - 2026-06-03
+
+- Add external prompt templates for Claude review, adversarial review, multi-review, plan, rescue, and review-gate prompts.
+- Add shared structured review schema and renderer support for `review --json` and role-tagged `multi-review --json`.
+- Preserve specialized `adversarial-review --json` verdicts (`PASS`, `CONTESTED`, `REJECT`) while documenting the separate schema.
+- Tighten Stop gate documentation around the existing turn-baseline fingerprint boundary and defer payload-based edit classification until a real Codex Stop payload contract is available.
+- Strengthen review result-handling guidance and foreground/background review-size guidance in skills and docs.
+
 ## 0.6.0 - 2026-06-03
 
 - Add default parallel role execution for `multi-review` and opt-in parallel adversarial lens execution with `adversarial-review --parallel`.

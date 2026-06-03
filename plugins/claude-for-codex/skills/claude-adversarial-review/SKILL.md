@@ -35,6 +35,8 @@ Rules:
 - Use `--json` when Codex needs a machine-checked adversarial verdict object.
 - Codex must accept or reject Claude findings with its own judgment before making follow-up edits.
 - Do not apply fixes until the user chooses which findings to adopt.
+- Preserve file paths, line numbers, uncertainty markers, residual-risk notes, and evidence boundaries exactly.
+- If Claude fails or returns malformed structured output, report that failure instead of replacing it with Codex guesses.
 
 Arguments:
 - `--adversarial-lenses skeptic,architect,minimalist` selects an ordered lens subset.
@@ -46,6 +48,7 @@ Arguments:
 - `--parallel` runs selected adversarial lenses as independent Claude reviewer processes and aggregates their outputs.
 - `--sequential` keeps the single-call adversarial review path.
 - `--json` validates Claude output as `{verdict, summary, findings, next_steps}`.
+- `--json` keeps the adversarial verdict vocabulary `PASS|CONTESTED|REJECT`; it is intentionally separate from normal `review --json`.
 - `--json` is only supported on the single-call path; do not combine it with `--parallel`.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
