@@ -1,6 +1,6 @@
 {
   "name": "claude-for-codex",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",

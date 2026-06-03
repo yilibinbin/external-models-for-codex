@@ -264,9 +264,16 @@ function parseArgs(argv) {
       parsed.jsonOutput = true;
     } else if (arg === "--write") {
       parsed.write = true;
+    } else if (arg === "--parallel") {
+      parsed.parallel = true;
+    } else if (arg === "--sequential") {
+      parsed.sequential = true;
     } else {
       parsed._.push(arg);
     }
+  }
+  if (parsed.parallel && parsed.sequential) {
+    throw new Error("Choose either --parallel or --sequential.");
   }
   return parsed;
 }
@@ -531,7 +538,7 @@ function collectGitContext(options) {
   ].filter((line) => line !== "").join("\n");
 }
 
-function claudePrint(prompt, options) {
+function buildClaudePrintInvocation(prompt, options) {
   const args = [
     "--print",
     "--permission-mode",
@@ -567,8 +574,81 @@ function claudePrint(prompt, options) {
   }
 
   args.push(prompt);
+  return { args, mcpConfig };
+}
+
+function claudePrint(prompt, options) {
+  const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
   try {
     return runClaude(args, { timeout: options.timeout });
+  } finally {
+    if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
+      mcpConfig.cleanup();
+    }
+  }
+}
+
+function runClaudeAsync(args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(claudeCommand(), args, {
+      cwd: options.cwd ?? process.cwd(),
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    let settled = false;
+    const timeout = options.timeout
+      ? setTimeout(() => {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+            // Process may already have exited.
+          }
+        }, options.timeout)
+      : null;
+
+    child.stdout?.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+    child.once("error", (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      resolve({
+        status: 1,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        error: error.message || String(error),
+        errorCode: error.code ? String(error.code) : ""
+      });
+    });
+    child.once("close", (status, signal) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeout) {
+        clearTimeout(timeout);
+      }
+      resolve({
+        status: status ?? (signal ? 1 : 0),
+        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+        stderr: Buffer.concat(stderrChunks).toString("utf8"),
+        error: "",
+        errorCode: ""
+      });
+    });
+  });
+}
+
+async function claudePrintAsync(prompt, options) {
+  const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
+  try {
+    return await runClaudeAsync(args, { timeout: options.timeout });
   } finally {
     if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
       mcpConfig.cleanup();
@@ -1276,7 +1356,41 @@ function runReviewGate(rawArgs) {
   setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
 }
 
-function runClaudeTask(kind, rawArgs) {
+function renderRoleReviewSections(title, results, roleLabel = "Role") {
+  const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
+  const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
+  const noun = roleLabel.toLowerCase();
+  const plural = noun === "lens" ? "lenses" : `${noun}s`;
+  const sections = [
+    title,
+    ...results.map(({ role, result }) => [
+      `## ${roleLabel}: ${role.name}`,
+      result.stdout.trim() || "(no stdout)",
+      result.status === 0 ? "" : [
+        "",
+        `${roleLabel} failed with exit status ${result.status}.`,
+        result.stderr || result.error ? `stderr: ${(result.stderr || result.error).trim()}` : ""
+      ].filter(Boolean).join("\n")
+    ].filter(Boolean).join("\n")),
+    "## Orchestration Summary",
+    `execution mode: parallel`,
+    `${plural} requested: ${results.map(({ role }) => role.name).join(", ")}`,
+    `${plural} succeeded: ${succeeded.length ? succeeded.join(", ") : "(none)"}`,
+    `${plural} failed: ${failed.length ? failed.join(", ") : "(none)"}`,
+    `exit policy: exits non-zero if any ${noun} fails; completed ${noun} output remains visible.`
+  ];
+  return { text: `${sections.join("\n\n")}\n`, failed };
+}
+
+async function runParallelRoleReviews(roles, args, gitContext, promptBuilder) {
+  const pending = roles.map(async (role) => ({
+    role,
+    result: await claudePrintAsync(promptBuilder(role, args, gitContext), args)
+  }));
+  return Promise.all(pending);
+}
+
+async function runClaudeTask(kind, rawArgs) {
   if (maybeStartBackground(kind, rawArgs)) {
     return;
   }
@@ -1288,6 +1402,9 @@ function runClaudeTask(kind, rawArgs) {
     }
     if (kind === "adversarial-review") {
       args.resolvedAdversarialLenses = resolveAdversarialLenses(args);
+    }
+    if (kind === "adversarial-review" && args.parallel && args.jsonOutput) {
+      throw new Error("adversarial-review --parallel does not support --json; use sequential --json for a single structured verdict.");
     }
     if (args.roles !== undefined) {
       args.reviewRoles = resolveReviewRoles(args);
@@ -1306,6 +1423,17 @@ function runClaudeTask(kind, rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
+  if (kind === "adversarial-review" && args.parallel) {
+    const gitContext = collectGitContext(args);
+    const roles = args.resolvedAdversarialLenses.map((lens) => ({
+      name: lens.name,
+      directive: lens.directive
+    }));
+    const results = await runParallelRoleReviews(roles, args, gitContext, multiReviewRolePrompt);
+    const rendered = renderRoleReviewSections("# Claude Parallel Adversarial Review", results, "Lens");
+    process.stdout.write(rendered.text);
+    process.exit(rendered.failed.length ? 1 : 0);
+  }
   const prompt = kind === "plan" ? planPrompt(args) : kind === "rescue" ? rescuePrompt(args) : reviewPrompt(kind, args);
   let rescueBefore = null;
   if (kind === "rescue" && args.write) {
@@ -1339,7 +1467,7 @@ function runClaudeTask(kind, rawArgs) {
   process.stdout.write(result.stdout);
 }
 
-function runClaudeMultiReview(rawArgs) {
+async function runClaudeMultiReview(rawArgs) {
   if (maybeStartBackground("multi-review", rawArgs)) {
     return;
   }
@@ -1368,35 +1496,22 @@ function runClaudeMultiReview(rawArgs) {
   args.scope = scope;
 
   const gitContext = collectGitContext(args);
-  const results = [];
-  for (const role of args.reviewRoles) {
-    const prompt = multiReviewRolePrompt(role, args, gitContext);
-    const result = claudePrint(prompt, args);
-    results.push({ role, result });
+  const runInParallel = !args.sequential;
+  let results = [];
+  if (runInParallel) {
+    results = await runParallelRoleReviews(args.reviewRoles, args, gitContext, multiReviewRolePrompt);
+  } else {
+    for (const role of args.reviewRoles) {
+      const prompt = multiReviewRolePrompt(role, args, gitContext);
+      const result = claudePrint(prompt, args);
+      results.push({ role, result });
+    }
   }
 
-  const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
-  const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
-  const sections = [
-    "# Claude Multi-Agent Review",
-    ...results.map(({ role, result }) => [
-      `## Role: ${role.name}`,
-      result.stdout.trim() || "(no stdout)",
-      result.status === 0 ? "" : [
-        "",
-        `Role failed with exit status ${result.status}.`,
-        result.stderr || result.error ? `stderr: ${(result.stderr || result.error).trim()}` : ""
-      ].filter(Boolean).join("\n")
-    ].filter(Boolean).join("\n")),
-    "## Orchestration Summary",
-    `roles requested: ${args.reviewRoles.map((role) => role.name).join(", ")}`,
-    `roles succeeded: ${succeeded.length ? succeeded.join(", ") : "(none)"}`,
-    `roles failed: ${failed.length ? failed.join(", ") : "(none)"}`,
-    "exit policy: exits non-zero if any role fails; completed role output remains visible."
-  ];
-
-  process.stdout.write(`${sections.join("\n\n")}\n`);
-  process.exit(failed.length ? 1 : 0);
+  const rendered = renderRoleReviewSections("# Claude Multi-Agent Review", results, "Role");
+  const summaryMode = `execution mode: ${runInParallel ? "parallel" : "sequential"}`;
+  process.stdout.write(rendered.text.replace("execution mode: parallel", summaryMode));
+  process.exit(rendered.failed.length ? 1 : 0);
 }
 
 function printJobs() {
@@ -1613,19 +1728,19 @@ switch (command) {
     printSetup(rawArgs);
     break;
   case "review":
-    runClaudeTask("review", rawArgs);
+    await runClaudeTask("review", rawArgs);
     break;
   case "adversarial-review":
-    runClaudeTask("adversarial-review", rawArgs);
+    await runClaudeTask("adversarial-review", rawArgs);
     break;
   case "multi-review":
-    runClaudeMultiReview(rawArgs);
+    await runClaudeMultiReview(rawArgs);
     break;
   case "plan":
-    runClaudeTask("plan", rawArgs);
+    await runClaudeTask("plan", rawArgs);
     break;
   case "rescue":
-    runClaudeTask("rescue", rawArgs);
+    await runClaudeTask("rescue", rawArgs);
     break;
   case "status":
     printStatus();

@@ -152,7 +152,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
-`multi-review` runs several role-specialized Claude review prompts and prints one section per role plus an orchestration summary. This is role fan-out from the plugin runtime, not Claude native background agents. It is read-only; Codex must reconcile findings before any follow-up changes.
+`multi-review` runs several role-specialized Claude review prompts in parallel by default and prints one section per role plus an orchestration summary. This is plugin-managed parallel Claude CLI orchestration, not Claude native background agents. It is read-only; Codex must reconcile findings before any follow-up changes. Use `--sequential` to run one role at a time for debugging or rate-limit-sensitive environments.
 
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
 
@@ -188,6 +188,8 @@ Use lens selection when a review needs a narrower challenge:
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --adversarial-lenses skeptic,minimalist --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles skeptic,architect,minimalist --base main
 ```
+
+Use `adversarial-review --parallel` to run each selected adversarial lens as an independent Claude reviewer process and aggregate their outputs. `--json` remains available for the single-call adversarial verdict path and is intentionally not combined with parallel lens execution.
 
 Use structured adversarial output when Codex needs a machine-checked verdict:
 

@@ -5,7 +5,7 @@ description: Opt in to plugin-managed role fan-out Claude review from Codex for 
 
 # Claude Multi Review
 
-Use this skill when Codex needs several independent Claude review passes with different role directives. This is an opt-in fan-out review workflow, not automatic repair.
+Use this skill when Codex needs several independent Claude review passes with different role directives. This is an opt-in fan-out review workflow, not automatic repair. Foreground role reviewers run in parallel by default.
 
 Run:
 
@@ -29,6 +29,7 @@ Rules:
 - This is read-only.
 - Claude must not edit files or apply fixes.
 - Treat each role output as review findings for Codex to reconcile.
+- Role reviewers run in parallel unless `--sequential` is explicitly supplied.
 - Codex remains responsible for deciding which findings to adopt, reject, or report as residual risk.
 - Preserve role headers, file paths, line numbers, uncertainty markers, failed-role diagnostics, and the orchestration summary.
 - Use `--background` for long multi-role reviews through the background routing contract above and retrieve the job with `claude-result`.
@@ -52,6 +53,8 @@ Arguments:
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
+- `--parallel` is the default execution mode for foreground role fan-out.
+- `--sequential` runs roles one at a time for debugging or rate-limit-sensitive environments.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
 

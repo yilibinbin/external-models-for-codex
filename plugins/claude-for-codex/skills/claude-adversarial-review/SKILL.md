@@ -29,6 +29,7 @@ Rules:
 - This is read-only.
 - Claude must first infer and state the author's intent.
 - Claude reviews through adversarial lenses: `skeptic`, `architect`, and `minimalist`.
+- Use `--parallel` when each adversarial lens should run as an independent Claude reviewer process.
 - Claude must output `PASS`, `CONTESTED`, or `REJECT`.
 - Claude must include `Findings`, `What Went Well`, and `Lead Judgment`.
 - Use `--json` when Codex needs a machine-checked adversarial verdict object.
@@ -42,7 +43,10 @@ Arguments:
 - `--scope auto|working-tree|branch` controls git context.
 - `--path <path>` filters review context; repeat for multiple paths.
 - `--model <model>` and `--effort <level>` are passed to Claude CLI.
+- `--parallel` runs selected adversarial lenses as independent Claude reviewer processes and aggregates their outputs.
+- `--sequential` keeps the single-call adversarial review path.
 - `--json` validates Claude output as `{verdict, summary, findings, next_steps}`.
+- `--json` is only supported on the single-call path; do not combine it with `--parallel`.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
 

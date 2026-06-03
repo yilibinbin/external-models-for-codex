@@ -4,6 +4,10 @@
 
 - Rename the local repository marketplace to `external-models-for-codex-local` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.6.0 - 2026-06-03
+
+- Add default parallel role execution for `multi-review` and opt-in parallel adversarial lens execution with `adversarial-review --parallel`.
+
 ## 0.5.0 - 2026-05-30
 
 - Added host-forwarded background job reservations with `reserve-job` and `run-reserved-job`.

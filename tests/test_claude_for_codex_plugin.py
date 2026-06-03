@@ -13,6 +13,7 @@ import pytest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "claude-for-codex"
 NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/Codex.app/Contents/Resources/node"
+DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
 
 
 def run_fake_claude_review(tmp_path, args, commit_head=False):
@@ -250,17 +251,20 @@ if sys.argv[1:] == ["--version"]:
     raise SystemExit(0)
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
-call_index = len(list(capture.glob("argv-*.json")))
 prompt = sys.argv[-1]
-(capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
-(capture / f"prompt-{call_index}.txt").write_text(prompt)
+role = "unknown"
+for candidate in ["correctness", "security", "tests", "release", "adversarial", "skeptic", "architect", "minimalist"]:
+    if f"<role_name>{candidate}</role_name>" in prompt:
+        role = candidate
+(capture / f"argv-{role}.json").write_text(json.dumps(sys.argv[1:]))
+(capture / f"prompt-{role}.txt").write_text(prompt)
 fail_roles = [role for role in os.environ.get("FAIL_ROLES", "").split(",") if role]
-for role in fail_roles:
-    if f"<role_name>{role}</role_name>" in prompt:
-        print(f"FAKE_CLAUDE_FAIL role {role} call {call_index}")
+for fail_role in fail_roles:
+    if role == fail_role:
+        print(f"FAKE_CLAUDE_FAIL role {role} call {role}")
         print(f"diagnostic for failed role {role}", file=sys.stderr)
         raise SystemExit(17)
-print(f"FAKE_CLAUDE_OK call {call_index}")
+print(f"FAKE_CLAUDE_OK call {role}")
 """
     )
     fake_claude.chmod(0o755)
@@ -277,15 +281,202 @@ print(f"FAKE_CLAUDE_OK call {call_index}")
         capture_output=True,
         text=True,
     )
+    requested_roles = DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS.copy()
+    if "--roles" in args:
+        requested_roles = args[args.index("--roles") + 1].split(",")
+    repeated_roles = [args[index + 1] for index, value in enumerate(args[:-1]) if value == "--role"]
+    if repeated_roles:
+        requested_roles = repeated_roles
     prompts = [
-        path.read_text()
-        for path in sorted(capture_dir.glob("prompt-*.txt"), key=lambda p: int(p.stem.split("-")[1]))
+        (capture_dir / f"prompt-{role}.txt").read_text()
+        for role in requested_roles
+        if (capture_dir / f"prompt-{role}.txt").exists()
     ]
     argvs = [
-        json.loads(path.read_text())
-        for path in sorted(capture_dir.glob("argv-*.json"), key=lambda p: int(p.stem.split("-")[1]))
+        json.loads((capture_dir / f"argv-{role}.json").read_text())
+        for role in requested_roles
+        if (capture_dir / f"argv-{role}.json").exists()
     ]
     return result, prompts, argvs
+
+
+def test_multi_review_runs_roles_in_parallel_by_default(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    release_file = capture_dir / "release"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "sample.txt").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "sample.txt").write_text("base\nchange\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import os
+import pathlib
+import re
+import sys
+import time
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+release = pathlib.Path(os.environ["RELEASE_FILE"])
+prompt = sys.argv[-1]
+match = re.search(r"<role_name>([^<]+)</role_name>", prompt)
+role = match.group(1) if match else "unknown"
+(capture / f"started-{role}").write_text(str(os.getpid()))
+deadline = time.time() + 10
+while not release.exists() and time.time() < deadline:
+    time.sleep(0.05)
+if not release.exists():
+    print(f"timeout waiting for release {role}", file=sys.stderr)
+    raise SystemExit(19)
+print(f"FAKE_CLAUDE_OK role {role}")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["RELEASE_FILE"] = str(release_file)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    proc = subprocess.Popen(
+        [NODE, str(runtime), "multi-review", "--roles", "correctness,security,tests", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 5
+        while len(list(capture_dir.glob("started-*"))) < 3 and time.time() < deadline:
+            time.sleep(0.05)
+        assert sorted(path.name for path in capture_dir.glob("started-*")) == [
+            "started-correctness",
+            "started-security",
+            "started-tests",
+        ]
+        release_file.write_text("go")
+        stdout, stderr = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=5)
+
+    assert proc.returncode == 0, stderr
+    assert "execution mode: parallel" in stdout
+    assert "FAKE_CLAUDE_OK role correctness" in stdout
+    assert "FAKE_CLAUDE_OK role security" in stdout
+    assert "FAKE_CLAUDE_OK role tests" in stdout
+
+
+def test_adversarial_review_parallel_spawns_lens_reviewers(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    release_file = capture_dir / "release"
+    repo.mkdir()
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "sample.txt").write_text("base\n")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "sample.txt").write_text("base\nchange\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import os
+import pathlib
+import re
+import sys
+import time
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+release = pathlib.Path(os.environ["RELEASE_FILE"])
+prompt = sys.argv[-1]
+match = re.search(r"<role_name>([^<]+)</role_name>", prompt)
+lens = match.group(1) if match else "unknown"
+(capture / f"started-{lens}").write_text(str(os.getpid()))
+deadline = time.time() + 10
+while not release.exists() and time.time() < deadline:
+    time.sleep(0.05)
+if not release.exists():
+    print(f"timeout waiting for release {lens}", file=sys.stderr)
+    raise SystemExit(19)
+print(f"FAKE_CLAUDE_OK lens {lens}")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["RELEASE_FILE"] = str(release_file)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    proc = subprocess.Popen(
+        [NODE, str(runtime), "adversarial-review", "--parallel", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        deadline = time.time() + 5
+        while len(list(capture_dir.glob("started-*"))) < 3 and time.time() < deadline:
+            time.sleep(0.05)
+        assert sorted(path.name for path in capture_dir.glob("started-*")) == [
+            "started-architect",
+            "started-minimalist",
+            "started-skeptic",
+        ]
+        release_file.write_text("go")
+        stdout, stderr = proc.communicate(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate(timeout=5)
+
+    assert proc.returncode == 0, stderr
+    assert stdout.startswith("# Claude Parallel Adversarial Review")
+    assert "execution mode: parallel" in stdout
+    assert "lenses requested: skeptic, architect, minimalist" in stdout
+    assert "FAKE_CLAUDE_OK lens skeptic" in stdout
+    assert "FAKE_CLAUDE_OK lens architect" in stdout
+    assert "FAKE_CLAUDE_OK lens minimalist" in stdout
+
+
+def test_adversarial_review_parallel_rejects_json_contract(tmp_path):
+    result, prompt, _argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--parallel", "--json"],
+    )
+
+    assert result.returncode == 2
+    assert "adversarial-review --parallel does not support --json" in result.stderr
+    assert prompt == ""
 
 
 def prepare_gate_repo(tmp_path, *, with_change=True):
@@ -425,7 +616,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.5.0"
+    assert data["version"] == "0.6.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -433,7 +624,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.5.0"
+    assert manifest["version"] == "0.6.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -961,17 +1152,16 @@ def test_multi_review_failed_role_preserves_partial_results_and_continues(tmp_pa
     )
 
     assert result.returncode == 1
-    assert [re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1) for prompt in prompts] == [
+    assert sorted(re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1) for prompt in prompts) == [
         "correctness",
         "security",
         "tests",
     ]
     assert re.findall(r"^## Role: (.+)$", result.stdout, re.M) == ["correctness", "security", "tests"]
-    assert "FAKE_CLAUDE_OK call 0" in result.stdout
-    assert "FAKE_CLAUDE_FAIL role security call 1" in result.stdout
+    assert "FAKE_CLAUDE_FAIL role security call" in result.stdout
     assert "Role failed with exit status 17." in result.stdout
     assert "stderr: diagnostic for failed role security" in result.stdout
-    assert "FAKE_CLAUDE_OK call 2" in result.stdout
+    assert result.stdout.count("FAKE_CLAUDE_OK call") == 2
     assert "roles requested: correctness, security, tests" in result.stdout
     assert "roles succeeded: correctness, tests" in result.stdout
     assert "roles failed: security" in result.stdout
@@ -985,7 +1175,7 @@ def test_multi_review_roles_subset_and_headers_keep_order(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    assert [re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1) for prompt in prompts] == [
+    assert sorted(re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1) for prompt in prompts) == [
         "correctness",
         "security",
     ]
@@ -1001,12 +1191,13 @@ def test_multi_review_supports_adversarial_lens_roles(tmp_path):
 
     assert result.returncode == 0
     assert len(prompts) == 3
-    assert "<role_name>skeptic</role_name>" in prompts[0]
-    assert "<role_name>architect</role_name>" in prompts[1]
-    assert "<role_name>minimalist</role_name>" in prompts[2]
-    assert "Challenge correctness and completeness." in prompts[0]
-    assert "Challenge structural fitness." in prompts[1]
-    assert "Challenge necessity and complexity." in prompts[2]
+    prompts_by_role = {
+        re.search(r"<role_name>([^<]+)</role_name>", prompt).group(1): prompt
+        for prompt in prompts
+    }
+    assert "Challenge correctness and completeness." in prompts_by_role["skeptic"]
+    assert "Challenge structural fitness." in prompts_by_role["architect"]
+    assert "Challenge necessity and complexity." in prompts_by_role["minimalist"]
 
 
 def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):
