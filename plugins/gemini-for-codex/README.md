@@ -38,11 +38,13 @@ The plugin sends bounded inline git context and does not depend on Gemini MCP or
 ## Commands
 
 - `setup`: report Gemini, git, hook, and review-gate status; supports `--enable-review-gate` and `--disable-review-gate`.
-- `review`: read-only review of current git changes or a branch diff.
+- `review`: read-only review of current git changes or a branch diff. Add `--structured` for schema-validated review output.
 - `adversarial-review`: skeptical multi-lens review.
 - `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
 - `plan`: independent implementation plan for Codex to reconcile.
-- `rescue`: read-only diagnosis for stuck implementation work.
+- `rescue`: read-only diagnosis for stuck implementation work. Explicit `--resume`, `--session-id`, and `--worktree` are forwarded only when the installed Gemini CLI reports support.
+- `recommend-execution-mode`: return JSON guidance for foreground versus background review sizing.
+- `sessions`: list Gemini CLI sessions when the installed Gemini CLI reports `--list-sessions`.
 - `jobs`, `result`, `cancel`: tracked job lifecycle.
 - `review-gate`: internal Stop hook runner.
 
@@ -65,6 +67,8 @@ Both modes are read-only and use bounded git context. Native subagent mode also 
 
 ## Stop Hook
 
+Hooks are installed but conservative. `SessionStart`, `SessionEnd`, and `UserPromptSubmit` track the active session, record turn baselines, and remind about unread Gemini job results. Session cleanup cancels only jobs with an explicit matching session id.
+
 The Stop hook is installed but disabled by default. Enable it per repository with:
 
 ```bash
@@ -73,10 +77,18 @@ node plugins/gemini-for-codex/scripts/gemini-companion.mjs setup --enable-review
 
 Only explicit `BLOCK:` verdicts from Gemini emit Codex hook block JSON. Gemini CLI failures, auth failures, rate limits, timeouts, parse errors, and invalid gate output fail open with stderr diagnostics.
 
+## Structured Review And Sessions
+
+`review --structured` asks Gemini for a JSON review object, extracts fenced or embedded JSON, validates it, and renders normalized findings. Invalid or malformed structured output exits non-zero instead of being treated as approval.
+
+Gemini native session flags are capability-gated. Run `setup` to see whether the current CLI reports `--resume`, `--session-id`, `--session-file`, `--list-sessions`, and `--worktree`. Unsupported requested flags fail before Gemini invocation.
+
 ## Verification
 
 ```bash
 python3 -m pytest tests/test_gemini_for_codex_plugin.py -q
 node --check plugins/gemini-for-codex/scripts/gemini-companion.mjs
 node --check plugins/gemini-for-codex/hooks/gemini-review-gate.mjs
+node --check plugins/gemini-for-codex/hooks/session-lifecycle.mjs
+node --check plugins/gemini-for-codex/hooks/unread-result.mjs
 ```

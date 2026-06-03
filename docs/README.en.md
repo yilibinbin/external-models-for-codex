@@ -71,7 +71,7 @@ Gemini CLI resolution order:
 - `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
-- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only. `gemini-multi-review` runs parallel role fan-out and supports `--native-agents` for Gemini CLI native subagents.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini-native session flags are capability-gated from the installed CLI.
 
 ## Gemini for Codex
 
@@ -85,6 +85,10 @@ codex plugin add gemini-for-codex@external-models-for-codex-local
 Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. It uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
 
 `gemini-multi-review` has two multi-agent modes. By default it starts one Gemini CLI role reviewer per selected role in parallel and aggregates the outputs. With `--native-agents`, it creates temporary Gemini subagent definitions and asks Gemini CLI to dispatch `@gfc_<role>` native subagents for the requested review roles.
+
+Gemini for Codex now also registers SessionStart, SessionEnd, UserPromptSubmit, and Stop hooks. Session hooks track the active Codex session, record turn baselines, remind about unread Gemini job results, and only clean up queued/running jobs with an explicit matching session id.
+
+Use `gemini-review --structured` for schema-validated review output. Use `recommend-execution-mode` for noninteractive foreground/background sizing guidance. `setup` reports whether the current Gemini CLI supports `--resume`, `--session-id`, `--session-file`, `--list-sessions`, and `--worktree`; unsupported requested flags fail before Gemini invocation.
 
 ## Enhanced Adversarial Review
 

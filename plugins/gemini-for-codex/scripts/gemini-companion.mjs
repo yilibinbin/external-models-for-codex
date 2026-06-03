@@ -31,8 +31,11 @@ import {
   turnBaselineFileForCwd
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
+import { loadPromptTemplate, renderPromptTemplate } from "./lib/prompt-template.mjs";
+import { renderStructuredReview, validateStructuredReview } from "./lib/render-review.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "__run-job", "reserve-job", "run-reserved-job"]);
+const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -40,6 +43,7 @@ const GEMINI_CLI_PATH_ENV = "GEMINI_CLI_PATH";
 const REVIEW_GATE_ENV = "GEMINI_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
+let geminiHelpReportCache = null;
 const ADVERSARIAL_LENSES = Object.freeze({
   skeptic: {
     label: "Skeptic",
@@ -107,7 +111,7 @@ const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? process.cwd(),
-    env: process.env,
+    env: options.env ?? process.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: 20 * 1024 * 1024,
@@ -269,8 +273,35 @@ function geminiHelpReport() {
     ok: result.status === 0 && missing.length === 0,
     missing,
     requiredFlags,
+    capabilities: geminiCapabilitiesFromHelp(help),
     error: result.status === 0 ? "" : (result.stderr || result.error || "gemini --help failed").trim()
   };
+}
+
+function geminiCapabilitiesFromHelp(help) {
+  const text = String(help ?? "");
+  return {
+    resume: text.includes("--resume"),
+    sessionId: text.includes("--session-id"),
+    sessionFile: text.includes("--session-file"),
+    listSessions: text.includes("--list-sessions"),
+    worktree: text.includes("--worktree"),
+    includeDirectories: text.includes("--include-directories")
+  };
+}
+
+function currentGeminiCapabilities() {
+  if (!geminiHelpReportCache) {
+    geminiHelpReportCache = geminiHelpReport();
+  }
+  return geminiHelpReportCache.capabilities;
+}
+
+function requireGeminiCapability(capability, flag) {
+  const capabilities = currentGeminiCapabilities();
+  if (!capabilities[capability]) {
+    throw new Error(`Gemini CLI does not report support for ${flag}. Run setup to inspect available capabilities.`);
+  }
 }
 
 function hasHead() {
@@ -341,8 +372,28 @@ function parseArgs(argv) {
       parsed.wait = true;
     } else if (arg === "--json" || arg === "--json-output") {
       parsed.jsonOutput = true;
+    } else if (arg === "--structured" || arg === "--review-json") {
+      parsed.structuredReview = true;
     } else if (arg === "--native-agents") {
       parsed.nativeAgents = true;
+    } else if (arg.startsWith("--resume=")) {
+      parsed.resume = arg.slice("--resume=".length) || "latest";
+    } else if (arg === "--resume") {
+      parsed.resume = "latest";
+    } else if (arg === "--fresh") {
+      parsed.fresh = true;
+    } else if (arg === "--session-id") {
+      parsed.sessionId = readOptionValue(tokens, index, arg);
+      index += 1;
+    } else if (arg.startsWith("--session-id=")) {
+      parsed.sessionId = arg.slice("--session-id=".length);
+      if (!parsed.sessionId) {
+        throw new Error("Missing value for --session-id.");
+      }
+    } else if (arg.startsWith("--worktree=")) {
+      parsed.worktree = arg.slice("--worktree=".length) || true;
+    } else if (arg === "--worktree") {
+      parsed.worktree = true;
     } else if (arg === "--write") {
       parsed.write = true;
     } else {
@@ -511,6 +562,131 @@ function safeResult(stdout) {
   };
 }
 
+function countStatusFiles(stdout) {
+  return String(stdout ?? "").split("\n").filter((line) => line.trim()).length;
+}
+
+function shortstatFileCount(stdout) {
+  const match = String(stdout ?? "").match(/(\d+)\s+files?\s+changed/);
+  return match ? Number(match[1]) : 0;
+}
+
+function shortstatChangedLines(stdout) {
+  const text = String(stdout ?? "");
+  const insertions = Number(text.match(/(\d+)\s+insertions?/)?.[1] ?? 0);
+  const deletions = Number(text.match(/(\d+)\s+deletions?/)?.[1] ?? 0);
+  return insertions + deletions;
+}
+
+function gitStatus(cwd, args) {
+  return run("git", args, {
+    cwd,
+    timeout: 10000,
+    env: {
+      ...process.env,
+      LC_ALL: "C",
+      LANG: "C"
+    }
+  });
+}
+
+function recommendExecutionMode(rawArgs) {
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  const cwd = process.cwd();
+  const commands = [];
+  const repo = gitStatus(cwd, ["rev-parse", "--show-toplevel"]);
+  if (repo.status !== 0) {
+    return {
+      recommendation: "foreground",
+      reason: "not a git repository",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: false, error: (repo.stderr || repo.error || "").trim() },
+      commands
+    };
+  }
+
+  const status = gitStatus(cwd, ["status", "--short", "--untracked-files=all"]);
+  commands.push("git status --short --untracked-files=all");
+  const statusFileCount = countStatusFiles(status.stdout);
+  const hasUntracked = String(status.stdout).split("\n").some((line) => line.startsWith("??"));
+  const staged = gitStatus(cwd, ["diff", "--shortstat", "--cached"]);
+  commands.push("git diff --shortstat --cached");
+  const unstaged = gitStatus(cwd, ["diff", "--shortstat"]);
+  commands.push("git diff --shortstat");
+
+  let branch = null;
+  if (args.base) {
+    const baseExists = hasBaseRef(args.base);
+    if (baseExists && hasHead()) {
+      const branchStat = gitStatus(cwd, ["diff", "--shortstat", `${args.base}...HEAD`]);
+      commands.push(`git diff --shortstat ${args.base}...HEAD`);
+      branch = {
+        available: branchStat.status === 0,
+        base: args.base,
+        fileCount: shortstatFileCount(branchStat.stdout),
+        changedLines: shortstatChangedLines(branchStat.stdout),
+        error: branchStat.status === 0 ? "" : (branchStat.stderr || branchStat.error || "").trim()
+      };
+    } else {
+      branch = {
+        available: false,
+        base: args.base,
+        fileCount: 0,
+        changedLines: 0,
+        error: "base ref or HEAD is unavailable"
+      };
+    }
+  }
+
+  const fileCountEstimate = Math.max(
+    statusFileCount,
+    shortstatFileCount(staged.stdout) + shortstatFileCount(unstaged.stdout),
+    branch?.fileCount ?? 0
+  );
+  const changedLineEstimate = shortstatChangedLines(staged.stdout)
+    + shortstatChangedLines(unstaged.stdout)
+    + (branch?.changedLines ?? 0);
+  const reviewable = statusFileCount > 0 || (branch?.fileCount ?? 0) > 0;
+  let recommendation = "foreground";
+  let reason = "empty working tree or branch scope";
+  if (branch && !branch.available) {
+    recommendation = "background";
+    reason = "branch base unavailable; manual/background review recommended";
+  } else if (!reviewable) {
+    recommendation = "foreground";
+  } else if (hasUntracked || fileCountEstimate > 2 || changedLineEstimate > 50) {
+    recommendation = "background";
+    reason = "review appears larger than a small foreground review";
+  } else {
+    recommendation = "foreground";
+    reason = "small review scope";
+  }
+
+  return {
+    recommendation,
+    reason,
+    reviewable,
+    fileCountEstimate,
+    changedLineEstimate,
+    hasUntracked,
+    git: {
+      repository: true,
+      headAvailable: hasHead(),
+      branch
+    },
+    commands
+  };
+}
+
 function collectGitContext(options) {
   const scope = options.scope ?? "auto";
   const base = options.base;
@@ -640,6 +816,18 @@ function geminiPrintArgs(prompt, options = {}) {
   }
   if (process.env.GEMINI_FOR_CODEX_SANDBOX === "on") {
     args.push("--sandbox");
+  }
+  if (options.resume && !options.fresh) {
+    args.push("--resume", options.resume === true ? "latest" : String(options.resume));
+  }
+  if (options.sessionId) {
+    args.push("--session-id", options.sessionId);
+  }
+  if (options.worktree) {
+    args.push("--worktree");
+    if (options.worktree !== true) {
+      args.push(String(options.worktree));
+    }
   }
   if (options.includeDirectories?.length) {
     for (const includeDirectory of options.includeDirectories) {
@@ -842,6 +1030,7 @@ function handleReserveJob(rawArgs) {
     throw new Error(`Command "${command}" cannot be reserved as a background job.`);
   }
   const commandArgs = stripBackgroundArgs(tokens.slice(1));
+  const session = readJson(currentSessionFileForCwd(process.cwd()), {});
   const workerCommand = [
     process.argv0 || process.execPath,
     process.argv[1],
@@ -851,6 +1040,7 @@ function handleReserveJob(rawArgs) {
     command,
     args: commandArgs,
     cwd: process.cwd(),
+    sessionId: session?.sessionId || "",
     focus: commandArgs.join(" ")
   }, workerCommand);
   workerCommand.push("--job-id", job.id);
@@ -949,6 +1139,34 @@ function adversarialJsonContract() {
   ].join("\n");
 }
 
+function reviewOutputContract(args) {
+  if (args.structuredReview) {
+    return [
+      "<output_contract>",
+      "Return exactly one JSON object and no Markdown.",
+      "Schema:",
+      "{",
+      '  "verdict": "approve | needs-attention",',
+      '  "summary": "short review summary",',
+      '  "findings": [',
+      '    {"severity": "critical|high|medium|low", "title": "short title", "body": "issue, evidence, and impact", "file": "path", "line_start": 1, "line_end": 1, "confidence": 0.0, "recommendation": "concrete action"}',
+      "  ],",
+      '  "next_steps": ["concrete next step"]',
+      "}",
+      "Use verdict approve and an empty findings array when there are no findings.",
+      "</output_contract>"
+    ].join("\n");
+  }
+  return [
+    "<output_contract>",
+    "## Findings",
+    "- [Severity] file:line - issue, evidence, impact, suggested direction",
+    "## Open Questions",
+    "## Residual Risk",
+    "</output_contract>"
+  ].join("\n");
+}
+
 function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -959,84 +1177,31 @@ function reviewPrompt(kind, args) {
 
   if (adversarial) {
     const adversarialLenses = args.resolvedAdversarialLenses ?? resolveAdversarialLenses(args);
-    return [
-      "<task>Run an adversarial read-only code and design review.</task>",
-      gitContext,
-      adversarialLensSection(adversarialLenses),
-      "<scale_guidance>",
-      "If the diff is small, emphasize Skeptic findings.",
-      "If the diff is medium, weigh Skeptic and Architect findings.",
-      "If the diff is large or spans many files, use Skeptic, Architect, and Minimalist lenses.",
-      "When explicit lenses are provided, use only those lenses.",
-      "Small means fewer than 50 changed lines across one or two files; medium means roughly 50 to 200 changed lines or three to five files; large means more than 200 changed lines or more than five files.",
-      "</scale_guidance>",
-      "<rules>",
-      "- Do not edit files.",
-      "- Do not suggest that you are about to apply fixes.",
-      "- First infer the author's intent from the request, focus text, git context, and changed files.",
-      "- Challenge whether the work achieves that intent well.",
-      "- Find real problems, not validation or style preferences.",
-      "- Ground every finding in concrete evidence from changed files or explicit git context.",
-      "- Include exact file paths and line numbers when available.",
-      "- Deduplicate overlapping lens findings.",
-      "- Apply lead judgment: accept strong findings and reject false positives or overreach.",
-      "- Use PASS only when there are no high-severity findings.",
-      "- Use CONTESTED when high-severity findings exist but lens evidence or agreement is mixed.",
-      "- Use REJECT when high-severity findings have strong evidence or consensus across lenses.",
-      "</rules>",
-      focus ? `<focus>${focus}</focus>` : "",
-      args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
-    ].filter(Boolean).join("\n");
+    return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "adversarial-review"), {
+      GIT_CONTEXT: gitContext,
+      ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
+      FOCUS: focus ? `<focus>${focus}</focus>` : "",
+      OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
+    });
   }
 
-  return [
-    "<task>Run a read-only code review.</task>",
-    gitContext,
-    reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
-    "<rules>",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Put findings first, ordered by severity.",
-    "- Ground every finding in concrete evidence from changed files or explicit git context.",
-    "- Include exact file paths and line numbers when available.",
-    "- If there are no findings, say so and list residual risks briefly.",
-    "- Focus on concrete bugs, regressions, missing tests, and maintainability risks.",
-    "</rules>",
-    focus ? `<focus>${focus}</focus>` : "",
-    "<output_contract>",
-    "## Findings",
-    "- [Severity] file:line - issue, evidence, impact, suggested direction",
-    "## Open Questions",
-    "## Residual Risk",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "review"), {
+    GIT_CONTEXT: gitContext,
+    REVIEW_ROLES: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
+    FOCUS: focus ? `<focus>${focus}</focus>` : "",
+    OUTPUT_CONTRACT: reviewOutputContract(args)
+  });
 }
 
 function multiReviewRolePrompt(role, args, gitContext) {
   const focus = args._.join(" ").trim();
 
-  return [
-    "<task>Run a role-specialized read-only code review.</task>",
-    `<role_name>${role.name}</role_name>`,
-    `<role_directive>${role.directive}</role_directive>`,
-    gitContext,
-    "<rules>",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Put findings first, ordered by severity.",
-    "- Ground every finding in concrete evidence from changed files or explicit git context.",
-    "- Include exact file paths and line numbers when available.",
-    "- If there are no findings, say so and list residual risks briefly.",
-    "- Focus only on this role's directive; do not broaden into unrelated review areas.",
-    "</rules>",
-    focus ? `<focus>${focus}</focus>` : "",
-    "<output_contract>",
-    "## Findings",
-    "- [Severity] file:line - issue, evidence, impact, suggested direction",
-    "## Open Questions",
-    "## Residual Risk",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "multi-review-role"), {
+    ROLE_NAME: role.name,
+    ROLE_DIRECTIVE: role.directive,
+    GIT_CONTEXT: gitContext,
+    FOCUS: focus ? `<focus>${focus}</focus>` : ""
+  });
 }
 
 function nativeAgentName(roleName) {
@@ -1081,52 +1246,20 @@ function writeNativeAgentWorkspace(roles) {
 function nativeMultiAgentPrompt(args, gitContext) {
   const focus = args._.join(" ").trim();
   const agentCalls = args.reviewRoles.map((role) => `@${nativeAgentName(role.name)}`).join(", ");
-  return [
-    "<task>Run a native Gemini subagent multi-review.</task>",
-    "<subagents>",
-    ...args.reviewRoles.map((role) => `${nativeAgentName(role.name)}: ${role.directive}`),
-    "</subagents>",
-    gitContext,
-    "<rules>",
-    `- Dispatch these Gemini subagents in parallel when possible: ${agentCalls}.`,
-    "- Each subagent must review independently through its own role directive.",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Ground every finding in concrete changed-file evidence or explicit git context.",
-    "- Preserve each subagent's findings under a role header.",
-    "- After subagent results, write one orchestration summary with roles requested, roles with findings, and residual risks.",
-    "</rules>",
-    focus ? `<focus>${focus}</focus>` : "",
-    "<output_contract>",
-    "# Gemini Native Subagent Review",
-    "## Role: <role name>",
-    "## Orchestration Summary",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "native-multi-agent"), {
+    SUBAGENTS: args.reviewRoles.map((role) => `${nativeAgentName(role.name)}: ${role.directive}`).join("\n"),
+    AGENT_CALLS: agentCalls,
+    GIT_CONTEXT: gitContext,
+    FOCUS: focus ? `<focus>${focus}</focus>` : ""
+  });
 }
 
 function reviewGateRolePrompt(role, args, gitContext) {
-  return [
-    "<task>Run a stop-gate review of the current git changes.</task>",
-    `<role_name>${role.name}</role_name>`,
-    `<role_directive>${role.directive}</role_directive>`,
-    gitContext,
-    "<rules>",
-    "- Do not edit files.",
-    "- Do not suggest that you are about to apply fixes.",
-    "- Review only the current git working-tree changes shown in the git context.",
-    "- Use BLOCK only for concrete issues that should prevent stopping now.",
-    "- Use ALLOW if you do not see a blocking issue for this role.",
-    "- Ground every BLOCK claim in concrete changed-file evidence when possible.",
-    "</rules>",
-    "<output_contract>",
-    "Your first line must be exactly one of:",
-    "ALLOW: <short reason>",
-    "BLOCK: <short reason>",
-    "Do not put anything before that first line.",
-    "After the first line, include concise evidence for BLOCK results.",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
+  return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "stop-review-gate"), {
+    ROLE_NAME: role.name,
+    ROLE_DIRECTIVE: role.directive,
+    GIT_CONTEXT: gitContext
+  });
 }
 
 function planPrompt(args) {
@@ -1315,6 +1448,9 @@ function buildSetupReport(actionsTaken = []) {
       bypassEnv: REVIEW_GATE_ENV
     },
     jobCommands: ["jobs", "result", "cancel", "rescue"],
+    sessionCommands: ["sessions"],
+    recommendationCommands: ["recommend-execution-mode"],
+    geminiCapabilities: preflight.capabilities,
     hooks: hookDiagnostics(),
     actionsTaken
   };
@@ -1369,6 +1505,21 @@ function parseGateVerdict(rawOutput) {
     return { kind: "block", reason: firstLine.slice("BLOCK:".length).trim() || "blocked", output: text };
   }
   return { kind: "invalid", reason: `unexpected first line: ${firstLine}` };
+}
+
+function validateGeminiSessionOptions(args) {
+  if (args.resume && args.fresh) {
+    throw new Error("Choose either --resume or --fresh, not both.");
+  }
+  if (args.resume) {
+    requireGeminiCapability("resume", "--resume");
+  }
+  if (args.sessionId) {
+    requireGeminiCapability("sessionId", "--session-id");
+  }
+  if (args.worktree) {
+    requireGeminiCapability("worktree", "--worktree");
+  }
 }
 
 function warnGate(message) {
@@ -1501,6 +1652,9 @@ function runGeminiTask(kind, rawArgs) {
     if (kind !== "multi-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
     }
+    if (args.structuredReview && kind !== "review") {
+      throw new Error("--structured is only valid for review.");
+    }
     if (kind === "adversarial-review") {
       args.resolvedAdversarialLenses = resolveAdversarialLenses(args);
     }
@@ -1513,6 +1667,7 @@ function runGeminiTask(kind, rawArgs) {
     if (args.effort) {
       throw new Error("--effort is not supported by Gemini for Codex.");
     }
+    validateGeminiSessionOptions(args);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -1545,6 +1700,17 @@ function runGeminiTask(kind, rawArgs) {
     }
     return;
   }
+  if (kind === "review" && args.structuredReview) {
+    try {
+      const parsed = validateStructuredReview(extractJsonObject(result.stdout));
+      process.stdout.write(`${renderStructuredReview(parsed)}\n`);
+    } catch (error) {
+      process.stderr.write(`Invalid structured review output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
   process.stdout.write(result.stdout);
 }
 
@@ -1561,6 +1727,10 @@ async function runGeminiMultiReview(rawArgs) {
     if (args.effort) {
       throw new Error("--effort is not supported by Gemini for Codex.");
     }
+    if (args.structuredReview) {
+      throw new Error("--structured is only valid for review.");
+    }
+    validateGeminiSessionOptions(args);
     args.reviewRoles = args.roles === undefined
       ? DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
           name,
@@ -1634,6 +1804,29 @@ async function runGeminiMultiReview(rawArgs) {
 
 function printJobs() {
   process.stdout.write(`${JSON.stringify(listJobs(process.cwd()), null, 2)}\n`);
+}
+
+function printExecutionRecommendation(rawArgs) {
+  process.stdout.write(`${JSON.stringify(recommendExecutionMode(rawArgs), null, 2)}\n`);
+}
+
+function printSessions() {
+  const capabilities = currentGeminiCapabilities();
+  if (!capabilities.listSessions) {
+    process.stdout.write(`${JSON.stringify({
+      available: false,
+      reason: "Gemini CLI does not report --list-sessions support."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
+  const result = runGemini(["--list-sessions"]);
+  process.stdout.write(`${JSON.stringify({
+    available: result.status === 0,
+    status: result.status,
+    stdout: result.stdout,
+    stderr: result.stderr || result.error
+  }, null, 2)}\n`);
+  process.exit(result.status === 0 ? 0 : 1);
 }
 
 function printResult(rawArgs) {
@@ -1868,6 +2061,12 @@ switch (command) {
     break;
   case "jobs":
     printJobs();
+    break;
+  case "recommend-execution-mode":
+    printExecutionRecommendation(rawArgs);
+    break;
+  case "sessions":
+    printSessions();
     break;
   case "result":
     printResult(rawArgs);

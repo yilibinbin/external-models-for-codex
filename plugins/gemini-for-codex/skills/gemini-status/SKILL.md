@@ -17,3 +17,11 @@ Rules:
 - Treat this as job status only.
 - Do not confuse it with the runtime `status` diagnostic command, which checks live Gemini agents and setup health.
 - If no jobs are listed, say there are no tracked Gemini jobs for this workspace.
+
+Gemini CLI sessions:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/gemini-companion.mjs" sessions "$ARGUMENTS"
+```
+
+Use `sessions` only when the user asks about Gemini native CLI sessions. It is capability-gated by the installed Gemini CLI.

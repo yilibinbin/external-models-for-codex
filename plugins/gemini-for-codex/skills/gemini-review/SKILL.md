@@ -30,11 +30,21 @@ Rules:
 - Do not fix findings in the same turn unless the user explicitly asks.
 - Preserve Gemini's file paths, line numbers, uncertainty markers, and residual-risk notes.
 - If Gemini reports no findings, still report any residual risks it listed.
+- Use `--structured` when the user needs schema-validated review findings; malformed structured output is a failure, not approval.
 - Use `--background` for long reviews through the background routing contract above so Codex can continue working and retrieve results later with `gemini-result`.
 
 Arguments:
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--model <model>` is passed to Gemini CLI.
+- `--structured` or `--review-json` returns schema-validated normalized review findings.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `gemini-result <job-id>`.
+
+Optional sizing helper:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/gemini-companion.mjs" recommend-execution-mode "$ARGUMENTS"
+```
+
+Use this helper when deciding whether a review should run in foreground or with `--background`.

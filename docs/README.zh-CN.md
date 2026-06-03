@@ -71,7 +71,7 @@ Gemini CLI 查找顺序：
 - `claude-status`、`claude-result`、`claude-cancel`：跟踪后台 Claude job。
 - `claude-review-gate`：配置可选 Stop Hook 审阅门禁。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
-- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；Gemini rescue 保持只读。`gemini-multi-review` 默认并行运行角色 fan-out，也支持 `--native-agents` 使用 Gemini CLI 原生 subagents。
+- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；Gemini rescue 保持只读。`gemini-review --structured` 会验证 schema-backed findings，`gemini-multi-review` 默认并行运行角色 fan-out，也支持 `--native-agents`，Gemini 原生 session flags 会按当前 CLI 能力探测启用。
 
 ## Gemini for Codex
 
@@ -85,6 +85,10 @@ codex plugin add gemini-for-codex@external-models-for-codex-local
 Gemini 审阅使用 `gemini --approval-mode=plan --output-format=json --prompt`。它使用有界 inline git context，不依赖 Gemini MCP 或 Gemini extension。
 
 `gemini-multi-review` 有两种多代理模式。默认模式会为每个选择的角色并行启动一个 Gemini CLI 审阅进程并汇总输出。使用 `--native-agents` 时，运行时会创建临时 Gemini subagent 定义，并要求 Gemini CLI 通过 `@gfc_<role>` 原生 subagents 执行对应角色审阅。
+
+Gemini for Codex 现在也注册 SessionStart、SessionEnd、UserPromptSubmit 和 Stop hooks。Session hooks 会记录当前 Codex session、写入 turn baseline、提醒未读 Gemini job 结果，并且只清理明确同 session id 的 queued/running jobs。
+
+需要结构化审阅时使用 `gemini-review --structured`。需要非交互式判断前台/后台时使用 `recommend-execution-mode`。`setup` 会报告当前 Gemini CLI 是否支持 `--resume`、`--session-id`、`--session-file`、`--list-sessions` 和 `--worktree`；不支持的显式请求会在调用 Gemini 前失败。
 
 ## 增强对抗性审阅
 
