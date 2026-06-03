@@ -1,7 +1,7 @@
 {
-  "name": "external-models-for-codex-local",
+  "name": "external-models-for-codex",
   "interface": {
-    "displayName": "External Models for Codex Local"
+    "displayName": "External Models for Codex"
   },
   "plugins": [
     {

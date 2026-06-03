@@ -1,38 +1,46 @@
-# Claude for Codex / Gemini for Codex
+# External Models for Codex
 
 [中文](docs/README.zh-CN.md) | [English](docs/README.en.md)
 
-Claude for Codex is a Codex plugin that lets Codex call the local Claude Code CLI for independent read-only review, adversarial critique, implementation planning, multi-role review, and an optional Stop hook review gate.
+External Models for Codex is a Codex plugin marketplace for external model CLI workflows. It publishes provider-specific Codex plugins that let Codex ask another local model CLI to review, plan, challenge, rescue, and gate work without turning that model into the implementation authority.
 
-Gemini for Codex is the sibling plugin that calls the local Gemini CLI for the same Codex-side review and planning loop using Gemini plan mode and bounded inline git context.
+The marketplace currently includes:
 
-Claude for Codex 是一个 Codex 插件，用于在 Codex 中调用本地 Claude Code CLI，提供只读代码审阅、对抗性审阅、独立规划、多角色审阅，以及可选的 Stop Hook 审阅门禁。Gemini for Codex 是同仓库的姊妹插件，用 Gemini CLI plan mode 提供第二模型复审和规划。
+- Claude for Codex: calls the local Claude Code CLI for read-only review, adversarial critique, implementation planning, multi-role review, rescue diagnosis, background jobs, structured review output, and an optional Stop hook review gate.
+- Gemini for Codex: calls the local Gemini CLI for the same Codex-side review and planning loop using Gemini plan mode, schema-backed structured review, native session capability checks, and bounded inline git context.
+
+External Models for Codex 是一个面向 Codex 的外部模型插件市场，用于把本地 Claude Code CLI、Gemini CLI 等外部模型接入 Codex 的审阅、规划、对抗性复审、救援诊断和 Hook 门禁流程。Codex 仍负责实现和最终决策，外部模型提供独立第二视角。
+
+当前市场包含：
+
+- Claude for Codex：调用本地 Claude Code CLI，提供只读审阅、对抗性审阅、独立规划、多角色审阅、救援诊断、后台任务、结构化审阅输出和可选 Stop Hook 门禁。
+- Gemini for Codex：调用本地 Gemini CLI，以 Gemini plan mode、有界 inline git context、结构化审阅和能力探测支持第二模型复审与规划。
 
 ## Install
 
 Remote install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@external-models-for-codex-local
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref main
+codex plugin add claude-for-codex@external-models-for-codex
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
 Upgrade an existing install:
 
 ```bash
-codex plugin marketplace upgrade external-models-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@external-models-for-codex-local
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
 Local development install from this repository:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add claude-for-codex@external-models-for-codex-local
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
 ## Requirements
@@ -59,7 +67,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `claude-collaboration-loop`: run a plan, reconcile, implement, review, and report workflow.
 - `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents that stay read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini session flags are capability-gated from the installed CLI.
 
-This is a skills-and-hook plugin, not an MCP/app tool plugin. It is expected that `tool_search` will not expose a `claude-for-codex` callable tool. Codex should route through the `claude-for-codex:*` skills.
+These are skills-and-hook plugins, not MCP/app tool plugins. It is expected that `tool_search` will not expose callable `claude-for-codex` or `gemini-for-codex` tools. Codex should route through the provider skills such as `claude-for-codex:*` and `gemini-for-codex:*`.
 
 ## Stop Review Gate
 

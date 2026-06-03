@@ -1,25 +1,28 @@
-# Claude for Codex Documentation
+# External Models for Codex Documentation
 
-Claude for Codex is a Codex plugin that lets Codex call the local Claude Code CLI for independent review and planning.
+External Models for Codex is a Codex plugin marketplace for external model CLI workflows. It keeps provider-specific plugins in one installable marketplace while preserving separate plugin IDs, skills, hooks, and safety models for each model provider.
 
-Gemini for Codex is the sibling Codex plugin that calls the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode and bounded inline git context.
+Included plugins:
+
+- Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, rescue diagnosis, structured review output, and optional Stop hook gates.
+- Gemini for Codex lets Codex call the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode, bounded inline git context, schema-backed structured review, and capability-gated Gemini session flags.
 
 ## Installation
 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@external-models-for-codex-local
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref main
+codex plugin add claude-for-codex@external-models-for-codex
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
 Upgrade an existing installation:
 
 ```bash
-codex plugin marketplace upgrade external-models-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex
 ```
 
 Rollback from `0.4.0`: disable the review gate with `setup --disable-review-gate`, remove or downgrade the plugin, then remove stale trusted hook entries for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, or `Stop` if Codex Settings still points at missing files.
@@ -28,8 +31,8 @@ Install from a local checkout:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add claude-for-codex@external-models-for-codex-local
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
 ## Requirements
@@ -79,7 +82,7 @@ Install from the same local marketplace:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
 Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. It uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.

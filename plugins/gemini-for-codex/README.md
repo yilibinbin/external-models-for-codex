@@ -20,10 +20,10 @@ Gemini CLI resolution order:
 
 ```bash
 codex plugin marketplace add .
-codex plugin add gemini-for-codex@external-models-for-codex-local
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
-`external-models-for-codex-local` is the local marketplace for this repository's Codex plugins that connect to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
+`external-models-for-codex` is this repository's Codex marketplace for plugins that connect Codex to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
 
 ## Runtime Safety
 

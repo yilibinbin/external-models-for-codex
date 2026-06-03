@@ -10,9 +10,9 @@ This plugin is prepared for a Codex plugin page with:
 - Category: Productivity
 - Developer: fanghao
 - License: MIT
-- Homepage: https://github.com/yilibinbin/claude-for-codex
-- Repository: https://github.com/yilibinbin/claude-for-codex
-- Marketplace id: `external-models-for-codex-local`
+- Homepage: https://github.com/yilibinbin/external-models-for-codex
+- Repository: https://github.com/yilibinbin/external-models-for-codex
+- Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
 - Current version: `0.7.0`
 
@@ -95,20 +95,20 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 ## Remote Install
 
 ```bash
-codex plugin marketplace add yilibinbin/claude-for-codex --ref main
-codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref main
+codex plugin add claude-for-codex@external-models-for-codex
 ```
 
-`external-models-for-codex-local` is the local marketplace for this repository's Codex plugins that connect to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
+`external-models-for-codex` is this repository's Codex marketplace for plugins that connect Codex to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
 
-The `yilibinbin/claude-for-codex` owner/repo form assumes this repository remains under that GitHub owner. If your Codex setup requires an explicit Git URL, use `https://github.com/yilibinbin/claude-for-codex.git` or `git@github.com:yilibinbin/claude-for-codex.git`.
+The `yilibinbin/external-models-for-codex` owner/repo form assumes this repository remains under that GitHub owner. If your Codex setup requires an explicit Git URL, use `https://github.com/yilibinbin/external-models-for-codex.git` or `git@github.com:yilibinbin/external-models-for-codex.git`.
 
 ## Upgrade
 
 ```bash
-codex plugin marketplace upgrade external-models-for-codex-local
+codex plugin marketplace upgrade external-models-for-codex
 codex plugin remove claude-for-codex
-codex plugin add claude-for-codex@external-models-for-codex-local
+codex plugin add claude-for-codex@external-models-for-codex
 ```
 
 ## Rollback

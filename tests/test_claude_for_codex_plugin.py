@@ -1665,7 +1665,7 @@ def test_setup_reports_hooks_and_mcp_diagnostics(tmp_path):
     codex_dir = home / ".codex"
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text(
-        '[hooks.state."claude-for-codex@external-models-for-codex-local:hooks/hooks.json:stop:0:0"]\n'
+        '[hooks.state."claude-for-codex@external-models-for-codex:hooks/hooks.json:stop:0:0"]\n'
         'trusted_hash = "sha256:abc"\n',
         encoding="utf8",
     )
@@ -1704,7 +1704,7 @@ def test_setup_reports_inline_hook_trust_state_for_existing_codex_config(tmp_pat
     codex_dir.mkdir()
     (codex_dir / "config.toml").write_text(
         "[hooks.state]\n"
-        '"claude-for-codex@external-models-for-codex-local:hooks/hooks.json:stop:0:0" = "trusted"\n',
+        '"claude-for-codex@external-models-for-codex:hooks/hooks.json:stop:0:0" = "trusted"\n',
         encoding="utf8",
     )
 

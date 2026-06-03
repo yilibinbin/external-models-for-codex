@@ -6,8 +6,8 @@
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
   },
-  "homepage": "https://github.com/yilibinbin/claude-for-codex",
-  "repository": "https://github.com/yilibinbin/claude-for-codex",
+  "homepage": "https://github.com/yilibinbin/external-models-for-codex",
+  "repository": "https://github.com/yilibinbin/external-models-for-codex",
   "license": "MIT",
   "keywords": [
     "claude",
@@ -47,7 +47,7 @@
       "Enable the opt-in Claude Stop review gate for this repository.",
       "Run a Codex-Claude collaboration loop and reconcile the findings."
     ],
-    "websiteURL": "https://github.com/yilibinbin/claude-for-codex",
+    "websiteURL": "https://github.com/yilibinbin/external-models-for-codex",
     "brandColor": "#4F46E5",
     "composerIcon": "assets/composer-icon.svg",
     "logo": "assets/logo.svg",

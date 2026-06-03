@@ -96,10 +96,10 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
     assert "mcp" not in manifest["keywords"]
-    assert manifest["homepage"] == "https://github.com/yilibinbin/claude-for-codex"
-    assert manifest["repository"] == "https://github.com/yilibinbin/claude-for-codex"
+    assert manifest["homepage"] == "https://github.com/yilibinbin/external-models-for-codex"
+    assert manifest["repository"] == "https://github.com/yilibinbin/external-models-for-codex"
     assert manifest["interface"]["displayName"] == "Gemini for Codex"
-    assert manifest["interface"]["websiteURL"] == "https://github.com/yilibinbin/claude-for-codex"
+    assert manifest["interface"]["websiteURL"] == "https://github.com/yilibinbin/external-models-for-codex"
     assert "schema-validated structured review" in manifest["interface"]["longDescription"].lower()
     assert "session lifecycle hooks" in manifest["interface"]["longDescription"].lower()
     assert "Gemini native session and worktree capability gating" in manifest["interface"]["capabilities"]
@@ -107,7 +107,7 @@ def test_gemini_plugin_manifest_is_valid_json():
 
 def test_marketplace_lists_gemini_for_codex():
     marketplace = json.loads((ROOT / ".agents" / "plugins" / "marketplace.json").read_text(encoding="utf8"))
-    assert marketplace["name"] == "external-models-for-codex-local"
+    assert marketplace["name"] == "external-models-for-codex"
     plugins = {item["name"]: item for item in marketplace["plugins"]}
     assert plugins["gemini-for-codex"]["source"]["path"] == "./plugins/gemini-for-codex"
     assert plugins["gemini-for-codex"]["source"]["source"] == "local"
@@ -690,9 +690,9 @@ def test_gemini_plugin_files_do_not_ship_claude_residue():
             continue
         text = path.read_text(encoding="utf8")
         if path.name == "README.md":
-            text = text.replace("claude-for-codex@external-models-for-codex-local", "")
-            text = text.replace("external-models-for-codex-local", "")
+            text = text.replace("claude-for-codex@external-models-for-codex", "")
+            text = text.replace("external-models-for-codex", "")
         if path.name == "plugin.json":
-            text = text.replace("https://github.com/yilibinbin/claude-for-codex", "")
+            text = text.replace("https://github.com/yilibinbin/external-models-for-codex", "")
         for token in forbidden:
             assert token not in text, f"{token} residue in {path}"

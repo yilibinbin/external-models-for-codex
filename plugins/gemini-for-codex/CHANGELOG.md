@@ -16,7 +16,7 @@
 
 ## 0.1.1 - 2026-06-02
 
-- Rename the local repository marketplace to `external-models-for-codex-local` so it can host multiple Codex plugins backed by external model CLIs.
+- Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 - Fix Gemini plugin metadata URLs to point at the hosting repository.
 - Harden Gemini Stop hook stdin handling and foreground command timeout behavior.
 - Reject `--roles` outside `multi-review`.
