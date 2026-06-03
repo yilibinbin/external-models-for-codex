@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.0 - 2026-06-03
+
+- Run `multi-review` role fan-out in parallel Gemini CLI invocations by default.
+- Add `multi-review --native-agents` to create temporary Gemini subagent definitions and ask Gemini CLI to dispatch `@gfc_*` native subagents for the requested review roles.
+- Document the difference between plugin-managed parallel role fan-out and Gemini native subagent orchestration.
+
 ## 0.1.1 - 2026-06-02
 
 - Rename the local repository marketplace to `external-models-for-codex-local` so it can host multiple Codex plugins backed by external model CLIs.

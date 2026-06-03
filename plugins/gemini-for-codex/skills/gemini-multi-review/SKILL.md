@@ -7,6 +7,8 @@ description: Opt in to plugin-managed role fan-out Gemini review from Codex for 
 
 Use this skill when Codex needs several independent Gemini review passes with different role directives. This is an opt-in fan-out review workflow, not automatic repair.
 
+Default foreground execution runs plugin-managed parallel Gemini CLI role fan-out. Add `--native-agents` when the user explicitly wants Gemini CLI native subagents: the runtime creates temporary `gfc_*` subagent definitions and prompts Gemini to dispatch them with `@gfc_<role>` calls.
+
 Run:
 
 ```bash
@@ -48,6 +50,7 @@ Additional opt-in adversarial lens roles:
 Arguments:
 - `--roles <a,b,c>` runs a comma-separated role list in order instead of the defaults.
 - `--role <name>` adds one role; repeat it to build an ordered role list.
+- `--native-agents` uses Gemini CLI native subagents for the requested roles instead of separate plugin-managed role invocations.
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
@@ -60,3 +63,4 @@ Examples:
 - `--roles correctness,security --scope branch --base main`
 - `--role release --role adversarial check upgrade and rollback risk`
 - `--roles skeptic,architect,minimalist --base main`
+- `--native-agents --roles correctness,security --base main`

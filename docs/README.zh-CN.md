@@ -2,7 +2,7 @@
 
 Claude for Codex 是一个 Codex 插件，用于让 Codex 调用本地 Claude Code CLI，获得独立的第二模型审阅和规划能力。
 
-Gemini for Codex 是同仓库的姊妹 Codex 插件，用于让 Codex 调用本地 Gemini CLI 做独立只读审阅和规划。v0.1.x 使用 Gemini plan mode 和有界 inline git context。
+Gemini for Codex 是同仓库的姊妹 Codex 插件，用于让 Codex 调用本地 Gemini CLI 做独立只读审阅和规划。它使用 Gemini plan mode 和有界 inline git context。
 
 ## 安装
 
@@ -66,12 +66,12 @@ Gemini CLI 查找顺序：
 - `claude-review`：对当前 git 变更或分支 diff 执行只读 Claude 审阅。
 - `claude-adversarial-review`：让 Claude 挑战方案假设、权衡、回滚路径和隐藏失败模式。
 - `claude-plan`：让 Claude 给出独立实施计划，供 Codex 在编辑前对照和吸收。
-- `claude-multi-review`：按 correctness、security、tests、release、adversarial 多角色顺序审阅。
+- `claude-multi-review`：并行运行 correctness、security、tests、release、adversarial 多角色审阅。
 - `claude-rescue`：让 Claude 做只读故障诊断，或在显式 `--write` 时执行修复。
 - `claude-status`、`claude-result`、`claude-cancel`：跟踪后台 Claude job。
 - `claude-review-gate`：配置可选 Stop Hook 审阅门禁。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
-- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；v0.1.x 中 Gemini rescue 保持只读。
+- `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；Gemini rescue 保持只读。`gemini-multi-review` 默认并行运行角色 fan-out，也支持 `--native-agents` 使用 Gemini CLI 原生 subagents。
 
 ## Gemini for Codex
 
@@ -82,7 +82,9 @@ codex plugin marketplace add .
 codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
-Gemini 审阅使用 `gemini --approval-mode=plan --output-format=json --prompt`。v0.1.x 使用有界 inline git context，不依赖 Gemini MCP 或 Gemini extension。
+Gemini 审阅使用 `gemini --approval-mode=plan --output-format=json --prompt`。它使用有界 inline git context，不依赖 Gemini MCP 或 Gemini extension。
+
+`gemini-multi-review` 有两种多代理模式。默认模式会为每个选择的角色并行启动一个 Gemini CLI 审阅进程并汇总输出。使用 `--native-agents` 时，运行时会创建临时 Gemini subagent 定义，并要求 Gemini CLI 通过 `@gfc_<role>` 原生 subagents 执行对应角色审阅。
 
 ## 增强对抗性审阅
 
@@ -115,6 +117,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 ## MCP 支撑的只读 Git 审阅
 
 只读 Claude 审阅会获得严格 MCP 配置。插件内置只读 Git MCP server，提供 status、diff、cached diff、log、show、blame、grep、ls-files 等只读能力，并在进入 Git 前校验 path/ref。`Bash`、`Edit`、`Write`、`MultiEdit` 仍然被禁用。
+
+`multi-review` 默认并行运行角色 reviewer。`adversarial-review --parallel` 会将 skeptic、architect、minimalist 等 lens 作为独立 Claude CLI reviewer 并行执行并聚合输出。需要逐个运行排查问题或降低速率压力时使用 `--sequential`。
 
 ## 正确调用方式
 

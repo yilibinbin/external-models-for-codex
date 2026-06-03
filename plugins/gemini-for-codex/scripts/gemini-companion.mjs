@@ -341,6 +341,8 @@ function parseArgs(argv) {
       parsed.wait = true;
     } else if (arg === "--json" || arg === "--json-output") {
       parsed.jsonOutput = true;
+    } else if (arg === "--native-agents") {
+      parsed.nativeAgents = true;
     } else if (arg === "--write") {
       parsed.write = true;
     } else {
@@ -624,7 +626,7 @@ function collectGitContext(options) {
   ].filter((line) => line !== "").join("\n");
 }
 
-function geminiPrint(prompt, options) {
+function geminiPrintArgs(prompt, options = {}) {
   const args = [
     "--skip-trust",
     "--approval-mode",
@@ -639,8 +641,82 @@ function geminiPrint(prompt, options) {
   if (process.env.GEMINI_FOR_CODEX_SANDBOX === "on") {
     args.push("--sandbox");
   }
+  if (options.includeDirectories?.length) {
+    for (const includeDirectory of options.includeDirectories) {
+      args.push("--include-directories", includeDirectory);
+    }
+  }
   args.push("--prompt", prompt);
-  const result = runGemini(args, { timeout: options.timeout });
+  return args;
+}
+
+function geminiPrint(prompt, options = {}) {
+  const result = runGemini(geminiPrintArgs(prompt, options), { timeout: options.timeout, cwd: options.cwd });
+  if (result.status !== 0) {
+    return result;
+  }
+  const parsed = parseGeminiJson(result.stdout);
+  return {
+    ...result,
+    status: parsed.ok ? 0 : 1,
+    stdout: parsed.response,
+    stderr: parsed.ok ? result.stderr : parsed.error
+  };
+}
+
+function runGeminiAsync(args, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(geminiCommand(), args, {
+      cwd: options.cwd ?? process.cwd(),
+      env: process.env,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const timeoutMs = options.timeout ?? 15 * 60 * 1000;
+    const timer = setTimeout(() => {
+      if (!settled) {
+        child.kill("SIGTERM");
+      }
+    }, timeoutMs);
+
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+      if (stdout.length > 20 * 1024 * 1024) {
+        child.kill("SIGTERM");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      if (stderr.length > 20 * 1024 * 1024) {
+        child.kill("SIGTERM");
+      }
+    });
+    child.stdin.end(options.input ?? "");
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status: 1, stdout, stderr, error: String(error.message ?? error), errorCode: error.code ? String(error.code) : "" });
+    });
+    child.on("close", (status, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        status: status ?? 1,
+        stdout,
+        stderr: signal ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal}` : stderr,
+        error: "",
+        errorCode: ""
+      });
+    });
+  });
+}
+
+async function geminiPrintAsync(prompt, options = {}) {
+  const result = await runGeminiAsync(geminiPrintArgs(prompt, options), { timeout: options.timeout, cwd: options.cwd });
   if (result.status !== 0) {
     return result;
   }
@@ -959,6 +1035,72 @@ function multiReviewRolePrompt(role, args, gitContext) {
     "- [Severity] file:line - issue, evidence, impact, suggested direction",
     "## Open Questions",
     "## Residual Risk",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
+function nativeAgentName(roleName) {
+  return `gfc_${roleName.replace(/[^a-zA-Z0-9_]/g, "_")}`;
+}
+
+function nativeAgentMarkdown(role) {
+  return [
+    "---",
+    `name: ${nativeAgentName(role.name)}`,
+    `description: Gemini for Codex ${role.name} read-only review subagent.`,
+    "---",
+    "",
+    `You are the ${role.name} reviewer for Gemini for Codex.`,
+    "",
+    "Review only in a read-only capacity. Do not edit files, do not apply fixes, and do not suggest that you are about to apply fixes.",
+    "Ground every finding in concrete changed-file evidence or explicit git context.",
+    "Include exact file paths and line numbers when available.",
+    "If there are no findings for your role, say so and list residual risks briefly.",
+    "",
+    "Role directive:",
+    role.directive,
+    "",
+    "Return:",
+    "## Findings",
+    "- [Severity] file:line - issue, evidence, impact, suggested direction",
+    "## Open Questions",
+    "## Residual Risk"
+  ].join("\n");
+}
+
+function writeNativeAgentWorkspace(roles) {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "gemini-for-codex-agents-"));
+  const agentsDir = path.join(tempDir, ".gemini", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  for (const role of roles) {
+    fs.writeFileSync(path.join(agentsDir, `${nativeAgentName(role.name)}.md`), nativeAgentMarkdown(role), "utf8");
+  }
+  return tempDir;
+}
+
+function nativeMultiAgentPrompt(args, gitContext) {
+  const focus = args._.join(" ").trim();
+  const agentCalls = args.reviewRoles.map((role) => `@${nativeAgentName(role.name)}`).join(", ");
+  return [
+    "<task>Run a native Gemini subagent multi-review.</task>",
+    "<subagents>",
+    ...args.reviewRoles.map((role) => `${nativeAgentName(role.name)}: ${role.directive}`),
+    "</subagents>",
+    gitContext,
+    "<rules>",
+    `- Dispatch these Gemini subagents in parallel when possible: ${agentCalls}.`,
+    "- Each subagent must review independently through its own role directive.",
+    "- Do not edit files.",
+    "- Do not suggest that you are about to apply fixes.",
+    "- Ground every finding in concrete changed-file evidence or explicit git context.",
+    "- Preserve each subagent's findings under a role header.",
+    "- After subagent results, write one orchestration summary with roles requested, roles with findings, and residual risks.",
+    "</rules>",
+    focus ? `<focus>${focus}</focus>` : "",
+    "<output_contract>",
+    "# Gemini Native Subagent Review",
+    "## Role: <role name>",
+    "## Orchestration Summary",
     "</output_contract>"
   ].filter(Boolean).join("\n");
 }
@@ -1406,7 +1548,7 @@ function runGeminiTask(kind, rawArgs) {
   process.stdout.write(result.stdout);
 }
 
-function runGeminiMultiReview(rawArgs) {
+async function runGeminiMultiReview(rawArgs) {
   if (maybeStartBackground("multi-review", rawArgs)) {
     return;
   }
@@ -1441,17 +1583,34 @@ function runGeminiMultiReview(rawArgs) {
   args.scope = scope;
 
   const gitContext = collectGitContext(args);
-  const results = [];
-  for (const role of args.reviewRoles) {
-    const prompt = multiReviewRolePrompt(role, args, gitContext);
-    const result = geminiPrint(prompt, args);
-    results.push({ role, result });
+  let results;
+  let nativeWorkspace = "";
+  if (args.nativeAgents) {
+    try {
+      nativeWorkspace = writeNativeAgentWorkspace(args.reviewRoles);
+      const result = geminiPrint(nativeMultiAgentPrompt(args, gitContext), {
+        ...args,
+        cwd: nativeWorkspace,
+        includeDirectories: [process.cwd()]
+      });
+      results = [{ role: { name: "native-gemini-subagents" }, result }];
+    } finally {
+      if (nativeWorkspace) {
+        fs.rmSync(nativeWorkspace, { recursive: true, force: true });
+      }
+    }
+  } else {
+    results = await Promise.all(args.reviewRoles.map(async (role) => {
+      const prompt = multiReviewRolePrompt(role, args, gitContext);
+      const result = await geminiPrintAsync(prompt, args);
+      return { role, result };
+    }));
   }
 
   const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
   const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
   const sections = [
-    "# Gemini Multi-Agent Review",
+    args.nativeAgents ? "# Gemini Native Subagent Review" : "# Gemini Multi-Agent Review",
     ...results.map(({ role, result }) => [
       `## Role: ${role.name}`,
       result.stdout.trim() || "(no stdout)",
@@ -1463,6 +1622,7 @@ function runGeminiMultiReview(rawArgs) {
     ].filter(Boolean).join("\n")),
     "## Orchestration Summary",
     `roles requested: ${args.reviewRoles.map((role) => role.name).join(", ")}`,
+    `orchestration: ${args.nativeAgents ? "Gemini native subagents" : "parallel Gemini CLI role fan-out"}`,
     `roles succeeded: ${succeeded.length ? succeeded.join(", ") : "(none)"}`,
     `roles failed: ${failed.length ? failed.join(", ") : "(none)"}`,
     "exit policy: exits non-zero if any role fails; completed role output remains visible."
@@ -1692,7 +1852,7 @@ switch (command) {
     runGeminiTask("adversarial-review", rawArgs);
     break;
   case "multi-review":
-    runGeminiMultiReview(rawArgs);
+    await runGeminiMultiReview(rawArgs);
     break;
   case "plan":
     runGeminiTask("plan", rawArgs);

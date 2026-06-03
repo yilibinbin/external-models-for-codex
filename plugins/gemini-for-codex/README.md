@@ -33,14 +33,14 @@ Gemini review runs in headless JSON mode with:
 gemini --approval-mode=plan --output-format=json --prompt
 ```
 
-v0.1.x sends bounded inline git context and does not depend on Gemini MCP or a Gemini extension. Gemini extension and MCP support are deferred until their current CLI configuration path is validated.
+The plugin sends bounded inline git context and does not depend on Gemini MCP or a Gemini extension. Gemini extension and MCP support are deferred until their current CLI configuration path is validated.
 
 ## Commands
 
 - `setup`: report Gemini, git, hook, and review-gate status; supports `--enable-review-gate` and `--disable-review-gate`.
 - `review`: read-only review of current git changes or a branch diff.
 - `adversarial-review`: skeptical multi-lens review.
-- `multi-review`: role fan-out across correctness, security, tests, release, and adversarial review.
+- `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
 - `plan`: independent implementation plan for Codex to reconcile.
 - `rescue`: read-only diagnosis for stuck implementation work.
 - `jobs`, `result`, `cancel`: tracked job lifecycle.
@@ -53,6 +53,15 @@ Use `--background` on long reviews. The skill reserves a job and dispatches exac
 ```bash
 gemini-result <job-id>
 ```
+
+## Multi-Agent Review
+
+`multi-review` has two modes:
+
+- Default mode runs one Gemini CLI process per selected role in parallel and aggregates the completed role outputs.
+- `--native-agents` creates temporary Gemini subagent definitions for the selected roles and asks Gemini CLI to dispatch `@gfc_<role>` native subagents. The temporary agent workspace is outside the repository and is removed after the run.
+
+Both modes are read-only and use bounded git context. Native subagent mode also passes the repository through `--include-directories` so Gemini can resolve project context while remaining in plan mode.
 
 ## Stop Hook
 

@@ -2,7 +2,7 @@
 
 Claude for Codex is a Codex plugin that lets Codex call the local Claude Code CLI for independent review and planning.
 
-Gemini for Codex is the sibling Codex plugin that calls the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode and bounded inline git context in v0.1.x.
+Gemini for Codex is the sibling Codex plugin that calls the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode and bounded inline git context.
 
 ## Installation
 
@@ -66,12 +66,12 @@ Gemini CLI resolution order:
 - `claude-review`: read-only Claude review of local git changes or branch diffs.
 - `claude-adversarial-review`: challenge assumptions, tradeoffs, rollback paths, and hidden failure modes.
 - `claude-plan`: request an independent implementation plan before Codex edits.
-- `claude-multi-review`: run ordered role reviews for correctness, security, tests, release, and adversarial perspectives.
+- `claude-multi-review`: run parallel role reviews for correctness, security, tests, release, and adversarial perspectives.
 - `claude-rescue`: ask Claude for read-only recovery diagnosis or explicit `--write` repair.
 - `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
-- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only in v0.1.x.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only. `gemini-multi-review` runs parallel role fan-out and supports `--native-agents` for Gemini CLI native subagents.
 
 ## Gemini for Codex
 
@@ -82,7 +82,9 @@ codex plugin marketplace add .
 codex plugin add gemini-for-codex@external-models-for-codex-local
 ```
 
-Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. v0.1.x uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
+Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. It uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
+
+`gemini-multi-review` has two multi-agent modes. By default it starts one Gemini CLI role reviewer per selected role in parallel and aggregates the outputs. With `--native-agents`, it creates temporary Gemini subagent definitions and asks Gemini CLI to dispatch `@gfc_<role>` native subagents for the requested review roles.
 
 ## Enhanced Adversarial Review
 
@@ -115,6 +117,8 @@ Use `--json` for a validated `{verdict, summary, findings, next_steps}` object. 
 ## MCP-backed read-only Git review
 
 Read-only Claude review receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments while `Bash`, `Edit`, `Write`, and `MultiEdit` remain disallowed.
+
+`multi-review` runs role reviewers in parallel by default. `adversarial-review --parallel` runs skeptic, architect, and minimalist lens reviewers as independent Claude CLI processes and aggregates their outputs. Use `--sequential` when a deterministic one-at-a-time run is needed.
 
 ## Routing
 

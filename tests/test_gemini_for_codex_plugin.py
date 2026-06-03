@@ -48,10 +48,34 @@ def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=No
     return write_fake_gemini(tmp_path / "gemini", response=response, capture_argv=capture_argv, first_line=first_line)
 
 
+def fake_gemini_jsonl(tmp_path, log_file, delay_ms=0):
+    script = tmp_path / "gemini"
+    script.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        f"const logFile = {json.dumps(str(log_file))};\n"
+        f"const delayMs = {int(delay_ms)};\n"
+        "const argv = process.argv.slice(2);\n"
+        "if (argv.join(' ') === '--version') { console.log('0.0.0-fake'); process.exit(0); }\n"
+        f"if (argv.join(' ') === '--help') {{ process.stdout.write({json.dumps(FAKE_GEMINI_HELP)}); process.exit(0); }}\n"
+        "const promptIndex = argv.indexOf('--prompt');\n"
+        "const prompt = promptIndex >= 0 ? argv[promptIndex + 1] : '';\n"
+        "const start = Date.now();\n"
+        "setTimeout(() => {\n"
+        "  const end = Date.now();\n"
+        "  fs.appendFileSync(logFile, JSON.stringify({argv, prompt, cwd: process.cwd(), start, end, agentsDirExists: fs.existsSync('.gemini/agents')}) + '\\n');\n"
+        "  process.stdout.write(JSON.stringify({response: `OK ${prompt.match(/<role_name>([^<]+)/)?.[1] || 'native'}`, stats: {}}));\n"
+        "}, delayMs);\n",
+        encoding="utf8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.1.1"
+    assert manifest["version"] == "0.2.0"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -234,6 +258,64 @@ def test_gemini_review_branch_scope_uses_base_ref_and_pathspec(tmp_path):
     assert "main...HEAD" in prompt
     assert "file.txt" in prompt
     assert "+feature" in prompt
+
+
+def test_multi_review_runs_role_invocations_in_parallel(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "gemini-calls.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake = fake_gemini_jsonl(tmp_path, log_file, delay_ms=300)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--roles", "correctness,security", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert len(calls) == 2
+    prompts = [call["prompt"] for call in calls]
+    assert any("<role_name>correctness</role_name>" in prompt for prompt in prompts)
+    assert any("<role_name>security</role_name>" in prompt for prompt in prompts)
+    assert max(call["start"] for call in calls) < min(call["end"] for call in calls)
+    assert "orchestration: parallel Gemini CLI role fan-out" in result.stdout
+
+
+def test_multi_review_native_agents_uses_gemini_subagent_prompt_and_workspace(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "gemini-native.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake = fake_gemini_jsonl(tmp_path, log_file)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--native-agents", "--roles", "correctness,security", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["agentsDirExists"] is True
+    assert "@gfc_correctness" in call["prompt"]
+    assert "@gfc_security" in call["prompt"]
+    assert "--include-directories" in call["argv"]
+    assert str(repo) in call["argv"]
+    assert "orchestration: Gemini native subagents" in result.stdout
 
 
 def test_setup_review_gate_enable_disable_persists_state(tmp_path):
