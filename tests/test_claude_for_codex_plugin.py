@@ -2627,6 +2627,109 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     assert "security ok" not in serialized
 
 
+def test_sdk_native_structured_output_passes_schema(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {"role": "correctness", "status": "ok", "text": "structured ok"},
+            ]
+        }),
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+            "--native-structured",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    output_format = query["options"]["outputFormat"]
+    assert query["outputFormat"] == output_format
+    assert output_format["type"] == "json_schema"
+    schema = output_format["schema"]
+    assert schema["type"] == "object"
+    assert schema["required"] == ["role_results"]
+    assert schema["properties"]["role_results"]["type"] == "array"
+    item_schema = schema["properties"]["role_results"]["items"]
+    assert {"ok", "failed"} == set(item_schema["properties"]["status"]["enum"])
+    assert {"ok", "failed"} == set(item_schema["properties"]["result"]["properties"]["status"]["enum"])
+
+
+def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    secret_chunk = "raw-secret-model-chunk"
+    secret_session = "sdk-session-secret"
+    sdk_module, capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {"role": "correctness", "status": "ok", "text": "stream ok"},
+            ]
+        }),
+        extra_js=f"""
+  yield {{
+    type: 'assistant',
+    message: {{ content: [{{ type: 'text', text: {json.dumps(secret_chunk)} }}] }},
+    session_id: {json.dumps(secret_session)}
+  }};
+""",
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+            "--stream-progress",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "[claude-for-codex sdk progress] assistant" in result.stderr
+    assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
+    assert secret_chunk not in result.stderr
+    assert secret_session not in result.stderr
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert query["includePartialMessages"] is True
+    assert query["options"]["includePartialMessages"] is True
+
+
 def test_sdk_subagent_mode_parses_nested_role_results_and_failed_status(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"

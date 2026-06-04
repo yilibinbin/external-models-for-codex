@@ -110,6 +110,41 @@ const READ_ONLY_MCP_TOOLS = Object.freeze([
   "mcp__claude-for-codex-git__git_grep",
   "mcp__claude-for-codex-git__git_ls_files"
 ]);
+const SDK_MULTI_REVIEW_OUTPUT_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["role_results"],
+  properties: {
+    role_results: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["role"],
+        properties: {
+          role: { type: "string" },
+          status: { type: "string", enum: ["ok", "failed"] },
+          text: { type: "string" },
+          error: { type: "string" },
+          result: {
+            type: "object",
+            additionalProperties: false,
+            required: ["status", "text"],
+            properties: {
+              status: { type: "string", enum: ["ok", "failed"] },
+              text: { type: "string" },
+              error: { type: "string" }
+            }
+          }
+        },
+        anyOf: [
+          { required: ["status", "text"] },
+          { required: ["result"] }
+        ]
+      }
+    }
+  }
+});
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -2055,7 +2090,9 @@ async function runSdkSubagentMultiReview(args, gitContext) {
   const aggregate = await runSdkNativeReview(prompt, args, {
     cwd: process.cwd(),
     timeout: args.timeout,
-    agents
+    agents,
+    outputSchema: args.nativeStructured ? SDK_MULTI_REVIEW_OUTPUT_SCHEMA : undefined,
+    streamProgress: Boolean(args.streamProgress)
   });
   if (aggregate.status !== 0) {
     return { aggregate, results: [] };

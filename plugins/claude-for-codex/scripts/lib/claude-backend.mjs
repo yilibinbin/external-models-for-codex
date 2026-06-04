@@ -273,20 +273,47 @@ function textFromEvent(event) {
   return "";
 }
 
-async function collectSdkOutput(queryResult) {
+function sanitizedSdkProgressLine(event) {
+  const eventType = event && typeof event === "object" && typeof event.type === "string"
+    ? event.type
+    : typeof event;
+  const parts = [`[claude-for-codex sdk progress] ${eventType}`];
+  if (event && typeof event === "object" && typeof event.total_cost_usd === "number") {
+    parts.push(`cost_usd=${event.total_cost_usd}`);
+  }
+  return parts.join(" ");
+}
+
+function maybeWriteSdkProgress(event, options) {
+  if (!options.streamProgress) {
+    return;
+  }
+  process.stderr.write(`${sanitizedSdkProgressLine(event)}\n`);
+}
+
+function shouldCollectSdkText(event, options) {
+  if (!options.streamProgress || !event || typeof event !== "object") {
+    return true;
+  }
+  return event.type === "result";
+}
+
+async function collectSdkOutput(queryResult, options = {}) {
   const events = [];
   const chunks = [];
   if (queryResult && typeof queryResult[Symbol.asyncIterator] === "function") {
     for await (const event of queryResult) {
       events.push(event);
-      const text = textFromEvent(event);
+      maybeWriteSdkProgress(event, options);
+      const text = shouldCollectSdkText(event, options) ? textFromEvent(event) : "";
       if (text) {
         chunks.push(text);
       }
     }
   } else {
     events.push(queryResult);
-    const text = textFromEvent(queryResult);
+    maybeWriteSdkProgress(queryResult, options);
+    const text = shouldCollectSdkText(queryResult, options) ? textFromEvent(queryResult) : "";
     if (text) {
       chunks.push(text);
     }
@@ -339,8 +366,17 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
         sdkOptions.allowedTools = [...sdkOptions.allowedTools, SDK_NATIVE_PARENT_TOOL];
       }
     }
+    if (args.nativeStructured && options.outputSchema) {
+      sdkOptions.outputFormat = {
+        type: "json_schema",
+        schema: options.outputSchema
+      };
+    }
     if (args.outputFormat !== undefined || options.outputFormat !== undefined) {
       sdkOptions.outputFormat = args.outputFormat ?? options.outputFormat;
+    }
+    if (args.streamProgress || options.streamProgress) {
+      sdkOptions.includePartialMessages = true;
     }
     if (args.includePartialMessages !== undefined || options.includePartialMessages !== undefined) {
       sdkOptions.includePartialMessages = args.includePartialMessages ?? options.includePartialMessages;
@@ -361,7 +397,9 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
       outputFormat: sdkOptions.outputFormat,
       includePartialMessages: sdkOptions.includePartialMessages
     });
-    const output = await collectSdkOutput(queryResult);
+    const output = await collectSdkOutput(queryResult, {
+      streamProgress: Boolean(options.streamProgress)
+    });
     return {
       status: 0,
       stdout: output.stdout,
