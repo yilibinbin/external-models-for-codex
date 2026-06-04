@@ -1328,7 +1328,11 @@ function runReleaseCheckCommand(rawArgs) {
       process.exit(2);
     }
   }
-  const payload = runReleaseCheck(path.resolve(pluginRoot(), "..", ".."), options);
+  const candidateRepoRoot = path.resolve(pluginRoot(), "..", "..");
+  const releaseCheckRoot = fs.existsSync(path.join(candidateRepoRoot, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"))
+    ? candidateRepoRoot
+    : pluginRoot();
+  const payload = runReleaseCheck(releaseCheckRoot, options);
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.ok ? 0 : 1);
 }

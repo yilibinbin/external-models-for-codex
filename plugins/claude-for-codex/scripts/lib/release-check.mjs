@@ -60,14 +60,26 @@ function result(ok, name, detail = "") {
   return { ok, name, detail };
 }
 
+function resolveLayout(root) {
+  const repoPluginRoot = path.join(root, "plugins", "claude-for-codex");
+  if (fs.existsSync(path.join(repoPluginRoot, ".codex-plugin", "plugin.json"))) {
+    return { repoRoot: root, pluginRoot: repoPluginRoot, installedPluginOnly: false };
+  }
+  if (fs.existsSync(path.join(root, ".codex-plugin", "plugin.json"))) {
+    return { repoRoot: null, pluginRoot: root, installedPluginOnly: true };
+  }
+  return { repoRoot: root, pluginRoot: repoPluginRoot, installedPluginOnly: false };
+}
+
 function commandExists(name) {
   const check = spawnSync(name, ["--version"], { encoding: "utf8", timeout: 5000 });
   return check.status === 0;
 }
 
 function checkManifest(root) {
-  const manifest = readJson(path.join(root, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"));
-  const changelog = fs.readFileSync(path.join(root, "plugins", "claude-for-codex", "CHANGELOG.md"), "utf8");
+  const { pluginRoot } = resolveLayout(root);
+  const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+  const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleased = changelog.match(/^## Unreleased\s*([\s\S]*?)(?=^##\s|\Z)/m);
   const unreleasedBody = unreleased ? unreleased[1].trim() : "";
   const checks = [
@@ -98,7 +110,8 @@ function semanticFixtureSafe(parsed) {
 }
 
 function checkSemanticFixtures(root) {
-  const fixtureDir = path.join(root, "plugins", "claude-for-codex", "fixtures", "semantic");
+  const { pluginRoot } = resolveLayout(root);
+  const fixtureDir = path.join(pluginRoot, "fixtures", "semantic");
   const safe = readJson(path.join(fixtureDir, "safe-provider.json"));
   const unsafe = readJson(path.join(fixtureDir, "unsafe-provider.json"));
   return [
@@ -108,7 +121,8 @@ function checkSemanticFixtures(root) {
 }
 
 function checkHooks(root) {
-  const hooksFile = path.join(root, "plugins", "claude-for-codex", "hooks", "hooks.json");
+  const { pluginRoot } = resolveLayout(root);
+  const hooksFile = path.join(pluginRoot, "hooks", "hooks.json");
   const parsed = readJson(hooksFile);
   const events = Object.keys(parsed.hooks ?? {}).sort();
   return [
@@ -118,31 +132,39 @@ function checkHooks(root) {
 }
 
 function checkDocs(root) {
-  const docs = [
-    "README.md",
-    "docs/README.en.md",
-    "docs/README.zh-CN.md",
-    "plugins/claude-for-codex/README.md"
-  ];
+  const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
+  const docs = installedPluginOnly
+    ? [{ base: pluginRoot, label: "README.md", file: "README.md" }]
+    : [
+        { base: repoRoot, label: "README.md", file: "README.md" },
+        { base: repoRoot, label: "docs/README.en.md", file: "docs/README.en.md" },
+        { base: repoRoot, label: "docs/README.zh-CN.md", file: "docs/README.zh-CN.md" },
+        { base: pluginRoot, label: "plugins/claude-for-codex/README.md", file: "README.md" }
+      ];
   const checks = [];
-  for (const file of docs) {
-    const text = fs.readFileSync(path.join(root, file), "utf8");
-    checks.push(result(text.includes("external-models-for-codex"), `docs-marketplace-${file}`));
-    checks.push(result(text.includes(DEFAULT_RELEASE_REF), `docs-immutable-ref-${file}`));
-    checks.push(result(!text.includes("external-models-for-codex-local"), `docs-no-old-marketplace-${file}`));
-    checks.push(result(!/\/Users\/fanghao/.test(text), `docs-no-local-path-${file}`));
+  for (const doc of docs) {
+    const text = fs.readFileSync(path.join(doc.base, doc.file), "utf8");
+    checks.push(result(text.includes("external-models-for-codex"), `docs-marketplace-${doc.label}`));
+    checks.push(result(text.includes(DEFAULT_RELEASE_REF), `docs-immutable-ref-${doc.label}`));
+    checks.push(result(!text.includes("external-models-for-codex-local"), `docs-no-old-marketplace-${doc.label}`));
+    checks.push(result(!/\/Users\/fanghao/.test(text), `docs-no-local-path-${doc.label}`));
   }
   return checks;
 }
 
 function checkSecrets(root) {
+  const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
+  const scanRoot = installedPluginOnly ? pluginRoot : repoRoot;
+  const scanDirs = installedPluginOnly
+    ? ["README.md", "CHANGELOG.md", "scripts", "hooks", "skills", "prompts", "schemas", "templates", "fixtures"]
+    : ["README.md", "docs", "plugins/claude-for-codex"];
   const checks = [];
-  for (const file of listFiles(root, ["README.md", "docs", "plugins/claude-for-codex"])) {
+  for (const file of listFiles(scanRoot, scanDirs)) {
     if (file.includes(`${path.sep}docs${path.sep}superpowers${path.sep}`)) {
       continue;
     }
     const text = fs.readFileSync(file, "utf8");
-    const relative = path.relative(root, file);
+    const relative = path.relative(scanRoot, file);
     if (text.includes("release-check allowlist")) {
       continue;
     }
@@ -163,7 +185,8 @@ function checkSecrets(root) {
 }
 
 function checkSkills(root) {
-  const skillsDir = path.join(root, "plugins", "claude-for-codex", "skills");
+  const { pluginRoot } = resolveLayout(root);
+  const skillsDir = path.join(pluginRoot, "skills");
   const skills = fs.readdirSync(skillsDir).filter((name) => fs.existsSync(path.join(skillsDir, name, "SKILL.md"))).sort();
   const expected = [...EXPECTED_SKILLS].sort();
   return [
@@ -175,7 +198,7 @@ function checkSkills(root) {
   ];
 }
 function checkGithubActionsCi(root) {
-  const pluginRoot = path.join(root, "plugins", "claude-for-codex");
+  const { pluginRoot } = resolveLayout(root);
   const defaultWorkflow = renderWorkflow(pluginRoot);
   const annotationWorkflow = renderWorkflow(pluginRoot, { annotations: true });
   const validation = validateWorkflow(defaultWorkflow);
@@ -194,7 +217,8 @@ function checkGithubActionsCi(root) {
 }
 
 function checkPrompts(root) {
-  const promptDir = path.join(root, "plugins", "claude-for-codex", "prompts");
+  const { pluginRoot } = resolveLayout(root);
+  const promptDir = path.join(pluginRoot, "prompts");
   const prompts = fs.readdirSync(promptDir).filter((name) => name.endsWith(".md"));
   return prompts.map((prompt) => {
     const text = fs.readFileSync(path.join(promptDir, prompt), "utf8");
@@ -210,7 +234,7 @@ function checkRolePacks() {
 }
 
 function checkMailboxLeaseSupport(root) {
-  const pluginRoot = path.join(root, "plugins", "claude-for-codex");
+  const { pluginRoot } = resolveLayout(root);
   const sanitized = sanitizeSummary(`ghp_${"A".repeat(24)} /home/alice/project /tmp/work C:\\Users\\alice\\file`, { cwd: pluginRoot });
   return [
     result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "sanitize.mjs")), "sanitize-module"),
