@@ -1,6 +1,6 @@
 # Gemini for Codex
 
-Codex plugin that invokes the local Gemini CLI for independent read-only review, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, and an opt-in Stop hook gate.
+Codex plugin that invokes the local Gemini CLI for independent read-only review, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
 
 ## Requirements
 
@@ -37,8 +37,12 @@ The plugin sends bounded inline git context and does not depend on Gemini MCP or
 
 ## Commands
 
-- `setup`: report Gemini, git, hook, and review-gate status; supports `--enable-review-gate` and `--disable-review-gate`.
-- `review`: read-only review of current git changes or a branch diff. Add `--structured` for schema-validated review output.
+- `setup`: report Gemini, git, hook, review-gate, and capability status; supports `--enable-review-gate` and `--disable-review-gate`.
+- `capabilities`: print Gemini CLI flag support as detected from the current `gemini --help`.
+- `report`: print the latest sanitized operation metadata report.
+- `release-check`: run offline manifest, hook, docs, context-provider, and CI-template safety checks.
+- `review`: read-only review of current git changes or a branch diff. Add `--structured` for schema-validated rendered output or `--json` for machine-readable normalized JSON.
+- `github-actions`: render, initialize, validate, and consume fork-safe GitHub Actions PR review workflows.
 - `adversarial-review`: skeptical multi-lens review.
 - `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
 - `plan`: independent implementation plan for Codex to reconcile.
@@ -63,7 +67,52 @@ gemini-result <job-id>
 - Default mode runs one Gemini CLI process per selected role in parallel and aggregates the completed role outputs.
 - `--native-agents` creates temporary Gemini subagent definitions for the selected roles and asks Gemini CLI to dispatch `@gfc_<role>` native subagents. The temporary agent workspace is outside the repository and is removed after the run.
 
-Both modes are read-only and use bounded git context. Native subagent mode also passes the repository through `--include-directories` so Gemini can resolve project context while remaining in plan mode.
+Both modes are read-only and use bounded git context. Native subagent mode passes the repository through `--include-directories` only when the installed Gemini CLI reports support for that flag.
+
+## Optional Context Providers
+
+Context providers are opt-in and disabled by default:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs review --context-provider auto
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --context-provider my-provider
+```
+
+Provider config is loaded from `GEMINI_FOR_CODEX_CONTEXT_CONFIG`, then `GEMINI_FOR_CODEX_DATA/context/providers.json`, then `~/.codex/gemini-for-codex/context/providers.json`.
+
+```json
+{
+  "providers": {
+    "my-provider": {
+      "command": ["/absolute/path/to/provider", "--json"],
+      "env": {
+        "GEMINI_CONTEXT_PROVIDER_MODE": "summary"
+      },
+      "timeoutMs": 5000,
+      "maxOutputBytes": 32768
+    }
+  },
+  "defaultProvider": "my-provider"
+}
+```
+
+Provider executables must resolve outside the reviewed workspace, run without a shell, receive only an allowlisted environment, and return bounded JSON. Provider output is XML-escaped before entering prompts and is advisory only; Gemini findings must still be grounded in changed files or git context. Reports store only sanitized context metadata, not provider output, prompt text, source, diffs, config, request JSON, or raw workspace paths.
+
+## GitHub Actions
+
+Render a workflow without writing files:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions render
+```
+
+Write the default workflow only when requested:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
+```
+
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.6.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`.
 
 ## Stop Hook
 
@@ -91,4 +140,7 @@ node --check plugins/gemini-for-codex/scripts/gemini-companion.mjs
 node --check plugins/gemini-for-codex/hooks/gemini-review-gate.mjs
 node --check plugins/gemini-for-codex/hooks/session-lifecycle.mjs
 node --check plugins/gemini-for-codex/hooks/unread-result.mjs
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs capabilities
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs release-check
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs release-check --ci-simulate
 ```

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.0 - 2026-06-04
+
+- Add `review --json` for machine-readable, schema-validated review output while preserving `review --structured` as rendered Markdown.
+- Add `github-actions render/init/validate/render-comment/render-annotations` for fork-safe PR review workflow templates.
+- Add `release-check --ci-simulate` to validate the generated workflow without real GitHub access.
+- Generate workflows that install Codex CLI, pin `gemini-for-codex-v0.6.0`, skip fork PR Gemini execution by default, and optionally publish Checks annotations.
+
+## 0.5.0 - 2026-06-04
+
+- Add `capabilities`, sanitized `report`, and `release-check` runtime commands.
+- Add optional bounded context-provider enrichment for `review`, `adversarial-review`, `multi-review`, native-agent dispatch, and manual `review-gate`.
+- Keep provider execution opt-in, repo-external, no-shell, env-allowlisted, byte-limited, timeout-bounded, and advisory-only in prompts.
+- Add context metadata to reports without storing provider stdout, stderr, prompts, source, diffs, config, or raw workspace paths.
+- Gate Gemini native `--include-directories` forwarding on the installed CLI help output.
+
 ## 0.3.0 - 2026-06-03
 
 - Add SessionStart, SessionEnd, and UserPromptSubmit hooks for session tracking, conservative same-session cleanup, turn baselines, and unread result reminders.

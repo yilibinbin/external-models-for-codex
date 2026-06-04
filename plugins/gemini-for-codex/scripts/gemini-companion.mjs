@@ -33,9 +33,24 @@ import {
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 import { loadPromptTemplate, renderPromptTemplate } from "./lib/prompt-template.mjs";
 import { renderStructuredReview, validateStructuredReview } from "./lib/render-review.mjs";
+import {
+  ContextProviderError,
+  parseContextOptions,
+  resolveContext,
+  resolveProviderSelection
+} from "./lib/context-provider.mjs";
+import {
+  readReviewJson,
+  renderReviewComment,
+  renderWorkflow,
+  reviewToAnnotations,
+  validateWorkflow,
+  workflowPath,
+  writeWorkflow
+} from "./lib/github-actions.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "release-check", "github-actions", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -43,6 +58,7 @@ const GEMINI_CLI_PATH_ENV = "GEMINI_CLI_PATH";
 const REVIEW_GATE_ENV = "GEMINI_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
+const REPORT_VERSION = 1;
 let geminiHelpReportCache = null;
 const ADVERSARIAL_LENSES = Object.freeze({
   skeptic: {
@@ -376,6 +392,32 @@ function parseArgs(argv) {
       parsed.structuredReview = true;
     } else if (arg === "--native-agents") {
       parsed.nativeAgents = true;
+    } else if (arg === "--context-provider") {
+      parsed.contextProvider = readOptionValue(tokens, index, arg);
+      index += 1;
+    } else if (arg.startsWith("--context-provider=")) {
+      parsed.contextProvider = arg.slice("--context-provider=".length);
+      if (!parsed.contextProvider) {
+        throw new Error("Missing value for --context-provider.");
+      }
+    } else if (arg === "--context-budget") {
+      parsed.contextBudget = readOptionValue(tokens, index, arg);
+      index += 1;
+    } else if (arg.startsWith("--context-budget=")) {
+      parsed.contextBudget = arg.slice("--context-budget=".length);
+      if (!parsed.contextBudget) {
+        throw new Error("Missing value for --context-budget.");
+      }
+    } else if (arg === "--context-timeout-ms") {
+      parsed.contextTimeoutMs = readOptionValue(tokens, index, arg);
+      index += 1;
+    } else if (arg.startsWith("--context-timeout-ms=")) {
+      parsed.contextTimeoutMs = arg.slice("--context-timeout-ms=".length);
+      if (!parsed.contextTimeoutMs) {
+        throw new Error("Missing value for --context-timeout-ms.");
+      }
+    } else if (arg === "--context-strict") {
+      parsed.contextStrict = true;
     } else if (arg.startsWith("--resume=")) {
       parsed.resume = arg.slice("--resume=".length) || "latest";
     } else if (arg === "--resume") {
@@ -852,6 +894,266 @@ function geminiPrint(prompt, options = {}) {
   };
 }
 
+function reportRoot(env = process.env) {
+  const base = env.GEMINI_FOR_CODEX_DATA
+    ? path.resolve(env.GEMINI_FOR_CODEX_DATA)
+    : path.join(os.homedir(), ".codex", "gemini-for-codex");
+  return path.join(base, "reports");
+}
+
+function reportFile(env = process.env) {
+  return path.join(reportRoot(env), "latest.json");
+}
+
+function sanitizeReportPayload(payload) {
+  const metadata = payload.contextMetadata || {};
+  return {
+    version: REPORT_VERSION,
+    timestamp: new Date().toISOString(),
+    command: payload.command || "",
+    cwdHash: createHash("sha256").update(canonicalWorkspaceRoot(payload.cwd || process.cwd())).digest("hex"),
+    status: Number.isInteger(payload.status) ? payload.status : 0,
+    geminiAvailable: Boolean(payload.geminiAvailable),
+    contextProvider: String(metadata.contextProvider || ""),
+    contextStatus: String(metadata.contextStatus || "disabled"),
+    contextBytes: Number(metadata.contextBytes || 0),
+    contextDurationMs: Number(metadata.contextDurationMs || 0),
+    contextFailureReason: String(metadata.contextFailureReason || "disabled"),
+    contextDegraded: Boolean(metadata.contextDegraded)
+  };
+}
+
+function writeOperationReport(payload) {
+  const safe = sanitizeReportPayload(payload);
+  const file = reportFile();
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(safe, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tmp, file);
+  return safe;
+}
+
+function printReport(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  if (tokens.length && !tokens.every((token) => token === "--latest" || token === "--json")) {
+    console.error("Usage: gemini-companion.mjs report [--latest] [--json]");
+    process.exit(2);
+  }
+  const file = reportFile();
+  if (!fs.existsSync(file)) {
+    process.stdout.write(`${JSON.stringify({ available: false, reportFile: file }, null, 2)}\n`);
+    process.exit(1);
+  }
+  process.stdout.write(fs.readFileSync(file, "utf8"));
+}
+
+function printCapabilities() {
+  const preflight = geminiHelpReport();
+  process.stdout.write(`${JSON.stringify({
+    available: hasGemini(),
+    command: geminiCommand(),
+    preflight,
+    capabilities: preflight.capabilities
+  }, null, 2)}\n`);
+  process.exit(preflight.ok ? 0 : 1);
+}
+
+function defaultContextMetadata() {
+  return {
+    contextProvider: "",
+    contextStatus: "disabled",
+    contextBytes: 0,
+    contextDurationMs: 0,
+    contextFailureReason: "disabled",
+    contextDegraded: false
+  };
+}
+
+async function resolveCommandContext(args, { allowProviderErrors = false } = {}) {
+  try {
+    parseContextOptions(args);
+    const resolved = await resolveContext(args, { cwd: process.cwd(), env: process.env, run });
+    return resolved;
+  } catch (error) {
+    if (error instanceof ContextProviderError && allowProviderErrors) {
+      return {
+        block: "",
+        metadata: {
+          ...defaultContextMetadata(),
+          contextStatus: "unavailable",
+          contextFailureReason: error.reason || "unsafe-config",
+          contextDegraded: true
+        },
+        warning: error.message || String(error)
+      };
+    }
+    throw error;
+  }
+}
+
+function scanFileForForbidden(filePath, forbidden) {
+  if (!fs.existsSync(filePath)) {
+    return [`missing file: ${filePath}`];
+  }
+  const text = fs.readFileSync(filePath, "utf8");
+  return forbidden.filter((needle) => text.includes(needle)).map((needle) => `${filePath} contains forbidden string ${needle}`);
+}
+
+function releaseCheckOptions(rawArgs = []) {
+  const tokens = normalizeArgv(rawArgs);
+  const options = { ciSimulate: false };
+  for (const token of tokens) {
+    if (token === "--ci-simulate") {
+      options.ciSimulate = true;
+    } else {
+      throw new Error(`Unknown release-check option "${token}".`);
+    }
+  }
+  return options;
+}
+
+function runReleaseCheck(rawArgs = []) {
+  let options;
+  try {
+    options = releaseCheckOptions(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  const failures = [];
+  const manifestPath = path.join(ROOT_DIR, ".codex-plugin", "plugin.json");
+  try {
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
+    if (manifest.version !== "0.6.0") failures.push(`manifest version is ${manifest.version}, expected 0.6.0`);
+    const legacyPluginName = ["claude", "for", "codex"].join("-");
+    if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
+  } catch (error) {
+    failures.push(`manifest parse failed: ${error.message || String(error)}`);
+  }
+  failures.push(...scanFileForForbidden(path.join(ROOT_DIR, "README.md"), [
+    ["", "Users", "fanghao"].join("/"),
+    ["CLAUDE", "PLUGIN_ROOT"].join("_"),
+    ["CLAUDE", "FOR_CODEX"].join("_")
+  ]));
+  const hooksPath = path.join(ROOT_DIR, "hooks", "hooks.json");
+  try {
+    const hooks = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
+    if (!hooks.hooks?.Stop) failures.push("hooks manifest does not register Stop");
+  } catch (error) {
+    failures.push(`hooks manifest parse failed: ${error.message || String(error)}`);
+  }
+  const providerChecks = releaseCheckProviderFixtures();
+  failures.push(...providerChecks.failures);
+  const githubActionsChecks = options.ciSimulate ? checkGithubActionsCi() : { ok: true, failures: [] };
+  failures.push(...githubActionsChecks.failures);
+  const payload = {
+    ok: failures.length === 0,
+    checks: {
+      manifest: true,
+      docsForbiddenStrings: true,
+      hooks: true,
+      contextProviderFixtures: providerChecks.ok,
+      githubActionsCi: githubActionsChecks.ok
+    },
+    failures
+  };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.exit(payload.ok ? 0 : 1);
+}
+
+function checkGithubActionsCi() {
+  const failures = [];
+  try {
+    const plain = renderWorkflow(ROOT_DIR);
+    const annotated = renderWorkflow(ROOT_DIR, { annotations: true });
+    const plainValidation = validateWorkflow(plain);
+    const annotationValidation = validateWorkflow(annotated, { annotations: true });
+    if (!plainValidation.ok) {
+      failures.push(...plainValidation.checks.filter((check) => !check.ok).map((check) => `github actions default failed: ${check.name}`));
+    }
+    if (!annotationValidation.ok) {
+      failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
+    }
+    if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
+    if (!plain.includes("--ref gemini-for-codex-v0.6.0")) failures.push("github actions missing immutable Gemini release ref");
+    if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
+  } catch (error) {
+    failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function releaseCheckProviderFixtures() {
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "gemini-for-codex-release-check-"));
+  const workspace = path.join(temp, "workspace");
+  const external = path.join(temp, "external");
+  fs.mkdirSync(workspace, { recursive: true });
+  fs.mkdirSync(external, { recursive: true });
+  const provider = path.join(external, "provider-bin");
+  fs.writeFileSync(provider, "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+  const config = path.join(external, "providers.json");
+  const failures = [];
+  try {
+    fs.writeFileSync(config, JSON.stringify({
+      providers: {
+        safe: {
+          command: [provider],
+          env: { GEMINI_CONTEXT_PROVIDER_MODE: "summary" }
+        }
+      },
+      defaultProvider: "safe"
+    }), { encoding: "utf8", mode: 0o600 });
+    const selected = parseContextOptions({ contextProvider: "safe" });
+    const resolved = {
+      env: { ...process.env, GEMINI_FOR_CODEX_CONTEXT_CONFIG: config }
+    };
+    const safeSelection = resolveProviderSelectionForReleaseCheck(selected, workspace, resolved.env);
+    if (safeSelection.status !== "selected") failures.push("safe provider fixture did not select");
+    fs.writeFileSync(config, JSON.stringify({
+      providers: { unsafe: { command: [path.join(workspace, "provider")] } },
+      defaultProvider: "unsafe"
+    }), { encoding: "utf8", mode: 0o600 });
+    fs.writeFileSync(path.join(workspace, "provider"), "#!/bin/sh\nexit 0\n", { encoding: "utf8", mode: 0o755 });
+    expectContextFixtureFailure("workspace provider executable should fail", { contextProvider: "unsafe" }, workspace, resolved.env, failures);
+    fs.writeFileSync(config, JSON.stringify({
+      providers: { shell: { command: ["/bin/sh"] } },
+      defaultProvider: "shell"
+    }), { encoding: "utf8", mode: 0o600 });
+    expectContextFixtureFailure("shell trampoline should fail", { contextProvider: "shell" }, workspace, resolved.env, failures);
+    fs.writeFileSync(config, JSON.stringify({
+      providers: { badenv: { command: [provider], env: { SECRET: "x" } } },
+      defaultProvider: "badenv"
+    }), { encoding: "utf8", mode: 0o600 });
+    expectContextFixtureFailure("unsafe env key should fail", { contextProvider: "badenv" }, workspace, resolved.env, failures);
+    fs.writeFileSync(config, JSON.stringify({
+      providers: { rel: { command: ["provider"] } },
+      defaultProvider: "rel"
+    }), { encoding: "utf8", mode: 0o600 });
+    expectContextFixtureFailure("relative executable should fail", { contextProvider: "rel" }, workspace, resolved.env, failures);
+  } catch (error) {
+    failures.push(`provider fixture exception: ${error.message || String(error)}`);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function resolveProviderSelectionForReleaseCheck(options, cwd, env) {
+  return resolveProviderSelection(options, cwd, env);
+}
+
+function expectContextFixtureFailure(label, options, cwd, env, failures) {
+  try {
+    resolveProviderSelectionForReleaseCheck(parseContextOptions(options), cwd, env);
+    failures.push(label);
+  } catch (error) {
+    if (!(error instanceof ContextProviderError)) {
+      failures.push(`${label}: wrong error ${error.message || String(error)}`);
+    }
+  }
+}
+
 function runGeminiAsync(args, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(geminiCommand(), args, {
@@ -1140,7 +1442,7 @@ function adversarialJsonContract() {
 }
 
 function reviewOutputContract(args) {
-  if (args.structuredReview) {
+  if (args.structuredReview || args.jsonOutput) {
     return [
       "<output_contract>",
       "Return exactly one JSON object and no Markdown.",
@@ -1167,7 +1469,7 @@ function reviewOutputContract(args) {
   ].join("\n");
 }
 
-function reviewPrompt(kind, args) {
+function reviewPrompt(kind, args, contextBlock = "") {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
   const adversarial = kind === "adversarial-review";
@@ -1179,6 +1481,7 @@ function reviewPrompt(kind, args) {
     const adversarialLenses = args.resolvedAdversarialLenses ?? resolveAdversarialLenses(args);
     return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "adversarial-review"), {
       GIT_CONTEXT: gitContext,
+      GEMINI_CONTEXT: contextBlock,
       ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
       FOCUS: focus ? `<focus>${focus}</focus>` : "",
       OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
@@ -1187,19 +1490,21 @@ function reviewPrompt(kind, args) {
 
   return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "review"), {
     GIT_CONTEXT: gitContext,
+    GEMINI_CONTEXT: contextBlock,
     REVIEW_ROLES: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     FOCUS: focus ? `<focus>${focus}</focus>` : "",
     OUTPUT_CONTRACT: reviewOutputContract(args)
   });
 }
 
-function multiReviewRolePrompt(role, args, gitContext) {
+function multiReviewRolePrompt(role, args, gitContext, contextBlock = "") {
   const focus = args._.join(" ").trim();
 
   return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "multi-review-role"), {
     ROLE_NAME: role.name,
     ROLE_DIRECTIVE: role.directive,
     GIT_CONTEXT: gitContext,
+    GEMINI_CONTEXT: contextBlock,
     FOCUS: focus ? `<focus>${focus}</focus>` : ""
   });
 }
@@ -1243,22 +1548,24 @@ function writeNativeAgentWorkspace(roles) {
   return tempDir;
 }
 
-function nativeMultiAgentPrompt(args, gitContext) {
+function nativeMultiAgentPrompt(args, gitContext, contextBlock = "") {
   const focus = args._.join(" ").trim();
   const agentCalls = args.reviewRoles.map((role) => `@${nativeAgentName(role.name)}`).join(", ");
   return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "native-multi-agent"), {
     SUBAGENTS: args.reviewRoles.map((role) => `${nativeAgentName(role.name)}: ${role.directive}`).join("\n"),
     AGENT_CALLS: agentCalls,
     GIT_CONTEXT: gitContext,
+    GEMINI_CONTEXT: contextBlock,
     FOCUS: focus ? `<focus>${focus}</focus>` : ""
   });
 }
 
-function reviewGateRolePrompt(role, args, gitContext) {
+function reviewGateRolePrompt(role, args, gitContext, contextBlock = "") {
   return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "stop-review-gate"), {
     ROLE_NAME: role.name,
     ROLE_DIRECTIVE: role.directive,
-    GIT_CONTEXT: gitContext
+    GIT_CONTEXT: gitContext,
+    GEMINI_CONTEXT: contextBlock
   });
 }
 
@@ -1451,6 +1758,20 @@ function buildSetupReport(actionsTaken = []) {
     sessionCommands: ["sessions"],
     recommendationCommands: ["recommend-execution-mode"],
     geminiCapabilities: preflight.capabilities,
+    capabilities: {
+      gemini: preflight.capabilities,
+      requiredFlags: {
+        ok: preflight.ok,
+        missing: preflight.missing,
+        required: preflight.requiredFlags
+      },
+      commands: {
+        capabilities: true,
+        report: true,
+        releaseCheck: true,
+        contextProvider: true
+      }
+    },
     hooks: hookDiagnostics(),
     actionsTaken
   };
@@ -1490,6 +1811,99 @@ function printStatus() {
     jobs: listJobs(process.cwd()),
     reviewGate: buildSetupReport().reviewGate
   }, null, 2)}\n`);
+}
+
+function parseGithubActionsOptions(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const subcommand = tokens.shift();
+  const options = {
+    subcommand,
+    write: false,
+    force: false,
+    annotations: false,
+    contextProvider: "off",
+    timeoutMinutes: undefined,
+    releaseRef: undefined,
+    model: "",
+    input: ""
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--write") {
+      options.write = true;
+    } else if (token === "--force") {
+      options.force = true;
+    } else if (token === "--annotations") {
+      options.annotations = true;
+    } else if (token === "--context-provider") {
+      options.contextProvider = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--timeout-minutes") {
+      options.timeoutMinutes = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--ref") {
+      options.releaseRef = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--model") {
+      options.model = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--input") {
+      options.input = readOptionValue(tokens, index, token);
+      index += 1;
+    } else {
+      throw new Error(`Unknown github-actions option "${token}".`);
+    }
+  }
+  return options;
+}
+
+function runGithubActions(rawArgs) {
+  let options;
+  try {
+    options = parseGithubActionsOptions(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  if (!options.subcommand || !["render", "init", "validate", "render-comment", "render-annotations"].includes(options.subcommand)) {
+    console.error("Usage: gemini-companion.mjs github-actions render|init|validate|render-comment|render-annotations [options]");
+    process.exit(2);
+  }
+  try {
+    if (options.subcommand === "render") {
+      process.stdout.write(renderWorkflow(ROOT_DIR, options));
+      return;
+    }
+    if (options.subcommand === "init") {
+      const rendered = renderWorkflow(ROOT_DIR, options);
+      if (!options.write) {
+        process.stdout.write(`${JSON.stringify({ ok: true, written: false, path: workflowPath(process.cwd()) }, null, 2)}\n`);
+        return;
+      }
+      const target = writeWorkflow(process.cwd(), rendered, { force: options.force });
+      process.stdout.write(`${JSON.stringify({ ok: true, written: true, path: target }, null, 2)}\n`);
+      return;
+    }
+    if (options.subcommand === "validate") {
+      const target = workflowPath(process.cwd());
+      const text = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : renderWorkflow(ROOT_DIR, options);
+      const validation = validateWorkflow(text, options);
+      process.stdout.write(`${JSON.stringify(validation, null, 2)}\n`);
+      process.exit(validation.ok ? 0 : 1);
+    }
+    if (options.subcommand === "render-comment") {
+      if (!options.input) throw new Error("Missing --input for render-comment.");
+      process.stdout.write(`${renderReviewComment(readReviewJson(options.input))}\n`);
+      return;
+    }
+    if (options.subcommand === "render-annotations") {
+      if (!options.input) throw new Error("Missing --input for render-annotations.");
+      process.stdout.write(`${JSON.stringify(reviewToAnnotations(readReviewJson(options.input)), null, 2)}\n`);
+    }
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
 }
 
 function parseGateVerdict(rawOutput) {
@@ -1537,7 +1951,7 @@ function readStdinJsonForGate() {
   return JSON.parse(rawInput);
 }
 
-function runReviewGate(rawArgs) {
+async function runReviewGate(rawArgs) {
   if (String(process.env[REVIEW_GATE_ENV] ?? "").toLowerCase() === "off") {
     return;
   }
@@ -1608,9 +2022,32 @@ function runReviewGate(rawArgs) {
   args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
 
   const gitContext = collectGitContext(args);
+  let context = { block: "", metadata: defaultContextMetadata() };
+  if (args.contextProvider !== undefined || args.contextBudget !== undefined || args.contextTimeoutMs !== undefined || args.contextStrict) {
+    try {
+      context = await resolveCommandContext(args, { allowProviderErrors: true });
+      if (context.warning) {
+        warnGate(`context provider unavailable; running gate without context: ${context.warning}`);
+      }
+    } catch (error) {
+      warnGate(`context provider failed before execution; running gate without context: ${error.message || String(error)}`);
+      context = {
+        block: "",
+        metadata: { ...defaultContextMetadata(), contextStatus: "unavailable", contextFailureReason: error.reason || "unsafe-config", contextDegraded: true }
+      };
+    }
+    if (args.contextStrict && context.metadata.contextStatus !== "available" && context.metadata.contextStatus !== "disabled") {
+      warnGate(`context provider unavailable in strict mode; allowing stop without Gemini: ${context.metadata.contextFailureReason}`);
+      writeOperationReport({ command: "review-gate", cwd, status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+      return;
+    }
+    if (context.metadata.contextDegraded) {
+      warnGate(`context degraded (${context.metadata.contextFailureReason}); gate decision will fail open unless Gemini returns BLOCK`);
+    }
+  }
   const blocks = [];
   for (const role of roles) {
-    const prompt = reviewGateRolePrompt(role, args, gitContext);
+    const prompt = reviewGateRolePrompt(role, args, gitContext, context.block);
     const result = geminiPrint(prompt, args);
     if (result.errorCode === "ETIMEDOUT" || result.error.includes("ETIMEDOUT")) {
       warnGate(`role ${role.name} timed out; allowing stop`);
@@ -1640,9 +2077,10 @@ function runReviewGate(rawArgs) {
     return;
   }
   setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
+  writeOperationReport({ command: "review-gate", cwd, status: 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
 }
 
-function runGeminiTask(kind, rawArgs) {
+async function runGeminiTask(kind, rawArgs) {
   if (maybeStartBackground(kind, rawArgs)) {
     return;
   }
@@ -1654,6 +2092,12 @@ function runGeminiTask(kind, rawArgs) {
     }
     if (args.structuredReview && kind !== "review") {
       throw new Error("--structured is only valid for review.");
+    }
+    if (args.jsonOutput && kind !== "review" && kind !== "adversarial-review") {
+      throw new Error("--json is only valid for review and adversarial-review.");
+    }
+    if (kind === "review" && args.jsonOutput && args.structuredReview) {
+      throw new Error("--json and --structured cannot be combined for review.");
     }
     if (kind === "adversarial-review") {
       args.resolvedAdversarialLenses = resolveAdversarialLenses(args);
@@ -1667,7 +2111,13 @@ function runGeminiTask(kind, rawArgs) {
     if (args.effort) {
       throw new Error("--effort is not supported by Gemini for Codex.");
     }
+    if ((kind === "plan" || kind === "rescue") && (args.contextProvider !== undefined || args.contextBudget !== undefined || args.contextTimeoutMs !== undefined || args.contextStrict)) {
+      throw new Error("Context provider flags are only supported for review, adversarial-review, multi-review, and manual review-gate.");
+    }
     validateGeminiSessionOptions(args);
+    if (kind === "review" || kind === "adversarial-review") {
+      parseContextOptions(args);
+    }
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -1682,8 +2132,23 @@ function runGeminiTask(kind, rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
-  const prompt = kind === "plan" ? planPrompt(args) : kind === "rescue" ? rescuePrompt(args) : reviewPrompt(kind, args);
+  let context = { block: "", metadata: defaultContextMetadata() };
+  if (kind === "review" || kind === "adversarial-review") {
+    try {
+      context = await resolveCommandContext(args);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(2);
+    }
+    if (args.contextStrict && context.metadata.contextStatus !== "available" && context.metadata.contextStatus !== "disabled") {
+      console.error(`Context provider unavailable in strict mode: ${context.metadata.contextFailureReason}`);
+      writeOperationReport({ command: kind, cwd: process.cwd(), status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+      process.exit(2);
+    }
+  }
+  const prompt = kind === "plan" ? planPrompt(args) : kind === "rescue" ? rescuePrompt(args) : reviewPrompt(kind, args, context.block);
   const result = geminiPrint(prompt, args);
+  writeOperationReport({ command: kind, cwd: process.cwd(), status: result.status, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
 
   if (result.status !== 0) {
     process.stderr.write(result.stderr || result.error || "gemini review failed\n");
@@ -1695,6 +2160,17 @@ function runGeminiTask(kind, rawArgs) {
       process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
     } catch (error) {
       process.stderr.write(`Invalid structured adversarial output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
+  if (kind === "review" && args.jsonOutput) {
+    try {
+      const parsed = validateStructuredReview(extractJsonObject(result.stdout));
+      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`Invalid structured review output: ${error.message || String(error)}\n`);
       process.stdout.write(result.stdout);
       process.exit(1);
     }
@@ -1727,6 +2203,7 @@ async function runGeminiMultiReview(rawArgs) {
     if (args.effort) {
       throw new Error("--effort is not supported by Gemini for Codex.");
     }
+    parseContextOptions(args);
     if (args.structuredReview) {
       throw new Error("--structured is only valid for review.");
     }
@@ -1753,15 +2230,27 @@ async function runGeminiMultiReview(rawArgs) {
   args.scope = scope;
 
   const gitContext = collectGitContext(args);
+  let context = { block: "", metadata: defaultContextMetadata() };
+  try {
+    context = await resolveCommandContext(args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  if (args.contextStrict && context.metadata.contextStatus !== "available" && context.metadata.contextStatus !== "disabled") {
+    console.error(`Context provider unavailable in strict mode: ${context.metadata.contextFailureReason}`);
+    writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+    process.exit(2);
+  }
   let results;
   let nativeWorkspace = "";
   if (args.nativeAgents) {
     try {
       nativeWorkspace = writeNativeAgentWorkspace(args.reviewRoles);
-      const result = geminiPrint(nativeMultiAgentPrompt(args, gitContext), {
+      const result = geminiPrint(nativeMultiAgentPrompt(args, gitContext, context.block), {
         ...args,
         cwd: nativeWorkspace,
-        includeDirectories: [process.cwd()]
+        includeDirectories: currentGeminiCapabilities().includeDirectories ? [process.cwd()] : []
       });
       results = [{ role: { name: "native-gemini-subagents" }, result }];
     } finally {
@@ -1771,7 +2260,7 @@ async function runGeminiMultiReview(rawArgs) {
     }
   } else {
     results = await Promise.all(args.reviewRoles.map(async (role) => {
-      const prompt = multiReviewRolePrompt(role, args, gitContext);
+      const prompt = multiReviewRolePrompt(role, args, gitContext, context.block);
       const result = await geminiPrintAsync(prompt, args);
       return { role, result };
     }));
@@ -1799,6 +2288,7 @@ async function runGeminiMultiReview(rawArgs) {
   ];
 
   process.stdout.write(`${sections.join("\n\n")}\n`);
+  writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: failed.length ? 1 : 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
   process.exit(failed.length ? 1 : 0);
 }
 
@@ -2038,26 +2528,38 @@ switch (command) {
   case "setup":
     printSetup(rawArgs);
     break;
+  case "capabilities":
+    printCapabilities();
+    break;
+  case "report":
+    printReport(rawArgs);
+    break;
+  case "release-check":
+    runReleaseCheck(rawArgs);
+    break;
+  case "github-actions":
+    runGithubActions(rawArgs);
+    break;
   case "review":
-    runGeminiTask("review", rawArgs);
+    await runGeminiTask("review", rawArgs);
     break;
   case "adversarial-review":
-    runGeminiTask("adversarial-review", rawArgs);
+    await runGeminiTask("adversarial-review", rawArgs);
     break;
   case "multi-review":
     await runGeminiMultiReview(rawArgs);
     break;
   case "plan":
-    runGeminiTask("plan", rawArgs);
+    await runGeminiTask("plan", rawArgs);
     break;
   case "rescue":
-    runGeminiTask("rescue", rawArgs);
+    await runGeminiTask("rescue", rawArgs);
     break;
   case "status":
     printStatus();
     break;
   case "review-gate":
-    runReviewGate(rawArgs);
+    await runReviewGate(rawArgs);
     break;
   case "jobs":
     printJobs();

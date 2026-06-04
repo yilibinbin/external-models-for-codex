@@ -1,0 +1,112 @@
+name: Gemini for Codex Review
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Security note:
+# This workflow intentionally avoids the privileged target-style PR trigger.
+# Fork pull requests skip Gemini, comments, and annotations by default so secrets
+# are never exposed to untrusted fork code.
+
+permissions:
+  contents: read
+  pull-requests: write
+{{CHECKS_PERMISSION}}
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: {{TIMEOUT_MINUTES}}
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+      BASE_REPO: ${{ github.repository }}
+      IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
+      GEMINI_MODEL: "{{MODEL}}"
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect fork safety
+        id: fork-safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Base SHA: $BASE_SHA"
+          if [ "$IS_FORK" = "true" ] || [ "$HEAD_REPO" != "$BASE_REPO" ]; then
+            echo "safe_to_review=false" >> "$GITHUB_OUTPUT"
+            echo "Gemini review skipped for fork pull request." > gemini-for-codex-review.md
+            printf '{"verdict":"skipped","summary":"Fork pull request skipped by default.","findings":[],"next_steps":[]}\n' > gemini-for-codex-review.json
+          else
+            echo "safe_to_review=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Codex and Gemini for Codex
+        if: steps.fork-safety.outputs.safe_to_review == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex
+          codex plugin marketplace add yilibinbin/external-models-for-codex --ref {{RELEASE_REF}}
+          codex plugin add gemini-for-codex@external-models-for-codex
+
+      - name: Run Gemini review
+        if: steps.fork-safety.outputs.safe_to_review == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node plugins/gemini-for-codex/scripts/gemini-companion.mjs review --json --scope branch --base "$BASE_SHA" --context-provider {{CONTEXT_PROVIDER}}{{MODEL_ARG_SUFFIX}} > gemini-for-codex-review.json
+
+      - name: Render review comment
+        if: steps.fork-safety.outputs.safe_to_review == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions render-comment --input gemini-for-codex-review.json > gemini-for-codex-review.md
+
+      - name: Publish PR comment
+        if: steps.fork-safety.outputs.safe_to_review == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- gemini-for-codex-review -->';
+            const body = `${marker}\n${fs.readFileSync('gemini-for-codex-review.md', 'utf8')}`;
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            async function withBackoff(fn) {
+              let lastError;
+              for (const delay of [0, 1000, 3000]) {
+                if (delay) await sleep(delay);
+                try {
+                  return await fn();
+                } catch (error) {
+                  lastError = error;
+                  if (![403, 429].includes(error.status)) throw error;
+                }
+              }
+              throw lastError;
+            }
+            await withBackoff(async () => {
+              const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number, per_page: 100 });
+              const existing = comments.find((comment) => comment.user.type === 'Bot' && comment.body && comment.body.includes(marker));
+              if (existing) {
+                await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+              } else {
+                await github.rest.issues.createComment({ owner, repo, issue_number, body });
+              }
+            });
+{{ANNOTATION_STEP}}
+
+      - name: Upload structured review artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gemini-for-codex-review
+          path: |
+            gemini-for-codex-review.json
+            gemini-for-codex-review.md
+          retention-days: 5
