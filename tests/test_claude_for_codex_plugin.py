@@ -606,7 +606,7 @@ print('{"verdict":"ok"}')
             "--confirm-cost",
             "--json",
             "--timeout",
-            "7",
+            "60",
             "origin/main",
         ],
         cwd=tmp_path,
@@ -622,7 +622,55 @@ print('{"verdict":"ok"}')
         "ultrareview",
         "--json",
         "--timeout",
-        "7",
+        "60",
+        "origin/main",
+    ]
+
+
+def test_ultrareview_skill_style_invocation_splits_argument_string(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+print('{"verdict":"ok"}')
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW"] = "1"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "ultrareview",
+            "--json origin/main",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == '{"verdict":"ok"}\n'
+    assert json.loads((capture_dir / "argv.json").read_text()) == [
+        "ultrareview",
+        "--json",
         "origin/main",
     ]
 
@@ -5366,3 +5414,5 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         assert frontmatter["description"]
         assert "claude-companion.mjs" in text
         assert f'claude-companion.mjs" {expected_commands[skill.parent.name]}' in text
+        if skill.parent.name == "claude-ultrareview":
+            assert "CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1" in text

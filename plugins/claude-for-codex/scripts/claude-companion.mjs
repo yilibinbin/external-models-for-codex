@@ -2464,20 +2464,23 @@ async function runClaudeMultiReview(rawArgs) {
 }
 
 function runClaudeUltrareview(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
   const forwarded = [];
   let confirmed = process.env.CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW === "1";
-  for (let index = 0; index < rawArgs.length; index += 1) {
-    const arg = rawArgs[index];
+  let timeoutMinutes;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const arg = tokens[index];
     if (arg === "--confirm-cost") {
       confirmed = true;
     } else if (arg === "--json") {
       forwarded.push(arg);
     } else if (arg === "--timeout") {
-      const minutes = rawArgs[index + 1];
+      const minutes = tokens[index + 1];
       if (!minutes || !/^[1-9]\d*$/.test(minutes)) {
         console.error("Missing or invalid --timeout minutes.");
         process.exit(2);
       }
+      timeoutMinutes = Number(minutes);
       forwarded.push(arg, minutes);
       index += 1;
     } else if (arg.startsWith("-")) {
@@ -2491,7 +2494,8 @@ function runClaudeUltrareview(rawArgs) {
     console.error("ultrareview may use remote/cloud usage and usage-credit billing; pass --confirm-cost or set CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1 to continue.");
     process.exit(2);
   }
-  const result = runClaude(["ultrareview", ...forwarded], { timeout: 35 * 60 * 1000 });
+  const spawnTimeout = timeoutMinutes ? (timeoutMinutes + 1) * 60 * 1000 : 35 * 60 * 1000;
+  const result = runClaude(["ultrareview", ...forwarded], { timeout: spawnTimeout });
   process.stdout.write(result.stdout);
   process.stderr.write(result.stderr);
   if (result.error) {
