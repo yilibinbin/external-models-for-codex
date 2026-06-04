@@ -201,8 +201,47 @@ function claudeHelpText() {
   return result.status === 0 ? result.stdout : "";
 }
 
+function claudeSubcommandHelpText(args) {
+  const result = runClaude(args, { timeout: 5000 });
+  return result.status === 0 ? result.stdout : "";
+}
+
 function flagSupport(helpText, flags) {
   return Object.fromEntries(flags.map((flag) => [flag, helpText.includes(flag)]));
+}
+
+function nativeClaudeCliCapabilities(helpText = claudeHelpText(), { probeSubcommands = false } = {}) {
+  const agentsHelp = probeSubcommands ? claudeSubcommandHelpText(["agents", "--help"]) : "";
+  const ultrareviewHelp = probeSubcommands ? claudeSubcommandHelpText(["ultrareview", "--help"]) : "";
+  return {
+    nativeAgents: {
+      agentFlag: helpText.includes("--agent "),
+      agentsJson: helpText.includes("--agents"),
+      agentsCommand: agentsHelp.includes("claude agents") || agentsHelp.includes("Usage:")
+    },
+    structuredOutput: {
+      jsonSchema: helpText.includes("--json-schema")
+    },
+    streaming: {
+      streamJson: helpText.includes("stream-json"),
+      includePartialMessages: helpText.includes("--include-partial-messages")
+    },
+    sessions: {
+      resume: helpText.includes("--resume"),
+      continue: helpText.includes("--continue"),
+      sessionId: helpText.includes("--session-id"),
+      forkSession: helpText.includes("--fork-session")
+    },
+    budget: {
+      maxBudgetUsd: helpText.includes("--max-budget-usd"),
+      fallbackModel: helpText.includes("--fallback-model")
+    },
+    ultrareview: {
+      available: ultrareviewHelp.includes("claude ultrareview") || ultrareviewHelp.includes("Usage:"),
+      json: ultrareviewHelp.includes("--json"),
+      timeout: ultrareviewHelp.includes("--timeout")
+    }
+  };
 }
 
 function semanticProviderCandidates() {
@@ -217,8 +256,11 @@ function sdkAvailability() {
   };
 }
 
-function buildCapabilitiesReport() {
+function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
   const helpText = claudeHelpText();
+  const nativeCapabilities = nativeClaudeCliCapabilities(helpText, {
+    probeSubcommands: probeNativeSubcommands
+  });
   return {
     node: process.version,
     claude: {
@@ -235,7 +277,8 @@ function buildCapabilitiesReport() {
         "--model",
         "--effort",
         "--output-format"
-      ])
+      ]),
+      ...nativeCapabilities
     },
     claudeSdk: sdkAvailability(),
     backend: backendCapabilities(process.env, process.cwd()),
@@ -1250,7 +1293,7 @@ function printStatus() {
 }
 
 function printCapabilities() {
-  process.stdout.write(`${JSON.stringify(buildCapabilitiesReport(), null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(buildCapabilitiesReport({ probeNativeSubcommands: true }), null, 2)}\n`);
 }
 
 function recordCommandReport(command, args, result, startedAt, parsed, roleResults = []) {

@@ -20,7 +20,10 @@ export const READ_ONLY_MCP_TOOLS = Object.freeze([
 ]);
 export const WRITE_DENY_TOOLS = Object.freeze(["Edit", "Write", "MultiEdit", "Bash"]);
 
-const SDK_PACKAGE = "@anthropic-ai/claude-code";
+const SDK_PACKAGES = Object.freeze([
+  "@anthropic-ai/claude-agent-sdk",
+  "@anthropic-ai/claude-code"
+]);
 const SDK_PATH_ENV = "CLAUDE_FOR_CODEX_SDK_MODULE";
 const BACKEND_ENV = "CLAUDE_FOR_CODEX_BACKEND";
 
@@ -38,6 +41,15 @@ function safePackageVersion(packageJsonPath) {
     return typeof parsed.version === "string" && parsed.version ? parsed.version : "unknown";
   } catch {
     return "unknown";
+  }
+}
+
+function sdkPackageFromPackageJson(packageJsonPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
+    return typeof parsed.name === "string" && parsed.name ? parsed.name : "";
+  } catch {
+    return "";
   }
 }
 
@@ -72,21 +84,25 @@ export function resolveSdkModule(env = process.env, cwd = process.cwd()) {
     return {
       importPath: pathToFileURL(modulePath).href,
       packageJsonPath: path.join(path.dirname(modulePath), "package.json"),
+      packageName: sdkPackageFromPackageJson(path.join(path.dirname(modulePath), "package.json")) || "env",
       source: "env"
     };
   }
 
   for (const root of [cwd, npmGlobalRoot()].filter(Boolean)) {
-    try {
-      const requireFromRoot = createRequire(path.join(root, "package.json"));
-      const packageJsonPath = requireFromRoot.resolve(`${SDK_PACKAGE}/package.json`);
-      return {
-        importPath: pathToFileURL(requireFromRoot.resolve(SDK_PACKAGE)).href,
-        packageJsonPath,
-        source: root === cwd ? "local" : "global"
-      };
-    } catch {
-      // Try next root.
+    for (const packageName of SDK_PACKAGES) {
+      try {
+        const requireFromRoot = createRequire(path.join(root, "package.json"));
+        const packageJsonPath = requireFromRoot.resolve(`${packageName}/package.json`);
+        return {
+          importPath: pathToFileURL(requireFromRoot.resolve(packageName)).href,
+          packageJsonPath,
+          packageName,
+          source: root === cwd ? "local" : "global"
+        };
+      } catch {
+        // Try next package/root.
+      }
     }
   }
   return null;
@@ -103,13 +119,17 @@ export function backendCapabilities(env = process.env, cwd = process.cwd()) {
       importable: Boolean(resolved),
       version: resolved ? version : "",
       source: resolved?.source ?? "",
+      packageName: resolved?.packageName ?? "",
       supportedFeatures: {
         query: Boolean(resolved),
         allowedTools: Boolean(resolved),
         disallowedTools: Boolean(resolved),
         mcpServers: Boolean(resolved),
         permissionMode: Boolean(resolved),
-        abortSignal: Boolean(resolved)
+        abortSignal: Boolean(resolved),
+        agents: Boolean(resolved),
+        outputFormat: Boolean(resolved),
+        includePartialMessages: Boolean(resolved)
       }
     }
   };

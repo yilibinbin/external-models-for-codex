@@ -2167,6 +2167,113 @@ raise SystemExit(9)
     assert payload["backend"]["requestedBackend"] == "cli"
 
 
+def test_capabilities_prefers_claude_agent_sdk_package(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    sdk_root = tmp_path / "node_modules" / "@anthropic-ai" / "claude-agent-sdk"
+    sdk_root.mkdir(parents=True)
+    (sdk_root / "package.json").write_text(json.dumps({
+        "name": "@anthropic-ai/claude-agent-sdk",
+        "version": "0.2.0",
+        "type": "module",
+        "main": "index.mjs",
+    }), encoding="utf8")
+    (sdk_root / "index.mjs").write_text(
+        "export function query() { return [{ type: 'result', result: 'ok' }]; }\n",
+        encoding="utf8",
+    )
+
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claudeSdk"]["available"] is True
+    assert payload["claudeSdk"]["packageName"] == "@anthropic-ai/claude-agent-sdk"
+    assert payload["claudeSdk"]["version"] == "0.2.0"
+    assert payload["claudeSdk"]["supportedFeatures"]["agents"] is True
+    assert payload["claudeSdk"]["supportedFeatures"]["outputFormat"] is True
+    assert payload["claudeSdk"]["supportedFeatures"]["includePartialMessages"] is True
+
+
+def test_capabilities_falls_back_to_old_claude_code_sdk_package(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    sdk_root = tmp_path / "node_modules" / "@anthropic-ai" / "claude-code"
+    sdk_root.mkdir(parents=True)
+    (sdk_root / "package.json").write_text(json.dumps({
+        "name": "@anthropic-ai/claude-code",
+        "version": "0.0.42",
+        "type": "module",
+        "main": "index.mjs",
+    }), encoding="utf8")
+    (sdk_root / "index.mjs").write_text(
+        "export function query() { return [{ type: 'result', result: 'ok' }]; }\n",
+        encoding="utf8",
+    )
+
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claudeSdk"]["available"] is True
+    assert payload["claudeSdk"]["packageName"] == "@anthropic-ai/claude-code"
+    assert payload["claudeSdk"]["version"] == "0.0.42"
+
+
+def test_capabilities_reports_native_claude_cli_surfaces(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('2.1.162 (Claude Code)')\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        "    print('--agent <agent> --agents <json> --json-schema <schema> --include-partial-messages --fallback-model <model> --max-budget-usd <amount> --resume --continue --session-id --fork-session --output-format')\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['agents', '--help']:\n"
+        "    print('Usage: claude agents [options] --json --cwd <path>')\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['ultrareview', '--help']:\n"
+        "    print('Usage: claude ultrareview [options] [target] --json --timeout <minutes>')\n"
+        "    raise SystemExit(0)\n"
+        "raise SystemExit(2)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claude"]["nativeAgents"]["agentFlag"] is True
+    assert payload["claude"]["nativeAgents"]["agentsJson"] is True
+    assert payload["claude"]["nativeAgents"]["agentsCommand"] is True
+    assert payload["claude"]["structuredOutput"]["jsonSchema"] is True
+    assert payload["claude"]["streaming"]["includePartialMessages"] is True
+    assert payload["claude"]["ultrareview"]["available"] is True
+    assert payload["claude"]["sessions"]["resume"] is True
+
+
 def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
