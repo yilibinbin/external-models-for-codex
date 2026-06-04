@@ -2565,6 +2565,7 @@ const roles = [
   "release readiness"
 ];
 const agents = buildNativeReviewAgents(roles, {{ model: "claude-sonnet-4-5", effort: "medium" }});
+const literalModel = buildNativeReviewAgents(["literal model role"], {{ model: "sonnet" }});
 const inherited = buildNativeReviewAgents(["default model role"]);
 const prompt = nativeReviewTeamPrompt(roles, "git diff --stat output", "focus on changed files");
 const response = await runSdkNativeReview(prompt, {{ model: "claude-sonnet-4-5" }}, {{
@@ -2574,6 +2575,7 @@ const response = await runSdkNativeReview(prompt, {{ model: "claude-sonnet-4-5" 
 console.log(JSON.stringify({{
   response,
   agents,
+  literalModel,
   inherited,
   prompt,
   sanitized: nativeAgentName("Security & Correctness")
@@ -2598,17 +2600,24 @@ console.log(JSON.stringify({{
 
     for definition in payload["agents"].values():
         assert definition["tools"] == ["Read", "Grep", "Glob"]
-        assert definition["permissionMode"] == "dontAsk"
+        assert "permissionMode" not in definition
         assert definition["maxTurns"] == 4
-        assert definition["model"] == "claude-sonnet-4-5"
-        assert definition["effort"] == "medium"
+        assert definition["model"] == "inherit"
+        assert definition["model"] in {"sonnet", "opus", "haiku", "inherit"}
+        assert "effort" not in definition
         assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
             set(definition["disallowedTools"])
         )
         assert "Agent" not in definition["tools"]
 
+    literal_definition = payload["literalModel"]["cfc_literal_model_role"]
+    assert literal_definition["model"] == "sonnet"
+    assert "permissionMode" not in literal_definition
+    assert "effort" not in literal_definition
+
     inherited_definition = payload["inherited"]["cfc_default_model_role"]
-    assert "model" not in inherited_definition
+    assert inherited_definition["model"] == "inherit"
+    assert "permissionMode" not in inherited_definition
     assert "effort" not in inherited_definition
 
     query = json.loads((capture / "query.json").read_text(encoding="utf8"))

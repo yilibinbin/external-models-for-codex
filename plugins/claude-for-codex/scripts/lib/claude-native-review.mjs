@@ -1,5 +1,6 @@
 const READ_ONLY_TOOLS = Object.freeze(["Read", "Grep", "Glob"]);
 const WRITE_DENY_TOOLS = Object.freeze(["Edit", "Write", "MultiEdit", "Bash", "Agent"]);
+const SUBAGENT_MODELS = Object.freeze(new Set(["sonnet", "opus", "haiku", "inherit"]));
 
 function roleName(role) {
   if (typeof role === "string") {
@@ -31,6 +32,10 @@ export function nativeAgentName(role) {
   return `cfc_${sanitized || "reviewer"}`;
 }
 
+function nativeAgentModel(model) {
+  return SUBAGENT_MODELS.has(model) ? model : "inherit";
+}
+
 function nativeAgentPrompt(role) {
   return [
     "You are a read-only Claude for Codex review subagent.",
@@ -43,7 +48,7 @@ function nativeAgentPrompt(role) {
   ].join("\n");
 }
 
-export function buildNativeReviewAgents(roles, { model, effort } = {}) {
+export function buildNativeReviewAgents(roles, { model } = {}) {
   const agents = {};
   for (const role of roles || []) {
     const name = nativeAgentName(role);
@@ -52,15 +57,9 @@ export function buildNativeReviewAgents(roles, { model, effort } = {}) {
       prompt: nativeAgentPrompt(role),
       tools: [...READ_ONLY_TOOLS],
       disallowedTools: [...WRITE_DENY_TOOLS],
-      permissionMode: "dontAsk",
+      model: nativeAgentModel(model),
       maxTurns: 4
     };
-    if (model) {
-      definition.model = model;
-    }
-    if (effort) {
-      definition.effort = effort;
-    }
     agents[name] = definition;
   }
   return agents;
