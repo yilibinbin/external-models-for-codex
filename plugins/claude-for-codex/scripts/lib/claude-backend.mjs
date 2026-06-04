@@ -53,6 +53,21 @@ function sdkPackageFromPackageJson(packageJsonPath) {
   }
 }
 
+function packageJsonFromEntry(entryPath, packageName) {
+  let current = fs.statSync(entryPath).isDirectory() ? entryPath : path.dirname(entryPath);
+  while (true) {
+    const packageJsonPath = path.join(current, "package.json");
+    if (fs.existsSync(packageJsonPath) && sdkPackageFromPackageJson(packageJsonPath) === packageName) {
+      return packageJsonPath;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return "";
+    }
+    current = parent;
+  }
+}
+
 function moduleFileFromPackageJson(packageJsonPath) {
   try {
     const parsed = JSON.parse(fs.readFileSync(packageJsonPath, "utf8"));
@@ -93,9 +108,10 @@ export function resolveSdkModule(env = process.env, cwd = process.cwd()) {
     for (const packageName of SDK_PACKAGES) {
       try {
         const requireFromRoot = createRequire(path.join(root, "package.json"));
-        const packageJsonPath = requireFromRoot.resolve(`${packageName}/package.json`);
+        const modulePath = requireFromRoot.resolve(packageName);
+        const packageJsonPath = packageJsonFromEntry(modulePath, packageName);
         return {
-          importPath: pathToFileURL(requireFromRoot.resolve(packageName)).href,
+          importPath: pathToFileURL(modulePath).href,
           packageJsonPath,
           packageName,
           source: root === cwd ? "local" : "global"
@@ -241,7 +257,7 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
     return {
       status: 1,
       stdout: "",
-      stderr: "Claude SDK backend requested but @anthropic-ai/claude-code is unavailable.",
+      stderr: "Claude SDK backend requested but @anthropic-ai/claude-agent-sdk or @anthropic-ai/claude-code is unavailable.",
       error: "Claude SDK unavailable",
       errorCode: "SDK_UNAVAILABLE",
       backend: "sdk",

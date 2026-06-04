@@ -2176,6 +2176,9 @@ def test_capabilities_prefers_claude_agent_sdk_package(tmp_path):
         "version": "0.2.0",
         "type": "module",
         "main": "index.mjs",
+        "exports": {
+            ".": "./index.mjs",
+        },
     }), encoding="utf8")
     (sdk_root / "index.mjs").write_text(
         "export function query() { return [{ type: 'result', result: 'ok' }]; }\n",
@@ -2323,6 +2326,8 @@ def test_sdk_backend_missing_and_invalid_backend_fail_clearly(tmp_path):
     )
     assert missing.returncode == 1
     assert "Claude SDK" in missing.stderr or "SDK" in missing.stderr
+    assert "@anthropic-ai/claude-agent-sdk" in missing.stderr
+    assert "@anthropic-ai/claude-code" in missing.stderr
 
     invalid = subprocess.run(
         [NODE, str(runtime), "review", "--backend", "banana"],
