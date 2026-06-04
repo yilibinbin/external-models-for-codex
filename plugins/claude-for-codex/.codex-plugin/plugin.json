@@ -1,7 +1,7 @@
 {
   "name": "claude-for-codex",
-  "version": "0.12.0",
-  "description": "Use Claude Code from Codex for read-only review, adversarial review, role-pack review teams, planning, optional SDK backend, GitHub Actions PR review templates, rescue, and tracked job workflows.",
+  "version": "0.13.0",
+  "description": "Use Claude Code from Codex for read-only review, adversarial review, role-pack review teams, advisory mailbox/leases, planning, optional SDK backend, GitHub Actions PR review templates, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -33,6 +33,8 @@
       "Read-only rescue diagnosis",
       "Multi-role review orchestration",
       "Reviewer role packs",
+      "Sanitized mailbox coordination",
+      "Advisory review leases",
       "Structured review JSON output",
       "Structured adversarial verdicts",
       "Tracked background job status/result/cancel commands",

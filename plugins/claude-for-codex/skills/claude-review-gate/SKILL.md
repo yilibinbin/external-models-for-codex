@@ -35,7 +35,7 @@ Rules:
 - The hook is opt-in. Installing the plugin does not enable blocking behavior.
 - The gate reviews current git working-tree changes, not an exact per-turn edit set.
 - The enabled gate uses the default multi-role review set: correctness, security, tests, release, adversarial.
-- Explicit `review-gate --role-pack <pack>` is allowed only for gate-compatible built-in packs. `review-gate --role-pack default` is rejected in `0.12.0`; bare `review-gate` keeps the existing default set.
+- Explicit `review-gate --role-pack <pack>` is allowed only for gate-compatible built-in packs. `review-gate --role-pack default` is rejected because the gate accepts only gate-compatible packs; bare `review-gate` keeps the existing default set.
 - Only explicit `BLOCK:` verdicts from Claude block Stop.
 - Semantic context is off by default for the gate and never implicitly uses `auto`. If explicitly enabled and unavailable, the gate records degraded metadata such as `DEGRADED_PASS` and still blocks only on explicit Claude `BLOCK:`.
 - Claude CLI failures, timeouts, invalid gate output, or missing Claude warn but do not block Stop.

@@ -20,6 +20,8 @@ import {
   updateJob
 } from "./lib/jobs.mjs";
 import { createGitMcpConfig } from "./lib/mcp-config.mjs";
+import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib/mailbox.mjs";
+import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
 import { latestReport, listReports, reportFromResult, safeWriteReport } from "./lib/reports.mjs";
 import { runReleaseCheck } from "./lib/release-check.mjs";
@@ -78,7 +80,7 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -246,6 +248,12 @@ function buildCapabilitiesReport() {
       userPackDirectory: userRolePackDir(process.env),
       userPackExecution: false
     },
+    mailbox: {
+      threads: listMailboxThreads(process.cwd(), process.env).threads.length
+    },
+    leases: {
+      active: listLeases(process.cwd(), process.env).leases.length
+    },
     semanticProviders: semanticProviderCandidates(),
     semanticContext: semanticCapabilities(process.cwd(), process.env)
   };
@@ -307,7 +315,7 @@ function parseArgs(argv) {
       }
       index += 1;
     } else if (arg === "--role-pack-file") {
-      throw new Error("--role-pack-file is validate/inspect-only in 0.12.0 and is not accepted by review commands.");
+      throw new Error("--role-pack-file is validate/inspect-only and is not accepted by review commands.");
     } else if (arg === "--adversarial-lenses") {
       const lenses = readOptionValue(tokens, index, arg)
         .split(",")
@@ -336,6 +344,10 @@ function parseArgs(argv) {
       parsed.parallel = true;
     } else if (arg === "--sequential") {
       parsed.sequential = true;
+    } else if (arg === "--use-mailbox") {
+      parsed.useMailbox = true;
+    } else if (arg === "--advisory-leases") {
+      parsed.advisoryLeases = true;
     } else {
       const semanticIndex = parseSemanticOptions(tokens, index, parsed);
       if (semanticIndex !== index) {
@@ -1473,15 +1485,134 @@ function runRolesCommand(rawArgs) {
       }
       const pack = validateRolePackFile(file, { cwd: process.cwd(), mode: "validate" });
       const summary = rolePackSummary(pack);
-      const payload = { ok: true, executable: false, reason: "User role packs are validate/inspect-only in 0.12.0.", rolePack: summary };
+      const payload = { ok: true, executable: false, reason: "User role packs are validate/inspect-only and are not executable by review commands.", rolePack: summary };
       if (jsonOutput) {
         process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
         return;
       }
-      process.stdout.write(`ok: ${summary.name} validates; execution is deferred in 0.12.0\n`);
+      process.stdout.write(`ok: ${summary.name} validates; execution is not enabled for user-authored role packs\n`);
       return;
     }
     throw new Error("Usage: claude-companion.mjs roles list|inspect|validate [options]");
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+}
+
+function runMailboxCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const subcommand = tokens.shift();
+  const jsonOutput = tokens.includes("--json");
+  const args = tokens.filter((token) => token !== "--json");
+  try {
+    if (subcommand === "list") {
+      const payload = listMailboxThreads(process.cwd(), process.env);
+      process.stdout.write(jsonOutput
+        ? `${JSON.stringify(payload, null, 2)}\n`
+        : [`Mailbox threads:`, ...payload.threads.map((thread) => `- ${thread.threadId}: ${thread.messageCount} messages`)].join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "show") {
+      const threadId = args[0];
+      if (!threadId || args.length !== 1) {
+        throw new Error("Usage: claude-companion.mjs mailbox show <thread-or-job-id> [--json]");
+      }
+      const payload = showMailboxThread(process.cwd(), threadId, process.env);
+      process.stdout.write(jsonOutput
+        ? `${JSON.stringify(payload, null, 2)}\n`
+        : payload.messages.map((message) => `${message.createdAt} ${message.status} ${message.role}: ${message.summary}`).join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "post") {
+      const options = { role: "manual" };
+      for (let index = 0; index < args.length; index += 1) {
+        const token = args[index];
+        if (token === "--job-id") {
+          options.jobId = readOptionValue(args, index, token);
+          index += 1;
+        } else if (token === "--summary") {
+          options.summary = readOptionValue(args, index, token);
+          index += 1;
+        } else if (token === "--role") {
+          options.role = readOptionValue(args, index, token);
+          index += 1;
+        } else {
+          throw new Error(`Unknown mailbox option "${token}".`);
+        }
+      }
+      if (!options.jobId || !options.summary) {
+        throw new Error("Usage: claude-companion.mjs mailbox post --job-id <id> --summary <text> [--role <role>]");
+      }
+      const payload = postMailboxMessage(process.cwd(), {
+        threadId: options.jobId,
+        jobId: options.jobId,
+        role: options.role,
+        command: "mailbox",
+        status: "note",
+        summary: options.summary,
+        source: "manual"
+      }, process.env);
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      return;
+    }
+    throw new Error("Usage: claude-companion.mjs mailbox list|show|post [options]");
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+}
+
+function runLeasesCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const subcommand = tokens.shift();
+  const jsonOutput = tokens.includes("--json");
+  const args = tokens.filter((token) => token !== "--json");
+  try {
+    if (subcommand === "list") {
+      const payload = listLeases(process.cwd(), process.env);
+      process.stdout.write(jsonOutput
+        ? `${JSON.stringify(payload, null, 2)}\n`
+        : [`Active leases:`, ...payload.leases.map((lease) => `- ${lease.id}: ${lease.path} (${lease.role}) expires ${lease.expiresAt}`)].join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "claim") {
+      const options = {};
+      for (let index = 0; index < args.length; index += 1) {
+        const token = args[index];
+        if (token === "--path") {
+          options.path = readOptionValue(args, index, token);
+          index += 1;
+        } else if (token === "--role") {
+          options.role = readOptionValue(args, index, token);
+          index += 1;
+        } else if (token === "--ttl") {
+          options.ttl = readOptionValue(args, index, token);
+          index += 1;
+        } else if (token === "--job-id") {
+          options.jobId = readOptionValue(args, index, token);
+          index += 1;
+        } else {
+          throw new Error(`Unknown leases option "${token}".`);
+        }
+      }
+      if (!options.path || !options.role || !options.ttl) {
+        throw new Error("Usage: claude-companion.mjs leases claim --path <path> --role <role> --ttl <duration> [--job-id <id>]");
+      }
+      const payload = claimLease(process.cwd(), options, process.env);
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      return;
+    }
+    if (subcommand === "release") {
+      const leaseId = args[0];
+      if (!leaseId || args.length !== 1) {
+        throw new Error("Usage: claude-companion.mjs leases release <lease-id> [--json]");
+      }
+      const payload = releaseLease(process.cwd(), leaseId, process.env, { manual: true });
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      process.exit(payload.status === "released" ? 0 : 1);
+    }
+    throw new Error("Usage: claude-companion.mjs leases list|claim|release [options]");
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -1890,6 +2021,47 @@ async function runClaudeMultiReview(rawArgs) {
     process.exit(2);
   }
 
+  const mailboxThreadId = args.useMailbox ? `review-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}` : "";
+  const mailboxFailures = [];
+  const leaseResults = [];
+  if (args.advisoryLeases) {
+    if (!args.paths.length) {
+      process.stderr.write("[claude-for-codex leases] --advisory-leases skipped because no --path was supplied.\n");
+    } else {
+      for (const role of args.reviewRoles) {
+        for (const reviewPath of args.paths) {
+          try {
+            leaseResults.push(claimLease(process.cwd(), {
+              path: reviewPath,
+              role: role.name,
+              ttl: "10m",
+              jobId: mailboxThreadId || `review-${Date.now().toString(36)}`
+            }, process.env));
+          } catch (error) {
+            leaseResults.push({ status: "degraded", reason: error.message || String(error), role: role.name, path: reviewPath });
+          }
+        }
+      }
+    }
+  }
+  if (args.useMailbox) {
+    for (const role of args.reviewRoles) {
+      try {
+        postMailboxMessage(process.cwd(), {
+          threadId: mailboxThreadId,
+          jobId: mailboxThreadId,
+          role: role.name,
+          command: "multi-review",
+          status: "running",
+          summary: `Role ${role.name} started.`,
+          source: "runtime"
+        }, process.env);
+      } catch (error) {
+        mailboxFailures.push(error.message || String(error));
+      }
+    }
+  }
+
   const gitContext = collectGitContext(args);
   const runInParallel = !args.sequential;
   let results = [];
@@ -1935,7 +2107,38 @@ async function runClaudeMultiReview(rawArgs) {
 
   const rendered = renderRoleReviewSections("# Claude Multi-Agent Review", results, "Role");
   const summaryMode = `execution mode: ${runInParallel ? "parallel" : "sequential"}`;
-  const output = rendered.text.replace("execution mode: parallel", summaryMode);
+  if (args.useMailbox) {
+    for (const { role, result } of results) {
+      try {
+        postMailboxMessage(process.cwd(), {
+          threadId: mailboxThreadId,
+          jobId: mailboxThreadId,
+          role: role.name,
+          command: "multi-review",
+          status: result.status === 0 ? "succeeded" : "failed",
+          summary: `Role ${role.name} completed with exit status ${result.status}.`,
+          source: "runtime"
+        }, process.env);
+      } catch (error) {
+        mailboxFailures.push(error.message || String(error));
+      }
+    }
+  }
+  args.mailboxSummary = args.useMailbox ? {
+    enabled: true,
+    threadId: mailboxThreadId,
+    messageCount: args.reviewRoles.length + results.length,
+    writeFailures: mailboxFailures.length
+  } : { enabled: false };
+  args.leaseSummary = args.advisoryLeases ? {
+    enabled: true,
+    claimed: leaseResults.filter((entry) => entry.status === "claimed").length,
+    conflicts: leaseResults.filter((entry) => entry.status === "conflict").length,
+    degraded: leaseResults.some((entry) => entry.status === "degraded")
+  } : { enabled: false };
+  const mailboxLine = args.useMailbox ? `\nmailbox thread: ${mailboxThreadId}; write failures: ${mailboxFailures.length}` : "";
+  const leaseLine = args.advisoryLeases ? `\nleases claimed: ${args.leaseSummary.claimed}; conflicts: ${args.leaseSummary.conflicts}; degraded: ${args.leaseSummary.degraded ? "yes" : "no"}` : "";
+  const output = rendered.text.replace("execution mode: parallel", summaryMode) + mailboxLine + leaseLine;
   recordCommandReport("multi-review", args, {
     status: rendered.failed.length ? 1 : 0,
     stdout: output,
@@ -2204,6 +2407,12 @@ switch (command) {
     break;
   case "roles":
     runRolesCommand(rawArgs);
+    break;
+  case "mailbox":
+    runMailboxCommand(rawArgs);
+    break;
+  case "leases":
+    runLeasesCommand(rawArgs);
     break;
   case "__run-job":
     runJobWorker(rawArgs);

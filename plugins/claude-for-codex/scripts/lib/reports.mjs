@@ -14,6 +14,10 @@ function workspaceId(cwd = process.cwd()) {
   return createHash("sha256").update(canonicalWorkspaceRoot(cwd)).digest("hex").slice(0, 16);
 }
 
+function hashText(text) {
+  return `sha256:${createHash("sha256").update(String(text ?? "")).digest("hex").slice(0, 16)}`;
+}
+
 function nowStamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
@@ -83,6 +87,18 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
       hash: args.rolePackSummary.hash,
       roles: args.rolePackSummary.roles,
       gateCompatible: Boolean(args.rolePackSummary.gate_compatible)
+    } : undefined,
+    mailbox: args.mailboxSummary ? {
+      enabled: Boolean(args.mailboxSummary.enabled),
+      threadIdHash: args.mailboxSummary.threadId ? hashText(args.mailboxSummary.threadId) : "",
+      messageCount: args.mailboxSummary.messageCount ?? 0,
+      writeFailures: args.mailboxSummary.writeFailures ?? 0
+    } : undefined,
+    leases: args.leaseSummary ? {
+      enabled: Boolean(args.leaseSummary.enabled),
+      claimed: args.leaseSummary.claimed ?? 0,
+      conflicts: args.leaseSummary.conflicts ?? 0,
+      degraded: Boolean(args.leaseSummary.degraded)
     } : undefined,
     structured: structuredSummary(parsed),
     roleResults: roleResults.map(({ role, result: roleResult, parsed: roleParsed }) => ({

@@ -33,11 +33,11 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review --role-pac
 
 Rules:
 - Built-in role packs are executable.
-- User-authored role packs are validate/inspect-only in `0.12.0`; do not execute them.
+- User-authored role packs are validate/inspect-only; do not execute them.
 - Role packs are plugin-managed reviewer presets, not native Claude subagents.
 - Role packs cannot grant tools, shell commands, hooks, environment variables, MCP servers, backend mode, or write permissions.
 - `--role-pack` conflicts with `--roles` and `--role`.
-- `review-gate --role-pack default` is rejected in `0.12.0`; bare `review-gate` keeps the existing default behavior.
+- `review-gate --role-pack default` is rejected because the gate accepts only gate-compatible packs; bare `review-gate` keeps the existing default behavior.
 
 Useful built-ins:
 - `minimal`: correctness only.

@@ -4,6 +4,13 @@
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.13.0 - 2026-06-04
+
+- Add sanitized mailbox commands for review/job coordination summaries.
+- Add advisory lease commands for declaring path attention without locking files or changing review verdicts.
+- Add optional `multi-review --use-mailbox` and `--advisory-leases` coordination metadata.
+- Add shared runtime summary sanitizer for secret, local path, control character, and UTF-8 byte-cap handling.
+
 ## 0.12.0 - 2026-06-04
 
 - Add built-in Claude reviewer role packs with `roles list`, `roles inspect`, and `multi-review --role-pack`.

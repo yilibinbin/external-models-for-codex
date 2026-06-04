@@ -64,6 +64,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `claude-plan`: ask Claude for an independent implementation plan before Codex edits.
 - `claude-multi-review`: run role-based review across correctness, security, tests, release, and adversarial perspectives.
 - `claude-role-packs`: inspect built-in Claude reviewer presets and validate user-authored role-pack JSON.
+- `claude-mailbox`: inspect sanitized review/job coordination summaries.
+- `claude-leases`: inspect, claim, or release advisory path attention leases.
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-collaboration-loop`: run a plan, reconcile, implement, review, and report workflow.
 - `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents that stay read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini session flags are capability-gated from the installed CLI.

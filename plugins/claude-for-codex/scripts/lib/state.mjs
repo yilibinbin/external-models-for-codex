@@ -33,6 +33,14 @@ export function jobsDirForCwd(cwd = process.cwd(), env = process.env) {
   return path.join(stateDirForCwd(cwd, env), "jobs");
 }
 
+export function mailboxDirForCwd(cwd = process.cwd(), env = process.env) {
+  return path.join(stateDirForCwd(cwd, env), "mailbox");
+}
+
+export function leasesDirForCwd(cwd = process.cwd(), env = process.env) {
+  return path.join(stateDirForCwd(cwd, env), "leases");
+}
+
 export function currentSessionFileForCwd(cwd = process.cwd(), env = process.env) {
   return path.join(stateDirForCwd(cwd, env), "current-session.json");
 }
@@ -118,7 +126,7 @@ export function saveState(cwd, state, env = process.env) {
   const payload = normalizeState(state);
   const stateFile = stateFileForCwd(cwd, env);
   const tmpFile = `${stateFile}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  fs.writeFileSync(tmpFile, `${JSON.stringify(payload, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   fs.renameSync(tmpFile, stateFile);
   return payload;
 }

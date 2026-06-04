@@ -713,7 +713,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.12.0"
+    assert data["version"] == "0.13.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -721,7 +721,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.12.0"
+    assert manifest["version"] == "0.13.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -763,7 +763,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -1091,6 +1091,102 @@ for (const file of [{json.dumps(str(pack))}, {json.dumps(str(link))}]) {{
     result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.count("must not live inside the workspace") == 2
+
+
+def test_mailbox_sanitizer_redacts_paths_secrets_and_caps_utf8(tmp_path):
+    sanitizer = PLUGIN / "scripts" / "lib" / "sanitize.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    secret = "ghp_" + ("A" * 24)
+    text = f"{secret} /home/alice/project/file.py /tmp/work C:\\\\Users\\\\alice\\\\secret {'测' * 3000}"
+    script = f"""
+import {{ sanitizeSummary }} from {json.dumps(sanitizer.as_uri())};
+const out = sanitizeSummary({json.dumps(text)}, {{ cwd: {json.dumps(str(repo))}, maxBytes: 2048 }});
+const bytes = Buffer.byteLength(out, "utf8");
+if (bytes > 2048) throw new Error("too many bytes " + bytes);
+if (out.includes({json.dumps(secret)})) throw new Error("secret leaked");
+if (out.includes("/home/alice") || out.includes("/tmp/work") || out.includes("C:\\\\Users\\\\alice")) throw new Error("path leaked: " + out);
+JSON.parse(JSON.stringify({{ out }}));
+console.log(bytes);
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_mailbox_parallel_posts_are_not_lost(tmp_path):
+    mailbox = PLUGIN / "scripts" / "lib" / "mailbox.mjs"
+    data = tmp_path / "data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    script = f"""
+import {{ postMailboxMessage, showMailboxThread }} from {json.dumps(mailbox.as_uri())};
+const env = {{ ...process.env, CLAUDE_PLUGIN_DATA: {json.dumps(str(data))} }};
+await Promise.all(Array.from({{ length: 20 }}, (_, index) => postMailboxMessage({json.dumps(str(repo))}, {{
+  threadId: "thread-smoke",
+  jobId: "job-smoke",
+  role: "correctness",
+  command: "multi-review",
+  status: "note",
+  summary: "message " + index,
+  source: "manual"
+}}, env)));
+const shown = showMailboxThread({json.dumps(str(repo))}, "thread-smoke", env);
+if (shown.messages.length !== 20) throw new Error("lost messages " + shown.messages.length);
+console.log("ok");
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_lease_claim_conflict_and_release(tmp_path):
+    leases = PLUGIN / "scripts" / "lib" / "leases.mjs"
+    data = tmp_path / "data"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("x")
+    script = f"""
+import {{ claimLease, listLeases, releaseLease }} from {json.dumps(leases.as_uri())};
+const env = {{ ...process.env, CLAUDE_PLUGIN_DATA: {json.dumps(str(data))} }};
+const first = claimLease({json.dumps(str(repo))}, {{ path: "file.txt", role: "correctness", ttl: "60s", jobId: "job-a" }}, env);
+const second = claimLease({json.dumps(str(repo))}, {{ path: "file.txt", role: "security", ttl: "60s", jobId: "job-b" }}, env);
+if (first.status !== "claimed") throw new Error("first not claimed");
+if (second.status !== "conflict") throw new Error("second not conflict: " + second.status);
+if (listLeases({json.dumps(str(repo))}, env).leases.length !== 1) throw new Error("bad lease count");
+const released = releaseLease({json.dumps(str(repo))}, first.lease.id, env, {{ manual: true }});
+if (released.status !== "released") throw new Error("not released");
+console.log("ok");
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_lease_rejects_path_traversal_and_symlink_escape(tmp_path):
+    leases = PLUGIN / "scripts" / "lib" / "leases.mjs"
+    data = tmp_path / "data"
+    repo = tmp_path / "repo"
+    outside = tmp_path / "outside"
+    repo.mkdir()
+    outside.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (outside / "secret.txt").write_text("secret")
+    (repo / "link").symlink_to(outside)
+    script = f"""
+import {{ claimLease }} from {json.dumps(leases.as_uri())};
+const env = {{ ...process.env, CLAUDE_PLUGIN_DATA: {json.dumps(str(data))} }};
+for (const path of ["../outside/secret.txt", "link/secret.txt"]) {{
+  try {{
+    claimLease({json.dumps(str(repo))}, {{ path, role: "correctness", ttl: "60s" }}, env);
+    throw new Error("accepted " + path);
+  }} catch (error) {{
+    if (!String(error.message).includes("inside the workspace")) throw error;
+  }}
+}}
+console.log("ok");
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_runtime_avoids_head_name_only_diff_without_head():
@@ -2479,7 +2575,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.12.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.13.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "github.event.pull_request.base.sha" in text
     assert "fetch-depth: 0" in text
@@ -2519,7 +2615,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.12.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.13.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -2607,7 +2703,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.12.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.13.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -4214,7 +4310,9 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-adversarial-review": "adversarial-review",
             "claude-cancel": "cancel",
             "claude-collaboration-loop": "plan",
-            "claude-github-actions-review": "github-actions",
+        "claude-github-actions-review": "github-actions",
+        "claude-leases": "leases",
+        "claude-mailbox": "mailbox",
             "claude-multi-review": "multi-review",
         "claude-role-packs": "roles",
         "claude-plan": "plan",
@@ -4229,6 +4327,8 @@ def test_all_skills_have_frontmatter_and_runtime_call():
             "claude-cancel",
             "claude-collaboration-loop",
             "claude-github-actions-review",
+        "claude-leases",
+        "claude-mailbox",
             "claude-multi-review",
         "claude-role-packs",
         "claude-plan",
