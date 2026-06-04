@@ -158,6 +158,39 @@ print({json.dumps(json.dumps(response))})
     return provider, config_path, tmp_path / "semantic-capture"
 
 
+def write_fake_claude_sdk(tmp_path, *, stdout="SDK_OK", extra_js=""):
+    sdk_dir = tmp_path / "fake-claude-sdk"
+    capture = tmp_path / "sdk-capture"
+    sdk_dir.mkdir()
+    capture.mkdir()
+    (sdk_dir / "package.json").write_text(json.dumps({
+        "name": "@anthropic-ai/claude-code",
+        "version": "9.8.7-test",
+        "type": "module",
+        "main": "index.mjs",
+    }), encoding="utf8")
+    (sdk_dir / "index.mjs").write_text(
+        f"""
+import fs from 'node:fs';
+const capture = {json.dumps(str(capture))};
+export async function* query(input) {{
+  fs.writeFileSync(`${{capture}}/query.json`, JSON.stringify(input, null, 2));
+  {extra_js}
+  yield {{
+    type: 'result',
+    subtype: 'success',
+    result: {json.dumps(stdout)},
+    session_id: 'sdk-session-secret',
+    total_cost_usd: 0.01,
+    usage: {{ input_tokens: 3, output_tokens: 4 }}
+  }};
+}}
+""",
+        encoding="utf8",
+    )
+    return sdk_dir / "index.mjs", capture
+
+
 def run_fake_claude_adversarial_review(tmp_path, args, commit_head=False):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -680,7 +713,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.10.0"
+    assert data["version"] == "0.11.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -688,7 +721,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.10.0"
+    assert manifest["version"] == "0.11.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -1868,6 +1901,169 @@ raise SystemExit(9)
     assert payload["claude"]["flags"]["--strict-mcp-config"] is True
     assert payload["semanticProviders"]["codegraph"]["availableOnPath"] is True
     assert not marker.exists()
+    assert payload["backend"]["defaultBackend"] == "cli"
+    assert payload["backend"]["requestedBackend"] == "cli"
+
+
+def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+    sdk_module, capture = write_fake_claude_sdk(tmp_path, stdout="SDK_REVIEW_OK")
+
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["PATH"] = f"{tmp_path}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--backend", "sdk", "--scope", "working-tree", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "SDK_REVIEW_OK"
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert "focus" in query["prompt"]
+    assert query["permissionMode"] == "dontAsk"
+    assert query["options"]["permissionMode"] == "dontAsk"
+    assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
+    assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
+    assert "mcp__claude-for-codex-git__git_status" in query["allowedTools"]
+    assert "claude-for-codex-git" in query["mcpServers"]
+
+
+def test_sdk_backend_missing_and_invalid_backend_fail_clearly(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(tmp_path / "missing-sdk.mjs")
+
+    missing = subprocess.run(
+        [NODE, str(runtime), "review", "--backend", "sdk", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert missing.returncode == 1
+    assert "Claude SDK" in missing.stderr or "SDK" in missing.stderr
+
+    invalid = subprocess.run(
+        [NODE, str(runtime), "review", "--backend", "banana"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid.returncode == 2
+    assert "Invalid --backend" in invalid.stderr
+
+
+def test_sdk_backend_structured_review_and_report_metadata(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout='{"verdict":"approve","summary":"ok","findings":[],"next_steps":[]}',
+    )
+
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--backend", "sdk", "--json", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["verdict"] == "approve"
+
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    report = json.loads(latest.stdout)["report"]
+    assert report["backend"] == "sdk"
+    assert report["sdkMessageCount"] == 1
+    assert report["sdkSessionIdHash"]
+    serialized = json.dumps(report)
+    assert "sdk-session-secret" not in serialized
+    assert "SDK_REVIEW_OK" not in serialized
+
+
+def test_sdk_backend_review_gate_allows_and_uses_sdk(tmp_path):
+    runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
+    sdk_module, capture = write_fake_claude_sdk(tmp_path, stdout="ALLOW: sdk gate ok")
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    setup = subprocess.run(
+        [NODE, str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review-gate", "--backend", "sdk"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert "<task>Run a stop-gate review of the current git changes.</task>" in query["prompt"]
+    assert query["permissionMode"] == "dontAsk"
+
+
+def test_sdk_backend_rescue_write_keeps_explicit_write_fingerprint(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "broken.txt").write_text("broken\n")
+    sdk_module, capture = write_fake_claude_sdk(tmp_path, stdout="SDK_RESCUE_OK")
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "rescue", "--backend", "sdk", "--write", "fix failure"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "SDK_RESCUE_OK"
+    assert "write-mode fingerprint" in result.stderr
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert query["permissionMode"] == "bypassPermissions"
+    assert query["options"]["permissionMode"] == "bypassPermissions"
+    assert "allowedTools" not in query or query["allowedTools"] is None
+    assert "mcpServers" not in query or query["mcpServers"] is None
 
 
 def test_review_semantic_context_defaults_off_even_with_configured_provider(tmp_path):
@@ -2117,7 +2313,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.10.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.11.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "github.event.pull_request.base.sha" in text
     assert "fetch-depth: 0" in text
@@ -2157,7 +2353,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.10.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.11.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -2245,7 +2441,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.10.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.11.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 

@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.10.0`
+- Current version: `0.11.0`
 
 Published capabilities:
 
@@ -27,6 +27,7 @@ Published capabilities:
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
 - Capability diagnostics for Claude CLI, Git, GitHub CLI, hooks, MCP, and optional semantic providers.
 - Optional semantic context for review commands, disabled by default.
+- Optional Claude SDK backend for explicitly selected review, gate, plan, and rescue flows.
 - GitHub Actions PR review workflow templates with fork-safe defaults.
 - Sanitized per-run review reports that omit prompts, diffs, raw model output, and secrets by default.
 - Release checks for manifest, hook, docs, prompt, skill, and secret-scan hygiene.
@@ -38,6 +39,7 @@ Published capabilities:
 Safety and operating model:
 
 - Review commands invoke Claude Code with read-only tool permissions.
+- CLI remains the default backend. The SDK backend runs only with `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk`.
 - Rescue is read-only by default; `rescue --write` is explicit opt-in and records git fingerprints before and after Claude runs.
 - Codex remains responsible for applying or rejecting Claude findings.
 - The Stop gate is disabled by default after installation.
@@ -148,6 +150,7 @@ Run from the repository root:
 ```bash
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --json --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs review --backend sdk --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
@@ -179,13 +182,15 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
 
+`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies `Edit`, `Write`, `MultiEdit`, and `Bash`, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
+
 Semantic context is disabled by default. Use `--semantic-context <provider>` on `review`, `multi-review`, `adversarial-review`, or `review-gate` only after configuring a repo-external provider. Provider commands must be argv arrays, run with an allowlist-only environment, stay outside the workspace, and return workspace-bound JSON. Semantic context is advisory; Claude findings still need changed-file or git evidence. If semantic context fails in `review-gate`, the gate records degraded metadata such as `DEGRADED_PASS` and still blocks only on explicit Claude `BLOCK:`.
 
 `report --latest` reads the latest sanitized review report from the repo-external plugin data directory. Reports are minimal metadata only: command, scope, roles/lenses, backend, model/effort, timestamps, exit status, output byte counts, and structured verdict/finding counts when available. Reports do not store prompts, source code, diffs, raw model output, environment variables, or raw absolute workspace paths by default. Set `CLAUDE_FOR_CODEX_NO_TELEMETRY=1` to disable all non-job report writes.
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.10.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.11.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
 `release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install` for a fail-soft smoke or `--require-remote-install` when a release must fail if GitHub install fails.
 

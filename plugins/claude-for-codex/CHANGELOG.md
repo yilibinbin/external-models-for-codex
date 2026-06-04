@@ -4,6 +4,13 @@
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.11.0 - 2026-06-04
+
+- Add opt-in `--backend sdk` execution for Claude review, structured review, multi-review, review gate, plan, and rescue flows.
+- Keep CLI as the default backend and fail clearly when the SDK backend is explicitly requested but unavailable.
+- Preserve read-only SDK safety with explicit allowed tools, write-tool denials, strict Git MCP config, SDK exception normalization, and sanitized SDK report metadata.
+- Keep `rescue --write --backend sdk` explicit and preserve before/after git fingerprint reporting.
+
 ## 0.10.0 - 2026-06-04
 
 - Add `github-actions render|init|validate` for fork-safe Claude PR review workflow templates.

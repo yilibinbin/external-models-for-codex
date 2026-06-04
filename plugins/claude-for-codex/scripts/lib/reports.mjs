@@ -48,7 +48,7 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
   return {
     version: 1,
     command,
-    backend: "cli",
+    backend: result?.backend === "sdk" ? "sdk" : "cli",
     scope: args.scope ?? "auto",
     model: args.model ?? "",
     effort: args.effort ?? "",
@@ -64,6 +64,11 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
     stderrBytes: byteLength(result?.stderr),
     errorCode: result?.errorCode ?? "",
     errorPresent: Boolean(result?.error),
+    sdkMessageCount: typeof result?.metadata?.sdkMessageCount === "number" ? result.metadata.sdkMessageCount : undefined,
+    sdkResultSubtype: typeof result?.metadata?.sdkResultSubtype === "string" ? result.metadata.sdkResultSubtype : undefined,
+    sdkSessionIdHash: typeof result?.metadata?.sdkSessionIdHash === "string" ? result.metadata.sdkSessionIdHash : undefined,
+    sdkCostUsd: typeof result?.metadata?.sdkCostUsd === "number" ? result.metadata.sdkCostUsd : undefined,
+    sdkTokenCounts: result?.metadata?.sdkTokenCounts && typeof result.metadata.sdkTokenCounts === "object" ? result.metadata.sdkTokenCounts : undefined,
     semanticProvider: args.semantic?.report?.semanticProvider ?? "",
     semanticStatus: args.semantic?.report?.semanticStatus ?? "off",
     semanticBytes: args.semantic?.report?.semanticBytes ?? 0,
@@ -78,6 +83,7 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
       stdoutBytes: byteLength(roleResult?.stdout),
       stderrBytes: byteLength(roleResult?.stderr),
       errorPresent: Boolean(roleResult?.error),
+      backend: roleResult?.backend === "sdk" ? "sdk" : "cli",
       structured: structuredSummary(roleParsed)
     })).filter((entry) => entry.role),
     workspaceId: workspaceId(process.cwd())

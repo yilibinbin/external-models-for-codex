@@ -33,6 +33,11 @@ import {
   writeWorkflow
 } from "./lib/github-actions.mjs";
 import {
+  backendCapabilities,
+  resolveBackend,
+  runSdkPrompt
+} from "./lib/claude-backend.mjs";
+import {
   aggregateRoleReviewOutputs,
   normalizeAdversarialOutput,
   normalizeReviewOutput
@@ -249,20 +254,10 @@ function semanticProviderCandidates() {
 }
 
 function sdkAvailability() {
-  const result = spawnSync(process.execPath, [
-    "--input-type=module",
-    "-e",
-    "try { const pkg = await import('@anthropic-ai/claude-code'); console.log(pkg?.default?.version ?? 'available'); } catch (error) { process.exit(1); }"
-  ], {
-    cwd: process.cwd(),
-    env: process.env,
-    encoding: "utf8",
-    timeout: 5000
-  });
+  const capabilities = backendCapabilities(process.env, process.cwd()).claudeSdk;
   return {
-    available: result.status === 0,
-    version: result.status === 0 ? result.stdout.trim() : "",
-    error: result.status === 0 ? "" : (result.stderr || result.error?.message || "").trim()
+    ...capabilities,
+    error: capabilities.available ? "" : "SDK package not resolved"
   };
 }
 
@@ -287,6 +282,7 @@ function buildCapabilitiesReport() {
       ])
     },
     claudeSdk: sdkAvailability(),
+    backend: backendCapabilities(process.env, process.cwd()),
     git: commandVersion("git"),
     githubCli: commandVersion("gh"),
     hooks: hookDiagnostics(),
@@ -325,6 +321,9 @@ function parseArgs(argv) {
       index += 1;
     } else if (arg === "--effort") {
       parsed.effort = readOptionValue(tokens, index, arg);
+      index += 1;
+    } else if (arg === "--backend") {
+      parsed.backend = readOptionValue(tokens, index, arg);
       index += 1;
     } else if (arg === "--roles") {
       const roles = readOptionValue(tokens, index, arg)
@@ -383,6 +382,11 @@ function parseArgs(argv) {
     throw new Error("Choose either --parallel or --sequential.");
   }
   return parsed;
+}
+
+function validateBackendArgs(args) {
+  args.backend = resolveBackend(args, process.env);
+  return args.backend;
 }
 
 function resolveReviewRoles(args) {
@@ -753,6 +757,9 @@ function runClaudeAsync(args, options = {}) {
 }
 
 async function claudePrintAsync(prompt, options) {
+  if (resolveBackend(options, process.env) === "sdk") {
+    return runSdkPrompt(prompt, options, { cwd: process.cwd(), timeout: options.timeout });
+  }
   const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
   try {
     return await runClaudeAsync(args, { timeout: options.timeout });
@@ -1489,7 +1496,7 @@ function readStdinJsonForGate() {
   return JSON.parse(rawInput);
 }
 
-function runReviewGate(rawArgs) {
+async function runReviewGate(rawArgs) {
   const startedAt = new Date().toISOString();
   if (String(process.env[REVIEW_GATE_ENV] ?? "").toLowerCase() === "off") {
     return;
@@ -1498,6 +1505,7 @@ function runReviewGate(rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateBackendArgs(args);
   } catch (error) {
     warnGate(`argument parse failed; allowing stop: ${error.message || String(error)}`);
     return;
@@ -1590,7 +1598,7 @@ function runReviewGate(rawArgs) {
   const blocks = [];
   for (const role of roles) {
     const prompt = reviewGateRolePrompt(role, args, gitContext);
-    const result = claudePrint(prompt, args);
+    const result = await claudePrintAsync(prompt, args);
     if (result.errorCode === "ETIMEDOUT" || result.error.includes("ETIMEDOUT")) {
       warnGate(`role ${role.name} timed out; allowing stop`);
       continue;
@@ -1706,6 +1714,7 @@ async function runClaudeTask(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateBackendArgs(args);
     if (kind === "adversarial-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
     }
@@ -1766,7 +1775,7 @@ async function runClaudeTask(kind, rawArgs) {
     }
     rescueBefore = workingTreeFingerprint(process.cwd());
   }
-  const result = claudePrint(prompt, args);
+  const result = await claudePrintAsync(prompt, args);
 
   if (result.status !== 0) {
     recordCommandReport(kind, args, result, startedAt);
@@ -1815,6 +1824,7 @@ async function runClaudeMultiReview(rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateBackendArgs(args);
     args.reviewRoles = args.roles === undefined
       ? DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
           name,
@@ -1850,7 +1860,7 @@ async function runClaudeMultiReview(rawArgs) {
   } else {
     for (const role of args.reviewRoles) {
       const prompt = multiReviewRolePrompt(role, args, gitContext);
-      const result = claudePrint(prompt, args);
+      const result = await claudePrintAsync(prompt, args);
       results.push({ role, result });
     }
   }
@@ -2134,7 +2144,7 @@ switch (command) {
     printStatus();
     break;
   case "review-gate":
-    runReviewGate(rawArgs);
+    await runReviewGate(rawArgs);
     break;
   case "jobs":
     printJobs();

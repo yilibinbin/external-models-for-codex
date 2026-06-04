@@ -57,8 +57,8 @@ function checkManifest(root) {
   const manifest = readJson(path.join(root, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(root, "plugins", "claude-for-codex", "CHANGELOG.md"), "utf8");
   const checks = [
-    result(manifest.version === "0.10.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.10.0"), "changelog-version", "CHANGELOG contains 0.10.0"),
+    result(manifest.version === "0.11.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.11.0"), "changelog-version", "CHANGELOG contains 0.11.0"),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
   ];

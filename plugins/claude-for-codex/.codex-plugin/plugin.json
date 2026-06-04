@@ -1,7 +1,7 @@
 {
   "name": "claude-for-codex",
-  "version": "0.10.0",
-  "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, GitHub Actions PR review templates, rescue, and tracked job workflows.",
+  "version": "0.11.0",
+  "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, optional SDK backend, GitHub Actions PR review templates, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -37,6 +37,7 @@
       "Tracked background job status/result/cancel commands",
       "Capability diagnostics",
       "Optional semantic context",
+      "Optional Claude SDK backend",
       "GitHub Actions PR review workflow templates",
       "Sanitized review reports",
       "Release checks",
