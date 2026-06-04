@@ -2537,6 +2537,124 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     assert "claude-for-codex-git" in query["mcpServers"]
 
 
+def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, capture = write_fake_claude_sdk(tmp_path, stdout="SDK_NATIVE_REVIEW_OK")
+    backend_uri = (PLUGIN / "scripts" / "lib" / "claude-backend.mjs").as_uri()
+    native_review_uri = (PLUGIN / "scripts" / "lib" / "claude-native-review.mjs").as_uri()
+
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    result = subprocess.run(
+        [
+            NODE,
+            "--input-type=module",
+            "-e",
+            f"""
+import {{
+  buildNativeReviewAgents,
+  nativeAgentName,
+  nativeReviewTeamPrompt
+}} from {json.dumps(native_review_uri)};
+import {{ runSdkNativeReview }} from {json.dumps(backend_uri)};
+
+const roles = [
+  {{ name: "Security & Correctness", description: "security review", prompt: "Find correctness and security risks." }},
+  "release readiness"
+];
+const agents = buildNativeReviewAgents(roles, {{ model: "claude-sonnet-4-5", effort: "medium" }});
+const inherited = buildNativeReviewAgents(["default model role"]);
+const prompt = nativeReviewTeamPrompt(roles, "git diff --stat output", "focus on changed files");
+const response = await runSdkNativeReview(prompt, {{ model: "claude-sonnet-4-5" }}, {{
+  cwd: {json.dumps(str(repo))},
+  agents
+}});
+console.log(JSON.stringify({{
+  response,
+  agents,
+  inherited,
+  prompt,
+  sanitized: nativeAgentName("Security & Correctness")
+}}));
+""",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["response"]["status"] == 0
+    assert payload["response"]["stdout"] == "SDK_NATIVE_REVIEW_OK"
+    assert payload["sanitized"] == "cfc_security_correctness"
+    assert "cfc_security_correctness" in payload["agents"]
+    assert "cfc_release_readiness" in payload["agents"]
+    assert "Invoke every listed role agent exactly once" in payload["prompt"]
+    assert "\"role_results\"" in payload["prompt"]
+
+    for definition in payload["agents"].values():
+        assert definition["tools"] == ["Read", "Grep", "Glob"]
+        assert definition["permissionMode"] == "dontAsk"
+        assert definition["maxTurns"] == 4
+        assert definition["model"] == "claude-sonnet-4-5"
+        assert definition["effort"] == "medium"
+        assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
+            set(definition["disallowedTools"])
+        )
+        assert "Agent" not in definition["tools"]
+
+    inherited_definition = payload["inherited"]["cfc_default_model_role"]
+    assert "model" not in inherited_definition
+    assert "effort" not in inherited_definition
+
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert query["agents"] == payload["agents"]
+    assert query["options"]["agents"] == payload["agents"]
+    assert "Agent" in query["allowedTools"]
+    assert "Agent" in query["options"]["allowedTools"]
+    assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
+    assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
+    assert "claude-for-codex-git" in query["mcpServers"]
+
+
+def test_sdk_native_review_unavailable_fails_with_native_message(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    backend_uri = (PLUGIN / "scripts" / "lib" / "claude-backend.mjs").as_uri()
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(tmp_path / "missing-sdk.mjs")
+
+    result = subprocess.run(
+        [
+            NODE,
+            "--input-type=module",
+            "-e",
+            f"""
+import {{ runSdkNativeReview }} from {json.dumps(backend_uri)};
+const response = await runSdkNativeReview("prompt", {{}}, {{
+  cwd: {json.dumps(str(repo))},
+  agents: {{}}
+}});
+console.log(JSON.stringify(response));
+""",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == 1
+    assert payload["errorCode"] == "SDK_UNAVAILABLE"
+    assert payload["stderr"] == "Claude SDK native subagents requested but the Claude Agent SDK is unavailable."
+
+
 def test_sdk_backend_missing_and_invalid_backend_fail_clearly(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"

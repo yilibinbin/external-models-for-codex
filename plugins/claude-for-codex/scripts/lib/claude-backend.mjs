@@ -19,6 +19,7 @@ export const READ_ONLY_MCP_TOOLS = Object.freeze([
   "mcp__claude-for-codex-git__git_ls_files"
 ]);
 export const WRITE_DENY_TOOLS = Object.freeze(["Edit", "Write", "MultiEdit", "Bash"]);
+export const SDK_NATIVE_PARENT_TOOL = "Agent";
 
 const SDK_PACKAGES = Object.freeze([
   "@anthropic-ai/claude-agent-sdk",
@@ -332,6 +333,18 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
     if (!args.write && (!Array.isArray(sdkOptions.allowedTools) || !Array.isArray(sdkOptions.disallowedTools))) {
       throw new Error("Claude SDK read-only tool restrictions are unavailable.");
     }
+    if (!args.write && args.nativeAgents) {
+      sdkOptions.agents = args.nativeAgents;
+      if (!sdkOptions.allowedTools.includes(SDK_NATIVE_PARENT_TOOL)) {
+        sdkOptions.allowedTools = [...sdkOptions.allowedTools, SDK_NATIVE_PARENT_TOOL];
+      }
+    }
+    if (args.outputFormat !== undefined || options.outputFormat !== undefined) {
+      sdkOptions.outputFormat = args.outputFormat ?? options.outputFormat;
+    }
+    if (args.includePartialMessages !== undefined || options.includePartialMessages !== undefined) {
+      sdkOptions.includePartialMessages = args.includePartialMessages ?? options.includePartialMessages;
+    }
     const queryResult = query({
       prompt,
       cwd: options.cwd ?? process.cwd(),
@@ -343,7 +356,10 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
       allowedTools: sdkOptions.allowedTools,
       disallowedTools: sdkOptions.disallowedTools,
       mcpServers: sdkOptions.mcpServers,
-      strictMcpConfig: sdkOptions.strictMcpConfig
+      strictMcpConfig: sdkOptions.strictMcpConfig,
+      agents: sdkOptions.agents,
+      outputFormat: sdkOptions.outputFormat,
+      includePartialMessages: sdkOptions.includePartialMessages
     });
     const output = await collectSdkOutput(queryResult);
     return {
@@ -374,4 +390,24 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
     for (const listener of previousSigint) process.on("SIGINT", listener);
     for (const listener of previousSigterm) process.on("SIGTERM", listener);
   }
+}
+
+export async function runSdkNativeReview(prompt, args = {}, options = {}) {
+  const resolved = resolveSdkModule(process.env, options.cwd ?? process.cwd());
+  if (!resolved) {
+    return {
+      status: 1,
+      stdout: "",
+      stderr: "Claude SDK native subagents requested but the Claude Agent SDK is unavailable.",
+      error: "Claude SDK unavailable",
+      errorCode: "SDK_UNAVAILABLE",
+      backend: "sdk",
+      metadata: {}
+    };
+  }
+  return runSdkPrompt(prompt, {
+    ...args,
+    nativeAgents: options.agents,
+    requireAgentTool: true
+  }, options);
 }
