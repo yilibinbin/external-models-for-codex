@@ -102,14 +102,18 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 
 ## Remote Install
 
+Install the released Claude plugin from the immutable Claude release ref:
+
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref main
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.13.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
 `external-models-for-codex` is this repository's Codex marketplace for plugins that connect Codex to external model CLIs. It currently publishes both Claude for Codex and Gemini for Codex.
 
 The `yilibinbin/external-models-for-codex` owner/repo form assumes this repository remains under that GitHub owner. If your Codex setup requires an explicit Git URL, use `https://github.com/yilibinbin/external-models-for-codex.git` or `git@github.com:yilibinbin/external-models-for-codex.git`.
+
+For local development only, replace the release ref with `--ref main`.
 
 ## Upgrade
 
@@ -196,7 +200,7 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.13.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install` for a fail-soft smoke or `--require-remote-install` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.13.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.13.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

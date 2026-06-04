@@ -6,6 +6,23 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.13.0";
+const EXPECTED_SKILLS = [
+  "claude-adversarial-review",
+  "claude-cancel",
+  "claude-collaboration-loop",
+  "claude-github-actions-review",
+  "claude-leases",
+  "claude-mailbox",
+  "claude-multi-review",
+  "claude-plan",
+  "claude-rescue",
+  "claude-result",
+  "claude-review",
+  "claude-review-gate",
+  "claude-role-packs",
+  "claude-status"
+];
 
 function readJson(file) {
   return JSON.parse(fs.readFileSync(file, "utf8"));
@@ -51,9 +68,12 @@ function commandExists(name) {
 function checkManifest(root) {
   const manifest = readJson(path.join(root, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(root, "plugins", "claude-for-codex", "CHANGELOG.md"), "utf8");
+  const unreleased = changelog.match(/^## Unreleased\s*([\s\S]*?)(?=^##\s|\Z)/m);
+  const unreleasedBody = unreleased ? unreleased[1].trim() : "";
   const checks = [
     result(manifest.version === "0.13.0", "manifest-version", `version=${manifest.version}`),
     result(changelog.includes("## 0.13.0"), "changelog-version", "CHANGELOG contains 0.13.0"),
+    result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
   ];
@@ -108,6 +128,7 @@ function checkDocs(root) {
   for (const file of docs) {
     const text = fs.readFileSync(path.join(root, file), "utf8");
     checks.push(result(text.includes("external-models-for-codex"), `docs-marketplace-${file}`));
+    checks.push(result(text.includes(DEFAULT_RELEASE_REF), `docs-immutable-ref-${file}`));
     checks.push(result(!text.includes("external-models-for-codex-local"), `docs-no-old-marketplace-${file}`));
     checks.push(result(!/\/Users\/fanghao/.test(text), `docs-no-local-path-${file}`));
   }
@@ -143,16 +164,16 @@ function checkSecrets(root) {
 
 function checkSkills(root) {
   const skillsDir = path.join(root, "plugins", "claude-for-codex", "skills");
-  const skills = fs.readdirSync(skillsDir).filter((name) => fs.existsSync(path.join(skillsDir, name, "SKILL.md")));
+  const skills = fs.readdirSync(skillsDir).filter((name) => fs.existsSync(path.join(skillsDir, name, "SKILL.md"))).sort();
+  const expected = [...EXPECTED_SKILLS].sort();
   return [
-    result(skills.length === 14, "skill-count", String(skills.length)),
+    result(JSON.stringify(skills) === JSON.stringify(expected), "skill-inventory", `actual=${skills.join(",")}`),
     ...skills.map((skill) => {
       const text = fs.readFileSync(path.join(skillsDir, skill, "SKILL.md"), "utf8");
       return result(text.startsWith("---") && text.includes("claude-companion.mjs"), `skill-${skill}`);
     })
   ];
 }
-
 function checkGithubActionsCi(root) {
   const pluginRoot = path.join(root, "plugins", "claude-for-codex");
   const defaultWorkflow = renderWorkflow(pluginRoot);
@@ -214,7 +235,8 @@ function remoteInstallSmoke(root, options) {
     CODEX_HOME: path.join(tmp, ".codex")
   };
   fs.mkdirSync(env.CODEX_HOME, { recursive: true, mode: 0o700 });
-  const add = spawnSync("codex", ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "main"], {
+  const releaseRef = options.releaseRef ?? DEFAULT_RELEASE_REF;
+  const add = spawnSync("codex", ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", releaseRef], {
     env,
     encoding: "utf8",
     timeout
@@ -227,7 +249,7 @@ function remoteInstallSmoke(root, options) {
     encoding: "utf8",
     timeout
   });
-  return [result(install.status === 0 || !options.requireRemoteInstall, "remote-install-smoke", install.status === 0 ? "installed" : `skipped: ${install.stderr || install.error || "install failed"}`)];
+  return [result(install.status === 0 || !options.requireRemoteInstall, "remote-install-smoke", install.status === 0 ? `installed ref=${releaseRef}` : `skipped: ${install.stderr || install.error || "install failed"}`)];
 }
 
 export function runReleaseCheck(root, options = {}) {

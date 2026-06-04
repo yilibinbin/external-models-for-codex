@@ -1311,6 +1311,9 @@ function runReleaseCheckCommand(rawArgs) {
       options.requireRemoteInstall = true;
     } else if (token === "--ci-simulate") {
       options.ciSimulate = true;
+    } else if (token === "--ref") {
+      options.releaseRef = readOptionValue(tokens, index, token);
+      index += 1;
     } else if (token === "--timeout-ms") {
       options.timeoutMs = Number(readOptionValue(tokens, index, token));
       index += 1;

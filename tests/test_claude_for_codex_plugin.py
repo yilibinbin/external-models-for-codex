@@ -2549,9 +2549,56 @@ def test_release_check_passes_with_remote_install_skipped():
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["manifest-version"]["ok"] is True
+    assert checks["changelog-unreleased-empty"]["ok"] is True
+    assert checks["skill-inventory"]["ok"] is True
+    assert checks["docs-immutable-ref-README.md"]["ok"] is True
     assert checks["semantic-fixture-safe"]["ok"] is True
     assert checks["semantic-fixture-unsafe"]["ok"] is True
     assert checks["remote-install-smoke"]["detail"] == "skipped"
+
+
+def test_release_check_remote_install_uses_requested_immutable_ref(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    log = tmp_path / "codex-calls.jsonl"
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import pathlib
+import sys
+
+pathlib.Path({json.dumps(str(log))}).write_text(pathlib.Path({json.dumps(str(log))}).read_text() + json.dumps(sys.argv[1:]) + "\\n" if pathlib.Path({json.dumps(str(log))}).exists() else json.dumps(sys.argv[1:]) + "\\n")
+if sys.argv[1:] == ["--version"]:
+    print("codex fake")
+    raise SystemExit(0)
+if sys.argv[1:3] == ["plugin", "marketplace"] and "--ref" in sys.argv:
+    raise SystemExit(0)
+if sys.argv[1:3] == ["plugin", "add"]:
+    raise SystemExit(0)
+raise SystemExit(1)
+""",
+        encoding="utf8",
+    )
+    fake_codex.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.13.0"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.13.0"] in calls
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.13.0"
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):

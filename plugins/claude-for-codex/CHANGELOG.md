@@ -2,10 +2,9 @@
 
 ## Unreleased
 
-- Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
-
 ## 0.13.0 - 2026-06-04
 
+- Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 - Add sanitized mailbox commands for review/job coordination summaries.
 - Add advisory lease commands for declaring path attention without locking files or changing review verdicts.
 - Add optional `multi-review --use-mailbox` and `--advisory-leases` coordination metadata.
