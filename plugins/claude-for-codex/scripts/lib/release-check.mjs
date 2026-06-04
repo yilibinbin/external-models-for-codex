@@ -159,6 +159,9 @@ function checkNativeReleaseAssets(root) {
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
+  const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
+  const hookWrapper = fs.readFileSync(path.join(pluginRoot, "hooks", "claude-review-gate.mjs"), "utf8");
+  const defaultWorkflow = renderWorkflow(pluginRoot);
   const docSpecs = installedPluginOnly
     ? [{ base: pluginRoot, file: "README.md" }]
     : [
@@ -175,10 +178,13 @@ function checkNativeReleaseAssets(root) {
     "--stream-progress",
     "--confirm-cost"
   ];
-  const docsOk = docSpecs.every(({ base, file }) => {
-    const text = fs.readFileSync(path.join(base, file), "utf8");
-    return requiredDocMarkers.every((marker) => text.includes(marker));
-  });
+  const docs = docSpecs.map(({ base, file }) => fs.readFileSync(path.join(base, file), "utf8"));
+  const docsJoined = docs.join("\n");
+  const docsOk = docs.every((text) => requiredDocMarkers.every((marker) => text.includes(marker)));
+  const nativeOptInDocsOk = docs.every((text) => text.includes("--backend sdk --agent-team sdk-subagents"));
+  const defaultCliDocsOk = docsJoined.includes("CLI mode remains the default") && docsJoined.includes("CLI remains the default backend");
+  const ultrareviewConsentDocsOk = docsJoined.includes("--confirm-cost") && docsJoined.includes("CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1");
+  const ultrareviewNotDefaultDocsOk = docsJoined.includes("not used by hooks or default review paths") && docsJoined.includes("never used by hooks or default review paths");
   const detail = "claude-ultrareview; native assets/docs include --agent-team sdk-subagents, --confirm-cost, @anthropic-ai/claude-agent-sdk";
   return [
     result(fs.existsSync(nativeHelper), "native-review-helper", path.relative(pluginRoot, nativeHelper)),
@@ -193,7 +199,43 @@ function checkNativeReleaseAssets(root) {
       detail
     ),
     result(backend.includes("@anthropic-ai/claude-agent-sdk"), "native-sdk-package-compat", "@anthropic-ai/claude-agent-sdk"),
-    result(docsOk, "native-docs", detail)
+    result(docsOk, "native-docs", detail),
+    result(
+      companion.includes("args.agentTeam = args.agentTeam ?? \"plugin\"") &&
+        companion.includes("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.") &&
+        companion.includes("if (args.agentTeam === \"sdk-subagents\" && args.backend !== \"sdk\")") &&
+        nativeOptInDocsOk,
+      "native-sdk-explicit-opt-in",
+      "--backend sdk --agent-team sdk-subagents"
+    ),
+    result(
+      backend.includes("const backend = args.backend || env[BACKEND_ENV] || \"cli\";") &&
+        companion.includes("args.agentTeam = args.agentTeam ?? \"plugin\"") &&
+        defaultWorkflow.includes("claude-companion.mjs review --json") &&
+        !defaultWorkflow.includes("--backend sdk") &&
+        !defaultWorkflow.includes("--agent-team sdk-subagents") &&
+        defaultCliDocsOk,
+      "native-default-cli-preserved",
+      "default backend=cli; default agentTeam=plugin"
+    ),
+    result(
+      companion.includes("let confirmed = process.env.CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW === \"1\";") &&
+        companion.includes("if (arg === \"--confirm-cost\")") &&
+        companion.includes("if (!confirmed)") &&
+        companion.includes("pass --confirm-cost or set CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1") &&
+        ultrareviewConsentDocsOk,
+      "ultrareview-cost-consent",
+      "--confirm-cost or CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1"
+    ),
+    result(
+      !hooks.includes("ultrareview") &&
+        hookWrapper.includes("[RUNTIME, \"review-gate\"]") &&
+        defaultWorkflow.includes("claude-companion.mjs review --json") &&
+        !defaultWorkflow.includes("ultrareview") &&
+        ultrareviewNotDefaultDocsOk,
+      "ultrareview-not-hook-default",
+      "hooks call review-gate; generated workflow calls review"
+    )
   ];
 }
 
@@ -252,6 +294,7 @@ function checkGithubActionsCi(root) {
     result(validation.ok && annotationValidation.ok, "github-actions-template-safe"),
     result(validation.checks.some((check) => check.name === "github-actions-fork-safe" && check.ok), "github-actions-fork-safe"),
     result(validation.checks.some((check) => check.name === "immutable-release-ref" && check.ok), "github-actions-immutable-ref"),
+    result(defaultWorkflow.includes(`--ref ${DEFAULT_RELEASE_REF}`), "github-actions-current-release-ref", DEFAULT_RELEASE_REF),
     result(defaultWorkflow.includes("ubuntu-latest") && defaultWorkflow.includes("npm install -g @openai/codex"), "github-actions-runner-sim"),
     result(!/\/Users\/fanghao/.test(defaultWorkflow), "github-actions-no-local-paths"),
     result(!defaultWorkflow.includes("pull_request_target"), "github-actions-no-pull-request-target"),

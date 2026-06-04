@@ -3508,6 +3508,14 @@ def test_release_check_knows_claude_014_native_assets():
     assert checks["native-cli-flags"]["ok"] is True
     assert checks["native-sdk-package-compat"]["ok"] is True
     assert checks["native-docs"]["ok"] is True
+    assert checks["native-sdk-explicit-opt-in"]["ok"] is True
+    assert checks["native-sdk-explicit-opt-in"]["detail"] == "--backend sdk --agent-team sdk-subagents"
+    assert checks["native-default-cli-preserved"]["ok"] is True
+    assert "default backend=cli" in checks["native-default-cli-preserved"]["detail"]
+    assert checks["ultrareview-cost-consent"]["ok"] is True
+    assert "--confirm-cost" in checks["ultrareview-cost-consent"]["detail"]
+    assert checks["ultrareview-not-hook-default"]["ok"] is True
+    assert "generated workflow calls review" in checks["ultrareview-not-hook-default"]["detail"]
 
 
 def test_release_check_remote_install_uses_requested_immutable_ref(tmp_path):
@@ -3575,7 +3583,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.13.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "github.event.pull_request.base.sha" in text
     assert "fetch-depth: 0" in text
@@ -3615,7 +3623,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.13.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.14.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -3703,7 +3711,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.13.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.14.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -3796,6 +3804,8 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-template-safe"]["ok"] is True
     assert checks["github-actions-fork-safe"]["ok"] is True
     assert checks["github-actions-immutable-ref"]["ok"] is True
+    assert checks["github-actions-current-release-ref"]["ok"] is True
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.14.0"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
