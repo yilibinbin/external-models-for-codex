@@ -426,6 +426,22 @@ def test_review_rejects_native_agent_team_flag_before_claude(tmp_path):
     assert "only valid for multi-review" in result.stderr
 
 
+@pytest.mark.parametrize("command", ["status", "capabilities", "jobs"])
+def test_utility_commands_reject_native_agent_team_flag(tmp_path, command):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), command, "--agent-team", "sdk-subagents"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Unsupported option --agent-team" in result.stderr
+    assert "only valid for multi-review" in result.stderr
+
+
 def test_multi_review_max_budget_usd_requires_decimal(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
 
@@ -3315,6 +3331,43 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert str(runtime) in payload["workerCommand"]
     assert "run-reserved-job" in payload["workerCommand"]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+
+
+@pytest.mark.parametrize(
+    ("command_args", "stderr_marker"),
+    [
+        (["review", "--agent-team", "banana"], "Unsupported option --agent-team"),
+        (["multi-review", "--max-budget-usd", "0x10"], "positive decimal"),
+    ],
+)
+def test_reserve_job_validates_child_native_flags_before_reserving(tmp_path, command_args, stderr_marker):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "reserve-job", *command_args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert stderr_marker in result.stderr
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    assert json.loads(jobs.stdout)["jobs"] == []
 
 
 def test_run_reserved_job_executes_existing_job_with_fake_claude(tmp_path):

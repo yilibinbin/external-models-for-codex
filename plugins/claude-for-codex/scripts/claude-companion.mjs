@@ -452,6 +452,20 @@ function validateNativeModeOptions(args, command) {
   }
 }
 
+function validateCommandNativeModeOptions(command, rawArgs) {
+  const parsed = parseArgs(rawArgs);
+  validateNativeModeOptions(parsed, command);
+  if (command === "multi-review") {
+    if (parsed.agentTeam !== undefined && !VALID_AGENT_TEAMS.has(parsed.agentTeam)) {
+      throw new Error(`Invalid --agent-team "${parsed.agentTeam}". Valid values: ${Array.from(VALID_AGENT_TEAMS).join(", ")}.`);
+    }
+    if (parsed.agentTeam === "sdk-subagents" && parsed.sequential) {
+      throw new Error("--agent-team sdk-subagents cannot be combined with --sequential");
+    }
+  }
+  return parsed;
+}
+
 function validateBackendArgs(args) {
   args.backend = resolveBackend(args, process.env);
   return args.backend;
@@ -908,8 +922,7 @@ function waitForJob(jobId) {
 function maybeStartBackground(command, rawArgs) {
   let parsed;
   try {
-    parsed = parseArgs(rawArgs);
-    validateNativeModeOptions(parsed, command);
+    parsed = validateCommandNativeModeOptions(command, rawArgs);
   } catch {
     return false;
   }
@@ -936,6 +949,7 @@ function handleReserveJob(rawArgs) {
     throw new Error(`Command "${command}" cannot be reserved as a background job.`);
   }
   const commandArgs = stripBackgroundArgs(tokens.slice(1));
+  validateCommandNativeModeOptions(command, commandArgs);
   const workerCommand = [
     process.argv0 || process.execPath,
     process.argv[1],
@@ -2099,15 +2113,8 @@ async function runClaudeMultiReview(rawArgs) {
   }
   let args;
   try {
-    args = parseArgs(rawArgs);
-    validateNativeModeOptions(args, "multi-review");
+    args = validateCommandNativeModeOptions("multi-review", rawArgs);
     args.agentTeam = args.agentTeam ?? "plugin";
-    if (!VALID_AGENT_TEAMS.has(args.agentTeam)) {
-      throw new Error(`Invalid --agent-team "${args.agentTeam}". Valid values: ${Array.from(VALID_AGENT_TEAMS).join(", ")}.`);
-    }
-    if (args.agentTeam === "sdk-subagents" && args.sequential) {
-      throw new Error("--agent-team sdk-subagents cannot be combined with --sequential");
-    }
     validateBackendArgs(args);
     args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
       ? defaultRoleObjects()
@@ -2486,6 +2493,15 @@ const [command, ...rawArgs] = process.argv.slice(2);
 if (!VALID_COMMANDS.has(command)) {
   console.error(`Usage: claude-companion.mjs ${Array.from(VALID_COMMANDS).join("|")} [args]`);
   process.exit(2);
+}
+
+if (command !== "reserve-job") {
+  try {
+    validateCommandNativeModeOptions(command, rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
 }
 
 switch (command) {
