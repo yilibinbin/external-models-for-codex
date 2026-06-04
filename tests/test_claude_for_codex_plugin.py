@@ -105,6 +105,59 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     return result, prompt, argv
 
 
+def write_semantic_provider(tmp_path, *, response=None, extra_script="", config_in_repo=None):
+    provider_dir = tmp_path / "semantic-bin"
+    config_dir = tmp_path / "semantic-config"
+    provider_dir.mkdir(exist_ok=True)
+    config_dir.mkdir(exist_ok=True)
+    provider = provider_dir / "fake-semantic"
+    response = response or {
+        "version": 1,
+        "provider": "fake",
+        "items": [
+            {
+                "path": "sample.txt",
+                "symbol": "sample",
+                "summary": "semantic summary marker",
+                "reason": "related changed file",
+            }
+        ],
+        "warnings": [],
+    }
+    provider.write_text(
+        f"""#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+capture = pathlib.Path(os.environ["SEMANTIC_PROVIDER_CAPTURE"])
+capture.mkdir(parents=True, exist_ok=True)
+(capture / "request.json").write_text(sys.stdin.read())
+(capture / "env.json").write_text(json.dumps(dict(os.environ), sort_keys=True))
+{extra_script}
+print({json.dumps(json.dumps(response))})
+"""
+    )
+    provider.chmod(0o755)
+
+    config_path = (config_in_repo / "providers.json") if config_in_repo else (config_dir / "providers.json")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps({
+        "providers": {
+            "fake": {
+                "command": [str(provider)],
+                "env": {"SEMANTIC_PROVIDER_CAPTURE": str(tmp_path / "semantic-capture")},
+                "timeoutMs": 5000,
+                "maxOutputBytes": 32768,
+            }
+        },
+        "defaultProvider": "fake",
+    }))
+    config_path.chmod(0o600)
+    return provider, config_path, tmp_path / "semantic-capture"
+
+
 def run_fake_claude_adversarial_review(tmp_path, args, commit_head=False):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -627,7 +680,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.8.0"
+    assert data["version"] == "0.9.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -635,7 +688,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.8.0"
+    assert manifest["version"] == "0.9.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -650,6 +703,7 @@ def test_version_and_docs_describe_forwarding_and_mcp():
         assert "capabilities" in text
         assert "report --latest" in text
         assert "release-check" in text
+        assert "semantic context" in text.lower()
 
     assert "转发" in zh
     assert "MCP" in zh
@@ -1813,6 +1867,110 @@ raise SystemExit(9)
     assert not marker.exists()
 
 
+def test_review_semantic_context_defaults_off_even_with_configured_provider(tmp_path):
+    _provider, config_path, capture = write_semantic_provider(tmp_path)
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_SEMANTIC_CONFIG": str(config_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "<semantic_context" not in prompt
+    assert not capture.exists()
+
+
+def test_review_semantic_context_fake_provider_reaches_prompt_and_report(tmp_path):
+    _provider, config_path, capture = write_semantic_provider(tmp_path)
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree", "--semantic-context", "fake"],
+        extra_env={"CLAUDE_FOR_CODEX_SEMANTIC_CONFIG": str(config_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '<semantic_context provider="fake" status="available">' in prompt
+    assert "semantic summary marker" in prompt
+    request = json.loads((capture / "request.json").read_text())
+    assert request["scope"] == "working-tree"
+
+    latest = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "claude-companion.mjs"), "report", "--latest"],
+        cwd=tmp_path / "repo",
+        env={**os.environ, "CLAUDE_FOR_CODEX_SEMANTIC_CONFIG": str(config_path)},
+        capture_output=True,
+        text=True,
+    )
+    report = json.loads(latest.stdout)["report"]
+    serialized = json.dumps(report)
+    assert report["semanticProvider"] == "fake"
+    assert report["semanticStatus"] == "available"
+    assert "semantic summary marker" not in serialized
+
+
+def test_review_semantic_context_unknown_provider_exits_before_claude(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--semantic-context", "missing"],
+    )
+
+    assert result.returncode == 2
+    assert "Unknown semantic provider" in result.stderr
+    assert prompt == ""
+
+
+def test_semantic_provider_child_env_is_allowlist_only(tmp_path):
+    _provider, config_path, capture = write_semantic_provider(tmp_path)
+    result, _prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--semantic-context", "fake"],
+        extra_env={
+            "CLAUDE_FOR_CODEX_SEMANTIC_CONFIG": str(config_path),
+            "ANTHROPIC_API_KEY": "should-not-leak",
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    child_env = json.loads((capture / "env.json").read_text())
+    assert "SEMANTIC_PROVIDER_CAPTURE" in child_env
+    assert "ANTHROPIC_API_KEY" not in child_env
+    assert "CLAUDE_FOR_CODEX_SEMANTIC_CONFIG" not in child_env
+
+
+def test_semantic_provider_symlink_escape_is_degraded_not_persisted(tmp_path):
+    outside = tmp_path / "outside-secret.txt"
+    outside.write_text("secret")
+    response = {
+        "version": 1,
+        "provider": "fake",
+        "items": [{"path": "escaped", "summary": "outside secret should not appear"}],
+    }
+    _provider, config_path, _capture = write_semantic_provider(
+        tmp_path,
+        response=response,
+        extra_script=f"pathlib.Path('escaped').symlink_to({json.dumps(str(outside))})\n",
+    )
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--semantic-context", "fake"],
+        extra_env={"CLAUDE_FOR_CODEX_SEMANTIC_CONFIG": str(config_path)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'status="unavailable"' in prompt
+    assert "outside secret should not appear" not in prompt
+    latest = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "claude-companion.mjs"), "report", "--latest"],
+        cwd=tmp_path / "repo",
+        env={**os.environ, "CLAUDE_FOR_CODEX_SEMANTIC_CONFIG": str(config_path)},
+        capture_output=True,
+        text=True,
+    )
+    report = json.loads(latest.stdout)["report"]
+    assert report["semanticFailed"] is True
+    assert report["semanticFailureReason"] == "validation_error"
+
+
 def test_review_writes_sanitized_report_and_report_latest_omits_raw_content(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -1930,6 +2088,8 @@ def test_release_check_passes_with_remote_install_skipped():
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
     assert checks["manifest-version"]["ok"] is True
+    assert checks["semantic-fixture-safe"]["ok"] is True
+    assert checks["semantic-fixture-unsafe"]["ok"] is True
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
@@ -3353,6 +3513,49 @@ def test_review_gate_invalid_claude_output_warns_but_does_not_block(tmp_path):
     assert result.stdout == ""
     assert "role release returned invalid gate output; allowing stop" in result.stderr
     assert len(prompts) == 5
+
+
+def test_review_gate_semantic_failure_records_degraded_pass(tmp_path):
+    runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
+    _provider, config_path, _semantic_capture = write_semantic_provider(
+        tmp_path,
+        extra_script="raise SystemExit(9)\n",
+    )
+    env["CLAUDE_FOR_CODEX_SEMANTIC_CONFIG"] = str(config_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate", "--semantic-context", "fake"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "degraded gate" in result.stderr
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    report = json.loads(latest.stdout)["report"]
+    assert report["command"] == "review-gate"
+    assert report["semanticProvider"] == "fake"
+    assert report["semanticFailed"] is True
+    assert report["semanticVerdict"] == "DEGRADED_PASS"
+    assert report["semanticFailureReason"] == "nonzero_exit"
 
 
 def test_review_gate_env_bypass_skips_claude(tmp_path):

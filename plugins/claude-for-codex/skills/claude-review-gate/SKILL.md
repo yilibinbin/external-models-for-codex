@@ -36,6 +36,7 @@ Rules:
 - The gate reviews current git working-tree changes, not an exact per-turn edit set.
 - The enabled gate uses the default multi-role review set: correctness, security, tests, release, adversarial.
 - Only explicit `BLOCK:` verdicts from Claude block Stop.
+- Semantic context is off by default for the gate and never implicitly uses `auto`. If explicitly enabled and unavailable, the gate records degraded metadata such as `DEGRADED_PASS` and still blocks only on explicit Claude `BLOCK:`.
 - Claude CLI failures, timeouts, invalid gate output, or missing Claude warn but do not block Stop.
 - Export `CLAUDE_FOR_CODEX_REVIEW_GATE=off` in the environment that launches Codex hooks to bypass the gate immediately.
 - Unchanged diffs that already received an all-`ALLOW:` gate result are skipped until the working-tree diff changes.

@@ -49,6 +49,7 @@ Arguments:
 - `--sequential` keeps the single-call adversarial review path.
 - `--json` validates Claude output as `{verdict, summary, findings, next_steps}`.
 - `--json` keeps the adversarial verdict vocabulary `PASS|CONTESTED|REJECT`; it is intentionally separate from normal `review --json`.
+- `--semantic-context <provider>` is optional and off by default. Treat semantic context as advisory; adversarial findings still need concrete changed-file or git evidence.
 - `--json` is only supported on the single-call path; do not combine it with `--parallel`.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.

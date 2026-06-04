@@ -56,12 +56,39 @@ function checkManifest(root) {
   const manifest = readJson(path.join(root, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(root, "plugins", "claude-for-codex", "CHANGELOG.md"), "utf8");
   const checks = [
-    result(manifest.version === "0.8.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.8.0"), "changelog-version", "CHANGELOG contains 0.8.0"),
+    result(manifest.version === "0.9.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.9.0"), "changelog-version", "CHANGELOG contains 0.9.0"),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
   ];
   return checks;
+}
+
+function semanticFixtureSafe(parsed) {
+  const providers = parsed.providers;
+  if (!providers || typeof providers !== "object" || Array.isArray(providers)) {
+    return false;
+  }
+  return Object.values(providers).every((provider) => {
+    if (!Array.isArray(provider.command) || !provider.command.every((part) => typeof part === "string" && part)) {
+      return false;
+    }
+    const env = provider.env ?? {};
+    if (!env || typeof env !== "object" || Array.isArray(env)) {
+      return false;
+    }
+    return Object.keys(env).every((key) => key === "PATH" || key === "LANG" || key === "LC_ALL" || /^SEMANTIC_PROVIDER_[A-Z0-9_]+$/.test(key));
+  });
+}
+
+function checkSemanticFixtures(root) {
+  const fixtureDir = path.join(root, "plugins", "claude-for-codex", "fixtures", "semantic");
+  const safe = readJson(path.join(fixtureDir, "safe-provider.json"));
+  const unsafe = readJson(path.join(fixtureDir, "unsafe-provider.json"));
+  return [
+    result(semanticFixtureSafe(safe), "semantic-fixture-safe"),
+    result(!semanticFixtureSafe(unsafe), "semantic-fixture-unsafe")
+  ];
 }
 
 function checkHooks(root) {
@@ -177,6 +204,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkSecrets(root),
     ...checkSkills(root),
     ...checkPrompts(root),
+    ...checkSemanticFixtures(root),
     ...remoteInstallSmoke(root, options)
   ];
   return {

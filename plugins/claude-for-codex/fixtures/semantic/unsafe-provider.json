@@ -1,0 +1,11 @@
+{
+  "providers": {
+    "bad": {
+      "command": "bash -c echo unsafe",
+      "env": {
+        "ANTHROPIC_API_KEY": "release-check allowlist fake test value"
+      }
+    }
+  },
+  "defaultProvider": "bad"
+}

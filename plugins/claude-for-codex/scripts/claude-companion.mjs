@@ -29,6 +29,12 @@ import {
   normalizeReviewOutput
 } from "./lib/render-review.mjs";
 import {
+  buildSemanticContext,
+  parseSemanticOptions,
+  semanticCapabilities,
+  validateSemanticArgs
+} from "./lib/semantic-context.mjs";
+import {
   StateReadError,
   canonicalWorkspaceRoot,
   currentSessionFileForCwd,
@@ -230,10 +236,7 @@ function flagSupport(helpText, flags) {
 }
 
 function semanticProviderCandidates() {
-  const candidates = ["codegraph", "serena", "claude-context"];
-  return Object.fromEntries(candidates.map((name) => [name, {
-    availableOnPath: Boolean(findOnPath(name))
-  }]));
+  return semanticCapabilities(process.cwd(), process.env).providers;
 }
 
 function sdkAvailability() {
@@ -279,7 +282,8 @@ function buildCapabilitiesReport() {
     githubCli: commandVersion("gh"),
     hooks: hookDiagnostics(),
     mcp: mcpDiagnostics(),
-    semanticProviders: semanticProviderCandidates()
+    semanticProviders: semanticProviderCandidates(),
+    semanticContext: semanticCapabilities(process.cwd(), process.env)
   };
 }
 
@@ -358,6 +362,11 @@ function parseArgs(argv) {
     } else if (arg === "--sequential") {
       parsed.sequential = true;
     } else {
+      const semanticIndex = parseSemanticOptions(tokens, index, parsed);
+      if (semanticIndex !== index) {
+        index = semanticIndex;
+        continue;
+      }
       parsed._.push(arg);
     }
   }
@@ -979,6 +988,10 @@ function reviewJsonContract() {
   ].join("\n");
 }
 
+function semanticPromptBlock(args) {
+  return args.semantic?.promptBlock ? `\n${args.semantic.promptBlock}` : "";
+}
+
 function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -991,6 +1004,7 @@ function reviewPrompt(kind, args) {
     const adversarialLenses = args.resolvedAdversarialLenses ?? resolveAdversarialLenses(args);
     return renderPromptTemplate(pluginRoot(), "adversarial-review", {
       GIT_CONTEXT: gitContext,
+      SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
       ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
       FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
       OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
@@ -999,6 +1013,7 @@ function reviewPrompt(kind, args) {
 
   return renderPromptTemplate(pluginRoot(), "review", {
     GIT_CONTEXT: gitContext,
+    SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
     REVIEW_ROLES_BLOCK: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
     OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
@@ -1012,6 +1027,7 @@ function multiReviewRolePrompt(role, args, gitContext) {
     ROLE_NAME: role.name,
     ROLE_DIRECTIVE: role.directive,
     GIT_CONTEXT: gitContext,
+    SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
     FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
     OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
   });
@@ -1021,7 +1037,8 @@ function reviewGateRolePrompt(role, args, gitContext) {
   return renderPromptTemplate(pluginRoot(), "review-gate-role", {
     ROLE_NAME: role.name,
     ROLE_DIRECTIVE: role.directive,
-    GIT_CONTEXT: gitContext
+    GIT_CONTEXT: gitContext,
+    SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args)
   });
 }
 
@@ -1262,6 +1279,21 @@ function recordCommandReport(command, args, result, startedAt, parsed, roleResul
   return endedAt;
 }
 
+function attachSemanticContext(args, options = {}) {
+  if (options.allowed === false && args.semanticContext && args.semanticContext !== "off") {
+    throw new Error(`--semantic-context is not supported for ${options.command}.`);
+  }
+  validateSemanticArgs(args, { allowAuto: !options.reviewGate });
+  args.semantic = buildSemanticContext(args, {
+    cwd: process.cwd(),
+    reviewGate: Boolean(options.reviewGate)
+  });
+  if (args.semantic?.status === "unavailable" && args.semantic.warning) {
+    process.stderr.write(`[claude-for-codex semantic] unavailable: ${args.semantic.report.semanticFailureReason}\n`);
+  }
+  return args.semantic;
+}
+
 function printReport(rawArgs) {
   const tokens = normalizeArgv(rawArgs);
   const latest = tokens.includes("--latest") || tokens.length === 0;
@@ -1337,6 +1369,7 @@ function readStdinJsonForGate() {
 }
 
 function runReviewGate(rawArgs) {
+  const startedAt = new Date().toISOString();
   if (String(process.env[REVIEW_GATE_ENV] ?? "").toLowerCase() === "off") {
     return;
   }
@@ -1405,6 +1438,32 @@ function runReviewGate(rawArgs) {
   }));
   args.scope = "working-tree";
   args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
+  try {
+    attachSemanticContext(args, { reviewGate: true, command: "review-gate" });
+  } catch (error) {
+    warnGate(`semantic context validation failed; allowing degraded gate: ${error.message || String(error)}`);
+    args.semantic = {
+      enabled: true,
+      status: "unavailable",
+      provider: "",
+      promptBlock: [
+        '<semantic_context provider="" status="unavailable" reason="validation_error">',
+        "Semantic context was requested but unavailable. Treat this review as degraded.",
+        "</semantic_context>"
+      ].join("\n"),
+      report: {
+        semanticProvider: "",
+        semanticStatus: "unavailable",
+        semanticBytes: 0,
+        semanticDurationMs: 0,
+        semanticFailureReason: "validation_error",
+        semanticFailed: true
+      }
+    };
+  }
+  if (args.semantic?.report?.semanticFailed) {
+    warnGate(`semantic context unavailable (${args.semantic.report.semanticFailureReason}); running degraded gate`);
+  }
 
   const gitContext = collectGitContext(args);
   const blocks = [];
@@ -1438,6 +1497,16 @@ function runReviewGate(rawArgs) {
     })}\n`);
     return;
   }
+  if (args.semantic?.report?.semanticFailed) {
+    args.semanticVerdict = "DEGRADED_PASS";
+  }
+  recordCommandReport("review-gate", args, {
+    status: 0,
+    stdout: "",
+    stderr: "",
+    error: "",
+    errorCode: ""
+  }, startedAt);
   setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
 }
 
@@ -1542,6 +1611,12 @@ async function runClaudeTask(kind, rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
+  try {
+    attachSemanticContext(args, { allowed: ["review", "adversarial-review"].includes(kind), command: kind });
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
   if (kind === "adversarial-review" && args.parallel) {
     const gitContext = collectGitContext(args);
     const roles = args.resolvedAdversarialLenses.map((lens) => ({
@@ -1639,6 +1714,12 @@ async function runClaudeMultiReview(rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
+  try {
+    attachSemanticContext(args, { command: "multi-review" });
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
 
   const gitContext = collectGitContext(args);
   const runInParallel = !args.sequential;

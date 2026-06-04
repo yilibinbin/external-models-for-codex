@@ -2,6 +2,7 @@
 <role_name>{{ROLE_NAME}}</role_name>
 <role_directive>{{ROLE_DIRECTIVE}}</role_directive>
 {{GIT_CONTEXT}}
+{{SEMANTIC_CONTEXT_BLOCK}}
 <rules>
 - Do not edit files.
 - Do not suggest that you are about to apply fixes.

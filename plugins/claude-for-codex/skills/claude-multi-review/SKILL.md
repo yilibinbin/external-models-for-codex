@@ -57,6 +57,7 @@ Arguments:
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
 - `--json` asks every role for a normalized review object and returns one role-tagged aggregate object.
+- `--semantic-context <provider>` is optional and off by default. The provider context is fetched once per command and shared across role prompts as advisory context.
 - `--parallel` is the default execution mode for foreground role fan-out.
 - `--sequential` runs roles one at a time for debugging or rate-limit-sensitive environments.
 - `--background` starts a tracked job and returns a job id.

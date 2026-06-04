@@ -64,6 +64,13 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
     stderrBytes: byteLength(result?.stderr),
     errorCode: result?.errorCode ?? "",
     errorPresent: Boolean(result?.error),
+    semanticProvider: args.semantic?.report?.semanticProvider ?? "",
+    semanticStatus: args.semantic?.report?.semanticStatus ?? "off",
+    semanticBytes: args.semantic?.report?.semanticBytes ?? 0,
+    semanticDurationMs: args.semantic?.report?.semanticDurationMs ?? 0,
+    semanticFailureReason: args.semantic?.report?.semanticFailureReason ?? "",
+    semanticFailed: Boolean(args.semantic?.report?.semanticFailed),
+    semanticVerdict: args.semanticVerdict ?? "",
     structured: structuredSummary(parsed),
     roleResults: roleResults.map(({ role, result: roleResult, parsed: roleParsed }) => ({
       role: role?.name ?? String(role ?? ""),

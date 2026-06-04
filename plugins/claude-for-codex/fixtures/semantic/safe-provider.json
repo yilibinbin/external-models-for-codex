@@ -1,0 +1,13 @@
+{
+  "providers": {
+    "fake": {
+      "command": ["/usr/bin/true"],
+      "env": {
+        "SEMANTIC_PROVIDER_MODE": "test"
+      },
+      "timeoutMs": 5000,
+      "maxOutputBytes": 32768
+    }
+  },
+  "defaultProvider": "fake"
+}

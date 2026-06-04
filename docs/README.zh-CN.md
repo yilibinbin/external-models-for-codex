@@ -192,4 +192,4 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the f
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
-`capabilities` 输出 Claude CLI flags、Git/GitHub CLI、hooks、MCP 和可选 provider 诊断，但不会执行语义 provider。`report --latest` 读取 repo 外的脱敏报告；默认不保存 prompt、diff、模型原文、源码、环境变量或原始绝对工作区路径。`release-check` 校验发布卫生，除非显式要求，否则跳过远端安装 smoke。
+`capabilities` 输出 Claude CLI flags、Git/GitHub CLI、hooks、MCP 和可选语义 provider 诊断，但不会初始化 provider。语义上下文默认关闭；只有配置 repo 外 argv-array provider 后，才使用 `--semantic-context <provider>` 显式启用。语义上下文只是辅助信息，provider 失败会降低审阅可信度但不阻断普通审阅；如果 `review-gate` 的语义上下文失败，会记录 `DEGRADED_PASS` 等降级元数据。`report --latest` 读取 repo 外的脱敏报告；默认不保存 prompt、diff、模型原文、源码、环境变量、语义片段或原始绝对工作区路径。`release-check` 校验发布卫生，除非显式要求，否则跳过远端安装 smoke。

@@ -1,6 +1,6 @@
 {
   "name": "claude-for-codex",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",
@@ -23,7 +23,7 @@
   "interface": {
     "displayName": "Claude for Codex",
     "shortDescription": "Claude Code reviews, planning, and stop-gate workflows for Codex.",
-    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, background job tracking, lifecycle hooks, capability diagnostics, sanitized review reports, release checks, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict.",
+    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, background job tracking, lifecycle hooks, capability diagnostics, optional semantic context, sanitized review reports, release checks, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
@@ -36,6 +36,7 @@
       "Structured adversarial verdicts",
       "Tracked background job status/result/cancel commands",
       "Capability diagnostics",
+      "Optional semantic context",
       "Sanitized review reports",
       "Release checks",
       "Session lifecycle and unread-result hooks",

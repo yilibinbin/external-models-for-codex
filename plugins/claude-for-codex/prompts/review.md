@@ -1,5 +1,6 @@
 <task>Run a read-only code review.</task>
 {{GIT_CONTEXT}}
+{{SEMANTIC_CONTEXT_BLOCK}}
 {{REVIEW_ROLES_BLOCK}}
 <rules>
 - Do not edit files.

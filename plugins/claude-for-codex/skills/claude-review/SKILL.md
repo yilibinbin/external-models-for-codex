@@ -40,5 +40,6 @@ Arguments:
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--model <model>` and `--effort <level>` are passed to Claude CLI.
 - `--json` asks Claude for a normalized `{verdict, summary, findings, next_steps}` review object using `approve|needs-attention`.
+- `--semantic-context <provider>` is optional and off by default. Use it only when a repo-external provider is configured; semantic context is advisory and cannot replace changed-file or git evidence.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.

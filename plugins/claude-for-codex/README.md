@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.8.0`
+- Current version: `0.9.0`
 
 Published capabilities:
 
@@ -25,7 +25,8 @@ Published capabilities:
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
-- Capability diagnostics for Claude CLI, Git, GitHub CLI, hooks, MCP, and optional future providers.
+- Capability diagnostics for Claude CLI, Git, GitHub CLI, hooks, MCP, and optional semantic providers.
+- Optional semantic context for review commands, disabled by default.
 - Sanitized per-run review reports that omit prompts, diffs, raw model output, and secrets by default.
 - Release checks for manifest, hook, docs, prompt, skill, and secret-scan hygiene.
 - Background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
@@ -170,6 +171,8 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
 
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
+
+Semantic context is disabled by default. Use `--semantic-context <provider>` on `review`, `multi-review`, `adversarial-review`, or `review-gate` only after configuring a repo-external provider. Provider commands must be argv arrays, run with an allowlist-only environment, stay outside the workspace, and return workspace-bound JSON. Semantic context is advisory; Claude findings still need changed-file or git evidence. If semantic context fails in `review-gate`, the gate records degraded metadata such as `DEGRADED_PASS` and still blocks only on explicit Claude `BLOCK:`.
 
 `report --latest` reads the latest sanitized review report from the repo-external plugin data directory. Reports are minimal metadata only: command, scope, roles/lenses, backend, model/effort, timestamps, exit status, output byte counts, and structured verdict/finding counts when available. Reports do not store prompts, source code, diffs, raw model output, environment variables, or raw absolute workspace paths by default. Set `CLAUDE_FOR_CODEX_NO_TELEMETRY=1` to disable all non-job report writes.
 

@@ -1,5 +1,6 @@
 <task>Run an adversarial read-only code and design review.</task>
 {{GIT_CONTEXT}}
+{{SEMANTIC_CONTEXT_BLOCK}}
 {{ADVERSARIAL_LENSES}}
 <scale_guidance>
 If the diff is small, emphasize Skeptic findings.

@@ -4,6 +4,13 @@
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.9.0 - 2026-06-04
+
+- Add optional semantic context for `review`, `multi-review`, `adversarial-review`, and `review-gate`.
+- Keep semantic context off by default and require explicit `--semantic-context`.
+- Add repo-external provider config validation with argv-only commands, env isolation, permission checks, workspace path containment, and bounded execution.
+- Add semantic metadata to sanitized reports without storing provider snippets or raw output.
+
 ## 0.8.0 - 2026-06-04
 
 - Add `capabilities` diagnostics and include nested capability details in `setup`.
