@@ -530,6 +530,9 @@ import sys
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    print("--print --permission-mode --tools --allowedTools --disallowedTools --mcp-config --strict-mcp-config --model --effort --output-format")
+    raise SystemExit(0)
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 call_index = len(list(capture.glob("argv-*.json")))
@@ -624,7 +627,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.7.0"
+    assert data["version"] == "0.8.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -632,7 +635,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.8.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -644,6 +647,9 @@ def test_version_and_docs_describe_forwarding_and_mcp():
         assert "MCP" in text
         assert "read-only Git" in text
         assert "review --json" in text
+        assert "capabilities" in text
+        assert "report --latest" in text
+        assert "release-check" in text
 
     assert "转发" in zh
     assert "MCP" in zh
@@ -667,7 +673,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "reserve-job", "run-reserved-job"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -890,11 +896,11 @@ def test_runtime_applies_pathspec_to_git_context_commands():
 def test_runtime_keeps_claude_tools_read_only():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    disallowed = re.search(r'"--disallowedTools",\s*"([^"]+)"', text)
-    assert disallowed
+    disallowed_values = re.findall(r'"--disallowedTools",\s*"([^"]+)"', text)
+    assert disallowed_values
     assert '"Bash"' not in re.search(r"READ_ONLY_BUILTIN_TOOLS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
     assert '"Bash"' not in re.search(r"READ_ONLY_MCP_TOOLS = Object\.freeze\(\[(.*?)\]\);", text, re.S).group(1)
-    assert "Bash" in disallowed.group(1).split(",")
+    assert any("Bash" in value.split(",") for value in disallowed_values)
 
 
 def test_default_multi_review_roles_exist_in_registry():
@@ -1650,6 +1656,9 @@ def test_setup_reports_lifecycle_hook_support_and_job_commands(tmp_path):
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["jobCommands"] == ["jobs", "result", "cancel", "rescue"]
+    assert "capabilities" in payload
+    assert "claude" in payload["capabilities"]
+    assert "semanticProviders" in payload["capabilities"]
     assert payload["hooks"]["manifest"] == "hooks/hooks.json"
     assert payload["hooks"]["events"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
 
@@ -1752,6 +1761,176 @@ def test_setup_reports_missing_codex_config_without_throwing(tmp_path):
     assert payload["hooks"]["codexConfigChecked"] is False
     assert payload["hooks"]["codexConfigError"] == ""
     assert payload["hooks"]["trustedInCodexConfig"] is False
+
+
+def test_capabilities_reports_claude_flags_without_running_semantic_providers(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    fake_bin.mkdir()
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("Claude Code fake 1.2.3")
+    raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    print("--print --permission-mode --tools --allowedTools --disallowedTools --mcp-config --strict-mcp-config --model --effort --output-format")
+    raise SystemExit(0)
+print("unexpected", file=sys.stderr)
+raise SystemExit(9)
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    provider = fake_bin / "codegraph"
+    provider.write_text("#!/usr/bin/env sh\necho SHOULD_NOT_RUN > \"$PROVIDER_MARKER\"\n", encoding="utf8")
+    provider.chmod(0o755)
+    marker = tmp_path / "provider-ran"
+
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["PROVIDER_MARKER"] = str(marker)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claude"]["available"] is True
+    assert payload["claude"]["version"] == "Claude Code fake 1.2.3"
+    assert payload["claude"]["flags"]["--strict-mcp-config"] is True
+    assert payload["semanticProviders"]["codegraph"]["availableOnPath"] is True
+    assert not marker.exists()
+
+
+def test_review_writes_sanitized_report_and_report_latest_omits_raw_content(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "secret_code.py").write_text("print('raw source marker')\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    print("--print --permission-mode --tools --allowedTools --disallowedTools --mcp-config --strict-mcp-config --model --effort --output-format")
+    raise SystemExit(0)
+print("RAW_MODEL_OUTPUT_WITH_CODE_SNIPPET print('raw source marker')")
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--scope", "working-tree", "sensitive focus marker"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    payload = json.loads(latest.stdout)
+    report = payload["report"]
+    assert report["command"] == "review"
+    assert report["stdoutBytes"] > 0
+    assert report["workspaceId"]
+    serialized = json.dumps(report)
+    assert "RAW_MODEL_OUTPUT_WITH_CODE_SNIPPET" not in serialized
+    assert "raw source marker" not in serialized
+    assert "sensitive focus marker" not in serialized
+    assert str(repo) not in serialized
+
+    reports_dir = pathlib.Path(payload["reportsDir"])
+    if os.name == "posix":
+        assert reports_dir.stat().st_mode & 0o777 == 0o700
+
+
+def test_no_telemetry_disables_report_writes(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text("#!/usr/bin/env sh\n[ \"$1\" = \"--version\" ] && { echo claude fake; exit 0; }\necho OK\n", encoding="utf8")
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_NO_TELEMETRY"] = "1"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    assert json.loads(latest.stdout)["report"] is None
+
+
+def test_release_check_passes_with_remote_install_skipped():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["manifest-version"]["ok"] is True
+    assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):

@@ -4,6 +4,13 @@
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.8.0 - 2026-06-04
+
+- Add `capabilities` diagnostics and include nested capability details in `setup`.
+- Add sanitized per-run review reports plus `report --latest`.
+- Add `release-check` for manifest, hook, docs, prompt, skill, secret-scan, and optional remote-install validation.
+- Preserve explicit `rescue --write` while adding stronger baseline coverage for default read-only rescue behavior.
+
 ## 0.7.0 - 2026-06-03
 
 - Add external prompt templates for Claude review, adversarial review, multi-review, plan, rescue, and review-gate prompts.

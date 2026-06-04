@@ -185,6 +185,11 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base m
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --background --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs jobs
 node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
+node plugins/claude-for-codex/scripts/claude-companion.mjs capabilities
+node plugins/claude-for-codex/scripts/claude-companion.mjs report --latest
+node plugins/claude-for-codex/scripts/claude-companion.mjs release-check
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
+
+`capabilities` reports Claude CLI flags, Git/GitHub CLI, hooks, MCP, and optional-provider diagnostics without executing semantic providers. `report --latest` reads a sanitized repo-external report; prompts, diffs, raw model output, source code, environment variables, and raw absolute workspace paths are omitted by default. `release-check` validates release hygiene and skips remote install smoke unless explicitly requested.

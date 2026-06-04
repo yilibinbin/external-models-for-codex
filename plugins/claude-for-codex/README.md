@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.7.0`
+- Current version: `0.8.0`
 
 Published capabilities:
 
@@ -25,6 +25,9 @@ Published capabilities:
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
+- Capability diagnostics for Claude CLI, Git, GitHub CLI, hooks, MCP, and optional future providers.
+- Sanitized per-run review reports that omit prompts, diffs, raw model output, and secrets by default.
+- Release checks for manifest, hook, docs, prompt, skill, and secret-scan hygiene.
 - Background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
 - Session/UserPrompt hooks for session state, turn baselines, and unread-result reminders.
 - Opt-in Stop hook review gate that blocks only on explicit Claude `BLOCK:` verdicts.
@@ -151,6 +154,9 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs review --background -
 node plugins/claude-for-codex/scripts/claude-companion.mjs jobs
 node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs cancel <job-id>
+node plugins/claude-for-codex/scripts/claude-companion.mjs capabilities
+node plugins/claude-for-codex/scripts/claude-companion.mjs report --latest
+node plugins/claude-for-codex/scripts/claude-companion.mjs release-check
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin and include tests
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
@@ -162,6 +168,12 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs status
 For `--json` modes, exit status reports whether the Claude invocation and JSON parsing succeeded. Callers must inspect the returned `verdict` to decide whether findings need attention.
 
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
+
+`capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
+
+`report --latest` reads the latest sanitized review report from the repo-external plugin data directory. Reports are minimal metadata only: command, scope, roles/lenses, backend, model/effort, timestamps, exit status, output byte counts, and structured verdict/finding counts when available. Reports do not store prompts, source code, diffs, raw model output, environment variables, or raw absolute workspace paths by default. Set `CLAUDE_FOR_CODEX_NO_TELEMETRY=1` to disable all non-job report writes.
+
+`release-check` validates release hygiene for this repository. Remote install smoke is skipped by default for local development; use `--remote-install` for a fail-soft smoke or `--require-remote-install` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

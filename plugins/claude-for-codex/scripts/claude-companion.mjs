@@ -21,6 +21,8 @@ import {
 } from "./lib/jobs.mjs";
 import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
+import { latestReport, listReports, reportFromResult, safeWriteReport } from "./lib/reports.mjs";
+import { runReleaseCheck } from "./lib/release-check.mjs";
 import {
   aggregateRoleReviewOutputs,
   normalizeAdversarialOutput,
@@ -39,7 +41,7 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -198,6 +200,87 @@ function hasBinary(name) {
 
 function hasClaude() {
   return runClaude(["--version"]).status === 0;
+}
+
+function claudeVersion() {
+  const result = runClaude(["--version"], { timeout: 5000 });
+  return {
+    available: result.status === 0,
+    version: result.status === 0 ? result.stdout.trim() : "",
+    error: result.status === 0 ? "" : (result.stderr || result.error || "").trim()
+  };
+}
+
+function commandVersion(name) {
+  const result = run(name, ["--version"], { timeout: 5000 });
+  return {
+    available: result.status === 0,
+    version: result.status === 0 ? result.stdout.trim().split(/\r?\n/)[0] : "",
+    error: result.status === 0 ? "" : (result.stderr || result.error || "").trim()
+  };
+}
+
+function claudeHelpText() {
+  const result = runClaude(["--help"], { timeout: 5000 });
+  return result.status === 0 ? result.stdout : "";
+}
+
+function flagSupport(helpText, flags) {
+  return Object.fromEntries(flags.map((flag) => [flag, helpText.includes(flag)]));
+}
+
+function semanticProviderCandidates() {
+  const candidates = ["codegraph", "serena", "claude-context"];
+  return Object.fromEntries(candidates.map((name) => [name, {
+    availableOnPath: Boolean(findOnPath(name))
+  }]));
+}
+
+function sdkAvailability() {
+  const result = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    "try { const pkg = await import('@anthropic-ai/claude-code'); console.log(pkg?.default?.version ?? 'available'); } catch (error) { process.exit(1); }"
+  ], {
+    cwd: process.cwd(),
+    env: process.env,
+    encoding: "utf8",
+    timeout: 5000
+  });
+  return {
+    available: result.status === 0,
+    version: result.status === 0 ? result.stdout.trim() : "",
+    error: result.status === 0 ? "" : (result.stderr || result.error?.message || "").trim()
+  };
+}
+
+function buildCapabilitiesReport() {
+  const helpText = claudeHelpText();
+  return {
+    node: process.version,
+    claude: {
+      command: claudeCommand(),
+      ...claudeVersion(),
+      flags: flagSupport(helpText, [
+        "--print",
+        "--permission-mode",
+        "--tools",
+        "--allowedTools",
+        "--disallowedTools",
+        "--mcp-config",
+        "--strict-mcp-config",
+        "--model",
+        "--effort",
+        "--output-format"
+      ])
+    },
+    claudeSdk: sdkAvailability(),
+    git: commandVersion("git"),
+    githubCli: commandVersion("gh"),
+    hooks: hookDiagnostics(),
+    mcp: mcpDiagnostics(),
+    semanticProviders: semanticProviderCandidates()
+  };
 }
 
 function hasHead() {
@@ -1108,6 +1191,7 @@ function buildSetupReport(actionsTaken = []) {
     jobCommands: ["jobs", "result", "cancel", "rescue"],
     hooks: hookDiagnostics(),
     mcp: mcpDiagnostics(),
+    capabilities: buildCapabilitiesReport(),
     actionsTaken
   };
 }
@@ -1157,6 +1241,69 @@ function printStatus() {
     claudeAgents: agents,
     reviewGate: buildSetupReport().reviewGate
   }, null, 2)}\n`);
+}
+
+function printCapabilities() {
+  process.stdout.write(`${JSON.stringify(buildCapabilitiesReport(), null, 2)}\n`);
+}
+
+function recordCommandReport(command, args, result, startedAt, parsed, roleResults = []) {
+  const endedAt = new Date().toISOString();
+  const report = reportFromResult({
+    command,
+    args,
+    result,
+    startedAt,
+    endedAt,
+    parsed,
+    roleResults
+  });
+  safeWriteReport(process.cwd(), report);
+  return endedAt;
+}
+
+function printReport(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const latest = tokens.includes("--latest") || tokens.length === 0;
+  if (tokens.some((token) => !["--latest", "--json"].includes(token))) {
+    console.error("Usage: claude-companion.mjs report [--latest] [--json]");
+    process.exit(2);
+  }
+  const payload = latest ? latestReport(process.cwd()) : listReports(process.cwd());
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+}
+
+function runReleaseCheckCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const options = {
+    remoteInstall: false,
+    requireRemoteInstall: false,
+    timeoutMs: 30000
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--remote-install") {
+      options.remoteInstall = true;
+    } else if (token === "--require-remote-install") {
+      options.remoteInstall = true;
+      options.requireRemoteInstall = true;
+    } else if (token === "--timeout-ms") {
+      options.timeoutMs = Number(readOptionValue(tokens, index, token));
+      index += 1;
+      if (!Number.isFinite(options.timeoutMs) || options.timeoutMs <= 0) {
+        console.error("--timeout-ms must be a positive number.");
+        process.exit(2);
+      }
+    } else if (token === "--json") {
+      // JSON is the only output format for now.
+    } else {
+      console.error(`Unknown release-check option "${token}".`);
+      process.exit(2);
+    }
+  }
+  const payload = runReleaseCheck(path.resolve(pluginRoot(), "..", ".."), options);
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.exit(payload.ok ? 0 : 1);
 }
 
 function parseGateVerdict(rawOutput) {
@@ -1362,6 +1509,7 @@ function renderStructuredRoleReview(results) {
 }
 
 async function runClaudeTask(kind, rawArgs) {
+  const startedAt = new Date().toISOString();
   if (maybeStartBackground(kind, rawArgs)) {
     return;
   }
@@ -1402,6 +1550,14 @@ async function runClaudeTask(kind, rawArgs) {
     }));
     const results = await runParallelRoleReviews(roles, args, gitContext, multiReviewRolePrompt);
     const rendered = renderRoleReviewSections("# Claude Parallel Adversarial Review", results, "Lens");
+    const aggregateResult = {
+      status: rendered.failed.length ? 1 : 0,
+      stdout: rendered.text,
+      stderr: "",
+      error: "",
+      errorCode: ""
+    };
+    recordCommandReport(kind, args, aggregateResult, startedAt, undefined, results);
     process.stdout.write(rendered.text);
     process.exit(rendered.failed.length ? 1 : 0);
   }
@@ -1417,14 +1573,17 @@ async function runClaudeTask(kind, rawArgs) {
   const result = claudePrint(prompt, args);
 
   if (result.status !== 0) {
+    recordCommandReport(kind, args, result, startedAt);
     process.stderr.write(result.stderr || result.error || "claude --print failed\n");
     process.exit(result.status);
   }
   if (kind === "adversarial-review" && args.jsonOutput) {
     try {
       const parsed = normalizeAdversarialOutput(validateAdversarialJson(extractJsonObject(result.stdout)));
+      recordCommandReport(kind, args, result, startedAt, parsed);
       process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
     } catch (error) {
+      recordCommandReport(kind, args, { ...result, status: 1 }, startedAt);
       process.stderr.write(`Invalid structured adversarial output: ${error.message || String(error)}\n`);
       process.stdout.write(result.stdout);
       process.exit(1);
@@ -1434,8 +1593,10 @@ async function runClaudeTask(kind, rawArgs) {
   if (kind === "review" && args.jsonOutput) {
     try {
       const parsed = parseStructuredReviewResult(result.stdout);
+      recordCommandReport(kind, args, result, startedAt, parsed);
       process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
     } catch (error) {
+      recordCommandReport(kind, args, { ...result, status: 1 }, startedAt);
       process.stderr.write(`Invalid structured review output: ${error.message || String(error)}\n`);
       process.stdout.write(result.stdout);
       process.exit(1);
@@ -1446,10 +1607,12 @@ async function runClaudeTask(kind, rawArgs) {
     const rescueAfter = workingTreeFingerprint(process.cwd());
     process.stderr.write(`[claude-for-codex rescue] write-mode fingerprint ${rescueBefore} -> ${rescueAfter}\n`);
   }
+  recordCommandReport(kind, args, result, startedAt);
   process.stdout.write(result.stdout);
 }
 
 async function runClaudeMultiReview(rawArgs) {
+  const startedAt = new Date().toISOString();
   if (maybeStartBackground("multi-review", rawArgs)) {
     return;
   }
@@ -1493,16 +1656,44 @@ async function runClaudeMultiReview(rawArgs) {
   if (args.jsonOutput) {
     const renderedJson = renderStructuredRoleReview(results);
     if (!renderedJson.ok) {
+      recordCommandReport("multi-review", args, {
+        status: 1,
+        stdout: "",
+        stderr: renderedJson.text,
+        error: "",
+        errorCode: ""
+      }, startedAt, undefined, results);
       process.stderr.write(renderedJson.text);
       process.exit(1);
     }
+    let parsedAggregate;
+    try {
+      parsedAggregate = JSON.parse(renderedJson.text);
+    } catch {
+      parsedAggregate = undefined;
+    }
+    recordCommandReport("multi-review", args, {
+      status: 0,
+      stdout: renderedJson.text,
+      stderr: "",
+      error: "",
+      errorCode: ""
+    }, startedAt, parsedAggregate, results);
     process.stdout.write(renderedJson.text);
     process.exit(0);
   }
 
   const rendered = renderRoleReviewSections("# Claude Multi-Agent Review", results, "Role");
   const summaryMode = `execution mode: ${runInParallel ? "parallel" : "sequential"}`;
-  process.stdout.write(rendered.text.replace("execution mode: parallel", summaryMode));
+  const output = rendered.text.replace("execution mode: parallel", summaryMode);
+  recordCommandReport("multi-review", args, {
+    status: rendered.failed.length ? 1 : 0,
+    stdout: output,
+    stderr: "",
+    error: "",
+    errorCode: ""
+  }, startedAt, undefined, results);
+  process.stdout.write(output);
   process.exit(rendered.failed.length ? 1 : 0);
 }
 
@@ -1719,6 +1910,9 @@ switch (command) {
   case "setup":
     printSetup(rawArgs);
     break;
+  case "capabilities":
+    printCapabilities();
+    break;
   case "review":
     await runClaudeTask("review", rawArgs);
     break;
@@ -1748,6 +1942,12 @@ switch (command) {
     break;
   case "cancel":
     runCancel(rawArgs);
+    break;
+  case "report":
+    printReport(rawArgs);
+    break;
+  case "release-check":
+    runReleaseCheckCommand(rawArgs);
     break;
   case "__run-job":
     runJobWorker(rawArgs);

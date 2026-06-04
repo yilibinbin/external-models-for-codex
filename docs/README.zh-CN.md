@@ -185,6 +185,11 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base m
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --background --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs jobs
 node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
+node plugins/claude-for-codex/scripts/claude-companion.mjs capabilities
+node plugins/claude-for-codex/scripts/claude-companion.mjs report --latest
+node plugins/claude-for-codex/scripts/claude-companion.mjs release-check
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
+
+`capabilities` 输出 Claude CLI flags、Git/GitHub CLI、hooks、MCP 和可选 provider 诊断，但不会执行语义 provider。`report --latest` 读取 repo 外的脱敏报告；默认不保存 prompt、diff、模型原文、源码、环境变量或原始绝对工作区路径。`release-check` 校验发布卫生，除非显式要求，否则跳过远端安装 smoke。
