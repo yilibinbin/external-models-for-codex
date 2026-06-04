@@ -74,7 +74,7 @@ export function nativeReviewTeamPrompt(roles, gitContext, focusText = "") {
     "You are coordinating a Claude for Codex native SDK subagent review.",
     "Invoke every listed role agent exactly once. Do not skip, duplicate, rename, or replace any listed agent.",
     "After all role agents return, respond with only valid JSON using this shape:",
-    "{\"role_results\":[{\"agent\":\"cfc_role\",\"role\":\"role name\",\"result\":{}}]}",
+    "{\"role_results\":[{\"agent\":\"cfc_role\",\"role\":\"role name\",\"result\":{\"status\":\"ok\",\"text\":\"summary\",\"error\":\"\"}}]}",
     "",
     "Role agents:",
     roleLines || "- cfc_reviewer: reviewer - reviewer",
