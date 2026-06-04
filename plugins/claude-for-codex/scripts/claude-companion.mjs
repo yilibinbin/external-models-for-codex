@@ -1999,6 +1999,31 @@ function sdkSubagentStatus(value, entry) {
   return entry?.error ? 1 : 0;
 }
 
+function normalizeSdkSubagentRoleEntry(entry) {
+  if (!entry || typeof entry !== "object" || typeof entry.role !== "string") {
+    return null;
+  }
+  const source = entry.result === undefined ? entry : entry.result;
+  if (!source || typeof source !== "object") {
+    return null;
+  }
+  if (source.status !== undefined && typeof source.status !== "string" && typeof source.status !== "number") {
+    return null;
+  }
+  if (source.text !== undefined && typeof source.text !== "string") {
+    return null;
+  }
+  if (source.error !== undefined && typeof source.error !== "string") {
+    return null;
+  }
+  return {
+    role: entry.role,
+    status: source.status,
+    text: source.text,
+    error: source.error
+  };
+}
+
 function normalizeSdkSubagentJson(stdout) {
   let parsed;
   try {
@@ -2009,21 +2034,15 @@ function normalizeSdkSubagentJson(stdout) {
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.role_results)) {
     return { ok: false };
   }
+  const roleResults = [];
   for (const entry of parsed.role_results) {
-    if (!entry || typeof entry !== "object" || typeof entry.role !== "string") {
+    const roleEntry = normalizeSdkSubagentRoleEntry(entry);
+    if (!roleEntry) {
       return { ok: false };
     }
-    if (entry.status !== undefined && typeof entry.status !== "string" && typeof entry.status !== "number") {
-      return { ok: false };
-    }
-    if (entry.text !== undefined && typeof entry.text !== "string") {
-      return { ok: false };
-    }
-    if (entry.error !== undefined && typeof entry.error !== "string") {
-      return { ok: false };
-    }
+    roleResults.push(roleEntry);
   }
-  return { ok: true, parsed };
+  return { ok: true, parsed: { ...parsed, role_results: roleResults } };
 }
 
 async function runSdkSubagentMultiReview(args, gitContext) {

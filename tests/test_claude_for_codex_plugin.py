@@ -2627,6 +2627,62 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     assert "security ok" not in serialized
 
 
+def test_sdk_subagent_mode_parses_nested_role_results_and_failed_status(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {
+                    "role": "correctness",
+                    "result": {
+                        "status": "success",
+                        "text": "correctness nested ok",
+                    },
+                },
+                {
+                    "role": "security",
+                    "result": {
+                        "status": "failed",
+                        "text": "security nested finding",
+                        "error": "security nested error",
+                    },
+                },
+            ]
+        }),
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness,security",
+            "--backend",
+            "sdk",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "correctness nested ok" in result.stdout
+    assert "security nested finding" in result.stdout
+    assert "security nested error" in result.stdout
+    assert "security" in result.stdout
+    assert "Role failed with exit status 1." in result.stdout
+
+
 def test_sdk_subagent_mode_requires_sdk_backend(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
