@@ -471,6 +471,22 @@ function validateBackendArgs(args) {
   return args.backend;
 }
 
+const CLI_ONLY_MULTI_REVIEW_OPTIONS = Object.freeze([
+  ["maxBudgetUsd", "--max-budget-usd"],
+  ["fallbackModel", "--fallback-model"]
+]);
+
+function validateBackendCompatibleOptions(args) {
+  if (args.backend !== "sdk") {
+    return;
+  }
+  for (const [property, option] of CLI_ONLY_MULTI_REVIEW_OPTIONS) {
+    if (args[property] !== undefined) {
+      throw new Error(`Unsupported option ${option}: CLI-only and not supported for SDK backend.`);
+    }
+  }
+}
+
 function resolveReviewRoles(args) {
   if (args.rolePack !== undefined && args.roles !== undefined) {
     throw new Error("--role-pack conflicts with --roles/--role.");
@@ -2116,6 +2132,7 @@ async function runClaudeMultiReview(rawArgs) {
     args = validateCommandNativeModeOptions("multi-review", rawArgs);
     args.agentTeam = args.agentTeam ?? "plugin";
     validateBackendArgs(args);
+    validateBackendCompatibleOptions(args);
     args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
       ? defaultRoleObjects()
       : resolveReviewRoles(args);

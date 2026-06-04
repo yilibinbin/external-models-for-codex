@@ -455,6 +455,61 @@ def test_multi_review_max_budget_usd_requires_decimal(tmp_path):
     assert "positive decimal" in result.stderr
 
 
+def test_multi_review_sdk_backend_rejects_max_budget_usd(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--backend", "sdk", "--max-budget-usd", "1.50"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--max-budget-usd" in result.stderr
+    assert "CLI-only" in result.stderr or "unsupported for SDK backend" in result.stderr
+
+
+def test_multi_review_sdk_backend_rejects_fallback_model(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--fallback-model" in result.stderr
+    assert "CLI-only" in result.stderr or "unsupported for SDK backend" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("--max-budget-usd", "1.50"),
+        ("--fallback-model", "claude-sonnet-4-5"),
+    ],
+)
+def test_multi_review_env_sdk_backend_rejects_cli_only_options(tmp_path, flag, value):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_BACKEND"] = "sdk"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", flag, value],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert flag in result.stderr
+    assert "CLI-only" in result.stderr or "unsupported for SDK backend" in result.stderr
+
+
 def test_multi_review_forwards_native_budget_and_fallback_model(tmp_path):
     result, _prompts, argvs = run_fake_claude_multi_review(
         tmp_path,
@@ -477,6 +532,31 @@ def test_multi_review_forwards_native_budget_and_fallback_model(tmp_path):
     assert argv[argv.index("--fallback-model") + 1] == "claude-sonnet-4-5"
     assert argv.index("--max-budget-usd") < len(argv) - 1
     assert argv.index("--fallback-model") < len(argv) - 1
+
+
+def test_multi_review_env_sdk_backend_allows_explicit_cli_budget_flags(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        [
+            "--backend",
+            "cli",
+            "--roles",
+            "correctness",
+            "--scope",
+            "working-tree",
+            "--max-budget-usd",
+            "1.50",
+            "--fallback-model",
+            "claude-sonnet-4-5",
+        ],
+        extra_env={"CLAUDE_FOR_CODEX_BACKEND": "sdk"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(argvs) == 1
+    argv = argvs[0]
+    assert argv[argv.index("--max-budget-usd") + 1] == "1.50"
+    assert argv[argv.index("--fallback-model") + 1] == "claude-sonnet-4-5"
 
 
 def test_ultrareview_requires_explicit_consent(tmp_path):
