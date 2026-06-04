@@ -35,4 +35,4 @@ node "${CODEX_PLUGIN_ROOT}/scripts/gemini-companion.mjs" github-actions validate
 - Fork PRs skip Gemini execution by default.
 - Context providers are off by default in CI; do not use `auto`.
 - Checks annotations are optional and add `checks: write`.
-- The workflow pins an immutable `gemini-for-codex-v0.7.0` ref by default.
+- The workflow pins an immutable `gemini-for-codex-v0.8.0` ref by default.

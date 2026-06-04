@@ -92,7 +92,7 @@ def fake_gemini_jsonl(tmp_path, log_file, delay_ms=0, help_text=FAKE_GEMINI_HELP
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.7.0"
+    assert manifest["version"] == "0.8.0"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -103,6 +103,7 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert manifest["interface"]["websiteURL"] == "https://github.com/yilibinbin/external-models-for-codex"
     assert "schema-validated structured review" in manifest["interface"]["longDescription"].lower()
     assert "reviewer role packs" in manifest["interface"]["longDescription"].lower()
+    assert "advisory leases" in manifest["interface"]["longDescription"].lower()
     assert "session lifecycle hooks" in manifest["interface"]["longDescription"].lower()
     assert "Gemini native session and worktree capability gating" in manifest["interface"]["capabilities"]
 
@@ -777,6 +778,204 @@ def test_multi_review_native_agents_role_pack_requires_include_directories_and_c
     assert not pathlib.Path(call["cwd"]).exists()
 
 
+def test_sanitizer_strips_controls_before_redacting_and_caps_utf8(tmp_path):
+    module = PLUGIN / "scripts" / "lib" / "sanitize.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    secret = "AKIA" + "\u001b[31m" + "ABCDEFGHIJKLMNOP"
+    text = f"{secret} {repo}/file.txt /home/alice/secret C:\\\\Users\\\\alice\\\\secret " + ("é" * 3000)
+    code = (
+        "const m = await import(process.argv[1]);"
+        "const out = m.sanitizeSummary(process.argv[2], {cwd: process.argv[3], maxBytes: 2048});"
+        "console.log(JSON.stringify({out, bytes: Buffer.byteLength(out, 'utf8')}));"
+    )
+
+    result = subprocess.run([NODE, "--input-type=module", "-e", code, str(module), text, str(repo)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "\u001b" not in payload["out"]
+    assert "AKIA" not in payload["out"]
+    assert str(repo) not in payload["out"]
+    assert "/home/alice" not in payload["out"]
+    assert "C:\\Users\\alice" not in payload["out"]
+    assert payload["bytes"] <= 2048
+
+
+def test_mailbox_parallel_posts_are_sanitized_and_repo_external(tmp_path):
+    module = PLUGIN / "scripts" / "lib" / "mailbox.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    init_git_repo(repo)
+    code = (
+        "const m = await import(process.argv[1]);"
+        "const cwd = process.argv[2];"
+        "const env = {GEMINI_FOR_CODEX_DATA: process.argv[3], HOME: process.env.HOME};"
+        "const posts = await Promise.all(Array.from({length: 8}, (_, i) => m.postMailboxMessage(cwd, {threadId:'thread-test', jobId:'job-test', role:'correctness', command:'multi-review', mode:'plugin-managed', status:'note', source:'runtime', summary:`msg ${i} ${cwd} AKIAABCDEFGHIJKLMNOP`} , env)));"
+        "const shown = m.showMailboxThread(cwd, 'thread-test', env);"
+        "console.log(JSON.stringify({posts, shown}));"
+    )
+
+    result = subprocess.run([NODE, "--input-type=module", "-e", code, str(module), str(repo), str(data)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert len(payload["posts"]) == 8
+    assert len(payload["shown"]["messages"]) == 8
+    dumped = json.dumps(payload)
+    assert str(repo) not in dumped
+    assert "AKIA" not in dumped
+    mailbox_files = list((data / "state").glob("*/mailbox/threads/thread-test/*.json"))
+    assert len(mailbox_files) == 8
+    assert not (repo / "mailbox").exists()
+
+
+def test_mailbox_command_rejects_identifier_traversal_before_write(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+
+    result = subprocess.run([NODE, str(runtime), "mailbox", "post", "--job-id", "../bad", "--summary", "x"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 2
+    assert "Invalid" in result.stderr
+    assert not list((tmp_path / "data").glob("**/*.json"))
+
+
+def test_leases_claim_conflict_release_and_path_boundary(tmp_path):
+    module = PLUGIN / "scripts" / "lib" / "leases.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("x\n", encoding="utf8")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf8")
+    code = (
+        "const m = await import(process.argv[1]);"
+        "const cwd = process.argv[2];"
+        "const env = {GEMINI_FOR_CODEX_DATA: process.argv[3], HOME: process.env.HOME};"
+        "const first = m.claimLease(cwd, {path:'file.txt', role:'correctness', ttl:'60s', mode:'manual'}, env);"
+        "const second = m.claimLease(cwd, {path:'file.txt', role:'security', ttl:'60s', mode:'manual'}, env);"
+        "const released = m.releaseLease(cwd, first.lease.id, env);"
+        "let escapeStatus = ''; try { m.claimLease(cwd, {path:process.argv[4], role:'correctness', ttl:'60s', mode:'manual'}, env); } catch (e) { escapeStatus = e.message; }"
+        "console.log(JSON.stringify({first, second, released, escapeStatus, list:m.listLeases(cwd, env)}));"
+    )
+
+    result = subprocess.run([NODE, "--input-type=module", "-e", code, str(module), str(repo), str(data), str(outside)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["first"]["status"] == "claimed"
+    assert payload["second"]["status"] == "conflict"
+    assert payload["released"]["status"] == "released"
+    assert "outside workspace" in payload["escapeStatus"]
+    assert str(repo) not in json.dumps(payload)
+
+
+def test_leases_reaper_does_not_archive_fresh_claim(tmp_path):
+    module = PLUGIN / "scripts" / "lib" / "leases.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("x\n", encoding="utf8")
+    code = (
+        "const m = await import(process.argv[1]);"
+        "const cwd = process.argv[2];"
+        "const env = {GEMINI_FOR_CODEX_DATA: process.argv[3], HOME: process.env.HOME};"
+        "const stale = m.claimLease(cwd, {path:'file.txt', role:'correctness', ttl:'30s', mode:'manual', nowMs: 1000}, env);"
+        "const reaped = m.reapExpiredLeaseForPath(cwd, 'file.txt', {nowMs: 60000, beforeArchive: () => { m.releaseLease(cwd, stale.lease.id, env); m.claimLease(cwd, {path:'file.txt', role:'security', ttl:'60s', mode:'manual', nowMs: 60000}, env); }}, env);"
+        "console.log(JSON.stringify({reaped, list:m.listLeases(cwd, env)}));"
+    )
+
+    result = subprocess.run([NODE, "--input-type=module", "-e", code, str(module), str(repo), str(data)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["reaped"]["status"] == "abort"
+    assert payload["list"]["active"][0]["role"] == "security"
+
+
+def test_multi_review_mailbox_and_leases_preserve_two_path_scope(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "gemini-calls.jsonl"
+    data = tmp_path / "data"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "a.txt").write_text("old\n", encoding="utf8")
+    (repo / "b.txt").write_text("old\n", encoding="utf8")
+    subprocess.run(["git", "add", "a.txt", "b.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "a.txt").write_text("new a\n", encoding="utf8")
+    (repo / "b.txt").write_text("new b\n", encoding="utf8")
+    fake = fake_gemini_jsonl(tmp_path, log_file)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake)
+    env["GEMINI_FOR_CODEX_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--roles", "correctness", "--use-mailbox", "--advisory-leases", "--path", "a.txt", "--path", "b.txt"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    prompt = json.loads(log_file.read_text(encoding="utf8").splitlines()[0])["prompt"]
+    assert "a.txt" in prompt and "b.txt" in prompt
+    assert "+new a" in prompt and "+new b" in prompt
+    report = json.loads((data / "reports" / "latest.json").read_text(encoding="utf8"))
+    assert report["mailbox"]["enabled"] is True
+    assert report["mailbox"]["messageCount"] >= 3
+    assert report["leases"]["claimed"] == 2
+    assert report["mailbox"]["threadIdHash"].startswith("sha256:")
+    lease_state = subprocess.run([NODE, str(runtime), "leases", "list", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+    assert lease_state.returncode == 0
+    assert len(json.loads(lease_state.stdout)["active"]) == 0
+
+
+def test_multi_review_native_agents_mailbox_is_aggregate_only(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "gemini-native-mailbox.jsonl"
+    data = tmp_path / "data"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("x\n", encoding="utf8")
+    fake = fake_gemini_jsonl(tmp_path, log_file, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake)
+    env["GEMINI_FOR_CODEX_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--native-agents", "--role-pack", "minimal", "--use-mailbox", "--advisory-leases", "--path", "file.txt"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    report = json.loads((data / "reports" / "latest.json").read_text(encoding="utf8"))
+    assert report["mailbox"]["enabled"] is True
+    assert report["mailbox"]["messageCount"] == 2
+    assert report["leases"]["claimed"] == 1
+    thread_dirs = list((data / "state").glob("*/mailbox/threads/*"))
+    messages = []
+    for thread in thread_dirs:
+        messages.extend(json.loads(path.read_text(encoding="utf8")) for path in thread.glob("*.json"))
+    assert {message["mode"] for message in messages} == {"native-agents"}
+    assert {message["role"] for message in messages} == {"native-gemini-subagents"}
+
+
 def write_context_provider(tmp_path, body):
     tmp_path.mkdir(parents=True, exist_ok=True)
     provider = tmp_path / "provider-bin"
@@ -1020,7 +1219,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.7.0" in text
+    assert "--ref gemini-for-codex-v0.8.0" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text
@@ -1380,6 +1579,8 @@ def test_gemini_skills_have_frontmatter_and_runtime_calls():
         "gemini-review-gate": "setup --enable-review-gate",
         "gemini-github-actions-review": "github-actions",
         "gemini-role-packs": "roles",
+        "gemini-mailbox": "mailbox",
+        "gemini-leases": "leases",
         "gemini-collaboration-loop": "plan",
     }
     for skill, command in expected.items():

@@ -1,6 +1,6 @@
 # Gemini for Codex
 
-Codex plugin that invokes the local Gemini CLI for independent read-only review, reviewer role packs, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
+Codex plugin that invokes the local Gemini CLI for independent read-only review, reviewer role packs, advisory mailbox/leases, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
 
 ## Requirements
 
@@ -40,10 +40,12 @@ The plugin sends bounded inline git context and does not depend on Gemini MCP or
 - `setup`: report Gemini, git, hook, review-gate, and capability status; supports `--enable-review-gate` and `--disable-review-gate`.
 - `capabilities`: print Gemini CLI flag support as detected from the current `gemini --help`.
 - `report`: print the latest sanitized operation metadata report.
-- `release-check`: run offline manifest, hook, docs, context-provider, and CI-template safety checks.
+- `release-check`: run offline manifest, hook, docs, context-provider, mailbox/lease, and CI-template safety checks.
 - `review`: read-only review of current git changes or a branch diff. Add `--structured` for schema-validated rendered output or `--json` for machine-readable normalized JSON.
 - `github-actions`: render, initialize, validate, and consume fork-safe GitHub Actions PR review workflows.
 - `roles`: list, inspect, and validate Gemini reviewer role packs.
+- `mailbox`: list, show, and post sanitized coordination summaries.
+- `leases`: list, claim, and release advisory path-attention leases.
 - `adversarial-review`: skeptical multi-lens review.
 - `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--role-pack <pack>` to select a built-in reviewer team, or `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
 - `plan`: independent implementation plan for Codex to reconcile.
@@ -83,13 +85,27 @@ node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --native
 
 Available built-in packs are `default`, `security`, `release`, `frontend`, `backend`, `testing`, `docs`, and `minimal`. `frontend` and `docs` are presets over existing Gemini roles in this release, not separate dedicated lenses.
 
-User-authored role packs are validate/inspect-only in `0.7.0`:
+User-authored role packs are validate/inspect-only:
 
 ```bash
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs roles validate ~/.codex/gemini-for-codex/roles/custom.json
 ```
 
 User packs cannot be executed with `multi-review` or `review-gate` yet. Validation rejects workspace-local files, symlink escapes, unknown fields, and any attempt to define tools, shell commands, hooks, environment variables, MCP servers, providers, extensions, permissions, backend behavior, or write behavior.
+
+## Mailbox And Advisory Leases
+
+Mailbox and leases are opt-in coordination metadata:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --role-pack minimal --use-mailbox --advisory-leases --path plugins/gemini-for-codex/README.md
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs mailbox list --json
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs leases list --json
+```
+
+Mailbox messages are sanitized summaries, not transcripts. Reports store counts and hashes only, not mailbox text. Leases are advisory path-attention hints; they do not lock files, do not block review, and do not affect Stop gate verdicts.
+
+In plugin-managed `multi-review`, the mailbox records per-role start and finish summaries. In `--native-agents` mode, Gemini for Codex records aggregate native-agent orchestration start and finish summaries only; it does not claim visibility into individual Gemini subagent lifecycle events.
 
 ## Optional Context Providers
 
@@ -134,7 +150,7 @@ Write the default workflow only when requested:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
 ```
 
-The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.7.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`.
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.8.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`.
 
 ## Stop Hook
 

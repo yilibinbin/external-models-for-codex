@@ -80,6 +80,7 @@ Gemini CLI resolution order:
 - `claude-github-actions-review`: generate or validate a fork-safe GitHub Actions PR review workflow.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
 - `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini-native session flags are capability-gated from the installed CLI.
+- `gemini-mailbox`, `gemini-leases`: inspect sanitized Gemini coordination summaries and advisory path-attention leases.
 
 ## Gemini for Codex
 

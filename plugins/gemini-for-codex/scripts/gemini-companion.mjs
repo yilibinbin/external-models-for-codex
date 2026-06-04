@@ -66,9 +66,22 @@ import {
   validateBuiltInRolePacks,
   validateRolePackFile
 } from "./lib/role-packs.mjs";
+import {
+  listMailboxThreads,
+  mailboxSummary,
+  postMailboxMessage,
+  showMailboxThread
+} from "./lib/mailbox.mjs";
+import {
+  claimLease,
+  leaseSummary,
+  listLeases,
+  releaseLease
+} from "./lib/leases.mjs";
+import { mailboxDirForCwd, leasesDirForCwd } from "./lib/state.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "release-check", "github-actions", "roles", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -355,6 +368,10 @@ function parseArgs(argv) {
       parsed.structuredReview = true;
     } else if (arg === "--native-agents") {
       parsed.nativeAgents = true;
+    } else if (arg === "--use-mailbox") {
+      parsed.useMailbox = true;
+    } else if (arg === "--advisory-leases") {
+      parsed.advisoryLeases = true;
     } else if (arg === "--context-provider") {
       parsed.contextProvider = readOptionValue(tokens, index, arg);
       index += 1;
@@ -889,6 +906,22 @@ function sanitizeReportPayload(payload) {
       native_agents_compatible: Boolean(payload.rolePack.native_agents_compatible)
     };
   }
+  if (payload.mailbox) {
+    safe.mailbox = {
+      enabled: Boolean(payload.mailbox.enabled),
+      threadIdHash: String(payload.mailbox.threadIdHash || ""),
+      messageCount: Number(payload.mailbox.messageCount || 0),
+      writeFailures: Number(payload.mailbox.writeFailures || 0)
+    };
+  }
+  if (payload.leases) {
+    safe.leases = {
+      enabled: Boolean(payload.leases.enabled),
+      claimed: Number(payload.leases.claimed || 0),
+      conflicts: Number(payload.leases.conflicts || 0),
+      degraded: Boolean(payload.leases.degraded)
+    };
+  }
   return safe;
 }
 
@@ -918,6 +951,9 @@ function printReport(rawArgs) {
 
 function printCapabilities() {
   const preflight = geminiHelpReport();
+  const cwd = process.cwd();
+  const leases = listLeases(cwd);
+  const mailbox = listMailboxThreads(cwd);
   process.stdout.write(`${JSON.stringify({
     available: hasGemini(),
     command: geminiCommand(),
@@ -926,6 +962,16 @@ function printCapabilities() {
     rolePacks: {
       available: true,
       builtIn: listRolePacks().map((pack) => pack.name)
+    },
+    mailbox: {
+      directory: mailboxDirForCwd(cwd),
+      threadCount: mailbox.threads.length
+    },
+    leases: {
+      directory: leasesDirForCwd(cwd),
+      activeCount: leases.active.length,
+      degraded: leases.degraded,
+      primitive: leases.primitive
     }
   }, null, 2)}\n`);
   process.exit(preflight.ok ? 0 : 1);
@@ -998,7 +1044,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.7.0") failures.push(`manifest version is ${manifest.version}, expected 0.7.0`);
+    if (manifest.version !== "0.8.0") failures.push(`manifest version is ${manifest.version}, expected 0.8.0`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1020,6 +1066,8 @@ function runReleaseCheck(rawArgs = []) {
   failures.push(...providerChecks.failures);
   const rolePackChecks = checkRolePacks();
   failures.push(...rolePackChecks.failures);
+  const coordinationChecks = checkCoordinationFixtures();
+  failures.push(...coordinationChecks.failures);
   const githubActionsChecks = options.ciSimulate ? checkGithubActionsCi() : { ok: true, failures: [] };
   failures.push(...githubActionsChecks.failures);
   const payload = {
@@ -1030,6 +1078,7 @@ function runReleaseCheck(rawArgs = []) {
       hooks: true,
       contextProviderFixtures: providerChecks.ok,
       rolePacks: rolePackChecks.ok,
+      mailboxLeases: coordinationChecks.ok,
       githubActionsCi: githubActionsChecks.ok
     },
     failures
@@ -1052,12 +1101,101 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.7.0")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.8.0")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
   }
   return { ok: failures.length === 0, failures };
+}
+
+function checkCoordinationFixtures() {
+  const failures = [];
+  const temp = fs.mkdtempSync(path.join(os.tmpdir(), "gemini-for-codex-coordination-"));
+  const workspace = path.join(temp, "workspace");
+  const data = path.join(temp, "data");
+  fs.mkdirSync(workspace, { recursive: true });
+  try {
+    const summary = "AKIA\u001b[31mABCDEFGHIJKLMNOP /home/example/secret";
+    const message = postMailboxMessage(workspace, {
+      threadId: "thread-release-check",
+      jobId: "job-release-check",
+      role: "correctness",
+      command: "multi-review",
+      mode: "manual",
+      status: "note",
+      source: "manual",
+      summary
+    }, { ...process.env, GEMINI_FOR_CODEX_DATA: data });
+    if (message.summary.includes("AKIA") || message.summary.includes("/home/example")) {
+      failures.push("mailbox sanitizer fixture leaked secret or path");
+    }
+    const first = claimLease(workspace, { path: "file.txt", role: "correctness", ttl: "60s", mode: "manual" }, { ...process.env, GEMINI_FOR_CODEX_DATA: data });
+    const second = claimLease(workspace, { path: "file.txt", role: "security", ttl: "60s", mode: "manual" }, { ...process.env, GEMINI_FOR_CODEX_DATA: data });
+    if (first.status !== "claimed" || second.status !== "conflict") {
+      failures.push("lease atomic same-path fixture did not produce one winner and one conflict");
+    }
+    const concurrent = runConcurrentLeaseFixture(workspace, data);
+    if (!concurrent.ok) {
+      failures.push(concurrent.reason);
+    }
+  } catch (error) {
+    failures.push(`coordination fixture failed: ${error.message || String(error)}`);
+  } finally {
+    fs.rmSync(temp, { recursive: true, force: true });
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function runConcurrentLeaseFixture(workspace, data) {
+  const script = `
+    import { spawn } from "node:child_process";
+    import fs from "node:fs";
+    import path from "node:path";
+    const [modulePath, workspace, data] = process.argv.slice(1);
+    const start = path.join(data, "start");
+    fs.mkdirSync(data, { recursive: true });
+    const childCode = \`
+      import fs from "node:fs";
+      const [modulePath, workspace, data, start, role] = process.argv.slice(1);
+      const m = await import(modulePath);
+      while (!fs.existsSync(start)) { await new Promise((resolve) => setTimeout(resolve, 5)); }
+      const result = m.claimLease(workspace, {path:"concurrent.txt", role, ttl:"60s", mode:"manual"}, {GEMINI_FOR_CODEX_DATA: data, HOME: process.env.HOME});
+      console.log(JSON.stringify(result));
+    \`;
+    function run(role) {
+      return new Promise((resolve) => {
+        const child = spawn(process.execPath, ["--input-type=module", "-e", childCode, modulePath, workspace, data, start, role], { stdio: ["ignore", "pipe", "pipe"] });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (chunk) => stdout += chunk);
+        child.stderr.on("data", (chunk) => stderr += chunk);
+        child.on("close", (status) => resolve({status, stdout, stderr}));
+      });
+    }
+    const children = [run("correctness"), run("security")];
+    fs.writeFileSync(start, "go");
+    const results = await Promise.all(children);
+    console.log(JSON.stringify(results));
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "-e", script, path.join(ROOT_DIR, "scripts", "lib", "leases.mjs"), workspace, data], {
+    encoding: "utf8",
+    timeout: 10_000,
+    maxBuffer: 1024 * 1024
+  });
+  if ((result.status ?? 1) !== 0) {
+    return { ok: false, reason: `concurrent lease fixture failed: ${result.stderr || result.error || result.status}` };
+  }
+  try {
+    const rows = JSON.parse(result.stdout.trim()).map((row) => JSON.parse(row.stdout));
+    const claimed = rows.filter((row) => row.status === "claimed").length;
+    const conflicts = rows.filter((row) => row.status === "conflict").length;
+    return claimed === 1 && conflicts === 1
+      ? { ok: true }
+      : { ok: false, reason: `concurrent lease fixture expected one claim and one conflict, got ${result.stdout.trim()}` };
+  } catch (error) {
+    return { ok: false, reason: `concurrent lease fixture parse failed: ${error.message || String(error)}` };
+  }
 }
 
 function checkRolePacks() {
@@ -1737,6 +1875,8 @@ function buildSetupReport(actionsTaken = []) {
   const stateReport = readStateReport(cwd);
   const config = stateReport.state.config;
   const preflight = geminiHelpReport();
+  const mailbox = listMailboxThreads(cwd);
+  const leases = listLeases(cwd);
   return {
     node: process.version,
     geminiAvailable: hasGemini(),
@@ -1774,6 +1914,16 @@ function buildSetupReport(actionsTaken = []) {
     rolePacks: {
       available: true,
       builtIn: listRolePacks().map((pack) => pack.name)
+    },
+    mailbox: {
+      directory: mailboxDirForCwd(cwd),
+      threadCount: mailbox.threads.length
+    },
+    leases: {
+      directory: leasesDirForCwd(cwd),
+      activeCount: leases.active.length,
+      degraded: leases.degraded,
+      primitive: leases.primitive
     },
     hooks: hookDiagnostics(),
     actionsTaken
@@ -1974,6 +2124,128 @@ function runRolesCommand(rawArgs) {
     throw new Error("Usage: gemini-companion.mjs roles list|inspect|validate [options]");
   } catch (error) {
     console.error(stripTerminalControls(error.message || String(error)));
+    process.exit(2);
+  }
+}
+
+function runMailboxCommand(rawArgs) {
+  const [subcommand, ...rest] = normalizeArgv(rawArgs);
+  const jsonOutput = rest.includes("--json");
+  try {
+    if (subcommand === "list") {
+      if (rest.some((token) => token !== "--json")) {
+        throw new Error("Usage: gemini-companion.mjs mailbox list [--json]");
+      }
+      const payload = listMailboxThreads(process.cwd());
+      process.stdout.write(jsonOutput ? `${JSON.stringify(payload, null, 2)}\n` : `${payload.threads.map((thread) => `${thread.threadId}: ${thread.messageCount}`).join("\n")}\n`);
+      return;
+    }
+    if (subcommand === "show") {
+      const id = rest.find((token) => token !== "--json");
+      if (!id || rest.filter((token) => token !== "--json").length !== 1) {
+        throw new Error("Usage: gemini-companion.mjs mailbox show <thread-or-job-id> [--json]");
+      }
+      const payload = showMailboxThread(process.cwd(), id);
+      process.stdout.write(jsonOutput ? `${JSON.stringify(payload, null, 2)}\n` : `${payload.messages.map((message) => `${message.createdAt} ${message.role} ${message.status}: ${message.summary}`).join("\n")}\n`);
+      return;
+    }
+    if (subcommand === "post") {
+      const options = { role: "manual", summary: "", jobId: "" };
+      for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index];
+        if (token === "--json") {
+          continue;
+        }
+        if (token === "--job-id") {
+          options.jobId = readOptionValue(rest, index, token);
+          index += 1;
+        } else if (token === "--summary") {
+          options.summary = readOptionValue(rest, index, token);
+          index += 1;
+        } else if (token === "--role") {
+          options.role = readOptionValue(rest, index, token);
+          index += 1;
+        } else {
+          throw new Error(`Unknown mailbox option "${token}".`);
+        }
+      }
+      if (!options.jobId || !options.summary) {
+        throw new Error("Usage: gemini-companion.mjs mailbox post --job-id <id> --summary <text> [--role <role>] [--json]");
+      }
+      const payload = postMailboxMessage(process.cwd(), {
+        threadId: options.jobId,
+        jobId: options.jobId,
+        role: options.role,
+        command: "manual",
+        mode: "manual",
+        status: "note",
+        source: "manual",
+        summary: options.summary
+      });
+      process.stdout.write(jsonOutput ? `${JSON.stringify(payload, null, 2)}\n` : `posted: ${payload.id}\n`);
+      return;
+    }
+    throw new Error("Usage: gemini-companion.mjs mailbox list|show|post [options]");
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+}
+
+function runLeasesCommand(rawArgs) {
+  const [subcommand, ...rest] = normalizeArgv(rawArgs);
+  const jsonOutput = rest.includes("--json");
+  try {
+    if (subcommand === "list") {
+      if (rest.some((token) => token !== "--json")) {
+        throw new Error("Usage: gemini-companion.mjs leases list [--json]");
+      }
+      const payload = listLeases(process.cwd());
+      process.stdout.write(jsonOutput ? `${JSON.stringify(payload, null, 2)}\n` : `${payload.active.map((lease) => `${lease.id}: ${lease.path} ${lease.role}`).join("\n")}\n`);
+      return;
+    }
+    if (subcommand === "claim") {
+      const options = { role: "manual", ttl: "600s", path: "", jobId: "" };
+      for (let index = 0; index < rest.length; index += 1) {
+        const token = rest[index];
+        if (token === "--json") {
+          continue;
+        }
+        if (token === "--path") {
+          options.path = readOptionValue(rest, index, token);
+          index += 1;
+        } else if (token === "--role") {
+          options.role = readOptionValue(rest, index, token);
+          index += 1;
+        } else if (token === "--ttl") {
+          options.ttl = readOptionValue(rest, index, token);
+          index += 1;
+        } else if (token === "--job-id") {
+          options.jobId = readOptionValue(rest, index, token);
+          index += 1;
+        } else {
+          throw new Error(`Unknown leases option "${token}".`);
+        }
+      }
+      if (!options.path) {
+        throw new Error("Usage: gemini-companion.mjs leases claim --path <path> --role <role> --ttl <duration> [--job-id <id>] [--json]");
+      }
+      const payload = claimLease(process.cwd(), { ...options, mode: "manual" });
+      process.stdout.write(jsonOutput ? `${JSON.stringify(payload, null, 2)}\n` : `${payload.status}${payload.lease ? `: ${payload.lease.id}` : ""}\n`);
+      return;
+    }
+    if (subcommand === "release") {
+      const id = rest.find((token) => token !== "--json");
+      if (!id || rest.filter((token) => token !== "--json").length !== 1) {
+        throw new Error("Usage: gemini-companion.mjs leases release <lease-id> [--json]");
+      }
+      const payload = releaseLease(process.cwd(), id);
+      process.stdout.write(jsonOutput ? `${JSON.stringify(payload, null, 2)}\n` : `${payload.status}: ${id}\n`);
+      return;
+    }
+    throw new Error("Usage: gemini-companion.mjs leases list|claim|release [options]");
+  } catch (error) {
+    console.error(error.message || String(error));
     process.exit(2);
   }
 }
@@ -2348,30 +2620,110 @@ async function runGeminiMultiReview(rawArgs) {
   }
   let results;
   let nativeWorkspace = "";
-  if (args.nativeAgents) {
-    try {
-      nativeWorkspace = writeNativeAgentWorkspace(args.reviewRoles);
-      const result = geminiPrint(nativeMultiAgentPrompt(args, gitContext, context.block), {
-        ...args,
-        cwd: nativeWorkspace,
-        includeDirectories: currentGeminiCapabilities().includeDirectories ? [process.cwd()] : []
-      });
-      results = [{ role: { name: "native-gemini-subagents" }, result }];
-    } finally {
-      if (nativeWorkspace) {
-        fs.rmSync(nativeWorkspace, { recursive: true, force: true });
+  const mailboxThreadId = args.useMailbox ? `thread-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}` : "";
+  const leaseResults = [];
+  let mailboxWriteFailures = 0;
+  if (args.advisoryLeases) {
+    if (!args.paths.length) {
+      process.stderr.write("[gemini-for-codex leases] --advisory-leases supplied without --path; skipping leases.\n");
+    } else {
+      for (const leasePath of args.paths) {
+        try {
+          leaseResults.push(claimLease(process.cwd(), {
+            path: leasePath,
+            role: args.nativeAgents ? "native-gemini-subagents" : args.reviewRoles[0]?.name || "multi-review",
+            ttl: "600s",
+            mode: args.nativeAgents ? "native-agents" : "plugin-managed"
+          }));
+        } catch (error) {
+          leaseResults.push({ status: "degraded", degraded: true, reason: error.message || String(error) });
+        }
       }
     }
-  } else {
-    results = await Promise.all(args.reviewRoles.map(async (role) => {
-      const prompt = multiReviewRolePrompt(role, args, gitContext, context.block);
-      const result = await geminiPrintAsync(prompt, args);
-      return { role, result };
-    }));
+  }
+  function writeMailbox(message) {
+    if (!mailboxThreadId) {
+      return;
+    }
+    try {
+      postMailboxMessage(process.cwd(), {
+        threadId: mailboxThreadId,
+        command: "multi-review",
+        source: "runtime",
+        ...message
+      });
+    } catch (error) {
+      mailboxWriteFailures += 1;
+      process.stderr.write(`[gemini-for-codex mailbox] ${error.message || String(error)}\n`);
+    }
+  }
+  function releaseClaimedLeases() {
+    for (const leaseResult of leaseResults) {
+      if (leaseResult.status === "claimed" && leaseResult.lease?.id) {
+        try {
+          const released = releaseLease(process.cwd(), leaseResult.lease.id);
+          if (released.status !== "released") {
+            process.stderr.write(`[gemini-for-codex leases] failed to release ${leaseResult.lease.id}: ${released.reason || released.status}\n`);
+          }
+        } catch (error) {
+          process.stderr.write(`[gemini-for-codex leases] failed to release ${leaseResult.lease.id}: ${error.message || String(error)}\n`);
+        }
+      }
+    }
+  }
+  try {
+    if (args.nativeAgents) {
+      try {
+        writeMailbox({
+          role: "native-gemini-subagents",
+          mode: "native-agents",
+          status: "started",
+          summary: `Gemini native-agent review started for roles: ${args.reviewRoles.map((role) => role.name).join(", ")}.`
+        });
+        nativeWorkspace = writeNativeAgentWorkspace(args.reviewRoles);
+        const result = geminiPrint(nativeMultiAgentPrompt(args, gitContext, context.block), {
+          ...args,
+          cwd: nativeWorkspace,
+          includeDirectories: currentGeminiCapabilities().includeDirectories ? [process.cwd()] : []
+        });
+        results = [{ role: { name: "native-gemini-subagents" }, result }];
+        writeMailbox({
+          role: "native-gemini-subagents",
+          mode: "native-agents",
+          status: result.status === 0 ? "succeeded" : "failed",
+          summary: `Gemini native-agent review ${result.status === 0 ? "succeeded" : "failed"} with exit status ${result.status}.`
+        });
+      } finally {
+        if (nativeWorkspace) {
+          fs.rmSync(nativeWorkspace, { recursive: true, force: true });
+        }
+      }
+    } else {
+      results = await Promise.all(args.reviewRoles.map(async (role) => {
+        writeMailbox({
+          role: role.name,
+          mode: "plugin-managed",
+          status: "started",
+          summary: `Role ${role.name} started.`
+        });
+        const prompt = multiReviewRolePrompt(role, args, gitContext, context.block);
+        const result = await geminiPrintAsync(prompt, args);
+        writeMailbox({
+          role: role.name,
+          mode: "plugin-managed",
+          status: result.status === 0 ? "succeeded" : "failed",
+          summary: `Role ${role.name} ${result.status === 0 ? "succeeded" : "failed"} with exit status ${result.status}.`
+        });
+        return { role, result };
+      }));
+    }
+  } finally {
+    releaseClaimedLeases();
   }
 
   const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
   const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
+  const leaseMetadata = leaseSummary(leaseResults);
   const sections = [
     args.nativeAgents ? "# Gemini Native Subagent Review" : "# Gemini Multi-Agent Review",
     ...results.map(({ role, result }) => [
@@ -2388,11 +2740,28 @@ async function runGeminiMultiReview(rawArgs) {
     `orchestration: ${args.nativeAgents ? "Gemini native subagents" : "parallel Gemini CLI role fan-out"}`,
     `roles succeeded: ${succeeded.length ? succeeded.join(", ") : "(none)"}`,
     `roles failed: ${failed.length ? failed.join(", ") : "(none)"}`,
+    args.advisoryLeases ? `advisory leases: ${leaseMetadata.claimed} claimed, ${leaseMetadata.conflicts} conflicts${leaseMetadata.degraded ? ", degraded" : ""}` : "",
     "exit policy: exits non-zero if any role fails; completed role output remains visible."
-  ];
-
+  ].filter(Boolean);
+  if (!args.nativeAgents) {
+    writeMailbox({
+      role: "summary",
+      mode: "plugin-managed",
+      status: failed.length ? "failed" : "succeeded",
+      summary: `Multi-review completed. Succeeded: ${succeeded.length}; failed: ${failed.length}.`
+    });
+  }
   process.stdout.write(`${sections.join("\n\n")}\n`);
-  writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: failed.length ? 1 : 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata, rolePack: args.rolePackSummary });
+  writeOperationReport({
+    command: "multi-review",
+    cwd: process.cwd(),
+    status: failed.length ? 1 : 0,
+    geminiAvailable: hasGemini(),
+    contextMetadata: context.metadata,
+    rolePack: args.rolePackSummary,
+    mailbox: args.useMailbox ? mailboxSummary(process.cwd(), mailboxThreadId, process.env, { writeFailures: mailboxWriteFailures }) : undefined,
+    leases: args.advisoryLeases ? leaseMetadata : undefined
+  });
   process.exit(failed.length ? 1 : 0);
 }
 
@@ -2646,6 +3015,12 @@ switch (command) {
     break;
   case "roles":
     runRolesCommand(rawArgs);
+    break;
+  case "mailbox":
+    runMailboxCommand(rawArgs);
+    break;
+  case "leases":
+    runLeasesCommand(rawArgs);
     break;
   case "review":
     await runGeminiTask("review", rawArgs);

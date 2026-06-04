@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0 - 2026-06-04
+
+- Add sanitized mailbox coordination with `mailbox list`, `mailbox show`, and `mailbox post`.
+- Add advisory path leases with `leases list`, `leases claim`, and `leases release`.
+- Add `multi-review --use-mailbox` and `multi-review --advisory-leases` for opt-in coordination metadata.
+- Keep native-agent mailbox reporting aggregate-only and keep leases advisory; neither feature affects review or Stop gate verdicts.
+
 ## 0.7.0 - 2026-06-04
 
 - Add built-in Gemini reviewer role packs with `roles list`, `roles inspect`, and `roles validate`.

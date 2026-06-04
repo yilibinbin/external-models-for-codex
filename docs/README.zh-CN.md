@@ -80,6 +80,7 @@ Gemini CLI 查找顺序：
 - `claude-github-actions-review`：生成或校验 fork-safe GitHub Actions PR 审阅工作流。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
 - `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；Gemini rescue 保持只读。`gemini-review --structured` 会验证 schema-backed findings，`gemini-multi-review` 默认并行运行角色 fan-out，也支持 `--native-agents`，Gemini 原生 session flags 会按当前 CLI 能力探测启用。
+- `gemini-mailbox`、`gemini-leases`：查看脱敏 Gemini 协作摘要和 advisory 路径关注 leases。
 
 ## Gemini for Codex
 
