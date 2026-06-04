@@ -2538,49 +2538,40 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
 
 
 def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
     repo.mkdir()
+    data.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-    sdk_module, capture = write_fake_claude_sdk(tmp_path, stdout="SDK_NATIVE_REVIEW_OK")
-    backend_uri = (PLUGIN / "scripts" / "lib" / "claude-backend.mjs").as_uri()
-    native_review_uri = (PLUGIN / "scripts" / "lib" / "claude-native-review.mjs").as_uri()
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    sdk_module, capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {"role": "correctness", "status": "success", "text": "correctness ok"},
+                {"role": "security", "status": "success", "text": "security ok"},
+            ]
+        }),
+    )
 
     env = os.environ.copy()
     env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
     result = subprocess.run(
         [
             NODE,
-            "--input-type=module",
-            "-e",
-            f"""
-import {{
-  buildNativeReviewAgents,
-  nativeAgentName,
-  nativeReviewTeamPrompt
-}} from {json.dumps(native_review_uri)};
-import {{ runSdkNativeReview }} from {json.dumps(backend_uri)};
-
-const roles = [
-  {{ name: "Security & Correctness", description: "security review", prompt: "Find correctness and security risks." }},
-  "release readiness"
-];
-const agents = buildNativeReviewAgents(roles, {{ model: "claude-sonnet-4-5", effort: "medium" }});
-const literalModel = buildNativeReviewAgents(["literal model role"], {{ model: "sonnet" }});
-const inherited = buildNativeReviewAgents(["default model role"]);
-const prompt = nativeReviewTeamPrompt(roles, "git diff --stat output", "focus on changed files");
-const response = await runSdkNativeReview(prompt, {{ model: "claude-sonnet-4-5" }}, {{
-  cwd: {json.dumps(str(repo))},
-  agents
-}});
-console.log(JSON.stringify({{
-  response,
-  agents,
-  literalModel,
-  inherited,
-  prompt,
-  sanitized: nativeAgentName("Security & Correctness")
-}}));
-""",
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness,security",
+            "--backend",
+            "sdk",
+            "--scope",
+            "working-tree",
         ],
         cwd=repo,
         env=env,
@@ -2589,45 +2580,107 @@ console.log(JSON.stringify({{
     )
 
     assert result.returncode == 0, result.stderr
-    payload = json.loads(result.stdout)
-    assert payload["response"]["status"] == 0
-    assert payload["response"]["stdout"] == "SDK_NATIVE_REVIEW_OK"
-    assert payload["sanitized"] == "cfc_security_correctness"
-    assert "cfc_security_correctness" in payload["agents"]
-    assert "cfc_release_readiness" in payload["agents"]
-    assert "Invoke every listed role agent exactly once" in payload["prompt"]
-    assert "\"role_results\"" in payload["prompt"]
-
-    for definition in payload["agents"].values():
-        assert definition["tools"] == ["Read", "Grep", "Glob"]
-        assert "permissionMode" not in definition
-        assert definition["maxTurns"] == 4
-        assert definition["model"] == "inherit"
-        assert definition["model"] in {"sonnet", "opus", "haiku", "inherit"}
-        assert "effort" not in definition
-        assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
-            set(definition["disallowedTools"])
-        )
-        assert "Agent" not in definition["tools"]
-
-    literal_definition = payload["literalModel"]["cfc_literal_model_role"]
-    assert literal_definition["model"] == "sonnet"
-    assert "permissionMode" not in literal_definition
-    assert "effort" not in literal_definition
-
-    inherited_definition = payload["inherited"]["cfc_default_model_role"]
-    assert inherited_definition["model"] == "inherit"
-    assert "permissionMode" not in inherited_definition
-    assert "effort" not in inherited_definition
+    assert "execution mode: sdk-subagents" in result.stdout
+    assert "correctness ok" in result.stdout
+    assert "security ok" in result.stdout
 
     query = json.loads((capture / "query.json").read_text(encoding="utf8"))
-    assert query["agents"] == payload["agents"]
-    assert query["options"]["agents"] == payload["agents"]
     assert "Agent" in query["allowedTools"]
     assert "Agent" in query["options"]["allowedTools"]
     assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
     assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
     assert "claude-for-codex-git" in query["mcpServers"]
+    assert "Invoke every listed role agent exactly once" in query["prompt"]
+
+    agents = query["agents"]
+    assert set(agents) == {"cfc_correctness", "cfc_security"}
+    assert query["options"]["agents"] == agents
+    for definition in agents.values():
+        assert definition["tools"] == ["Read", "Grep", "Glob"]
+        assert "permissionMode" not in definition
+        assert definition["maxTurns"] == 4
+        assert definition["model"] == "inherit"
+        assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
+            set(definition["disallowedTools"])
+        )
+        assert "Agent" not in definition["tools"]
+        assert not {"Edit", "Write", "MultiEdit", "Bash", "Agent"} & set(definition["tools"])
+
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    report = json.loads(latest.stdout)["report"]
+    assert report["backend"] == "sdk"
+    assert report["nativeOrchestration"] == {
+        "enabled": True,
+        "mode": "sdk-subagents",
+        "roleCount": 2,
+    }
+    serialized = json.dumps(report)
+    assert "sdk-session-secret" not in serialized
+    assert "correctness ok" not in serialized
+    assert "security ok" not in serialized
+
+
+def test_sdk_subagent_mode_requires_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "requires --backend sdk" in result.stderr
+
+
+def test_sdk_subagent_mode_rejects_invalid_json_output(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(tmp_path, stdout="not json")
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid SDK subagent JSON output" in result.stderr
 
 
 def test_sdk_native_review_unavailable_fails_with_native_message(tmp_path):

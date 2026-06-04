@@ -37,8 +37,13 @@ import {
 import {
   backendCapabilities,
   resolveBackend,
+  runSdkNativeReview,
   runSdkPrompt
 } from "./lib/claude-backend.mjs";
+import {
+  buildNativeReviewAgents,
+  nativeReviewTeamPrompt
+} from "./lib/claude-native-review.mjs";
 import {
   aggregateRoleReviewOutputs,
   normalizeAdversarialOutput,
@@ -1984,6 +1989,90 @@ async function runParallelRoleReviews(roles, args, gitContext, promptBuilder) {
   return Promise.all(pending);
 }
 
+function sdkSubagentStatus(value, entry) {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value === 0 ? 0 : 1;
+  }
+  if (typeof value === "string") {
+    return new Set(["ok", "pass", "passed", "success", "succeeded"]).has(value.trim().toLowerCase()) ? 0 : 1;
+  }
+  return entry?.error ? 1 : 0;
+}
+
+function normalizeSdkSubagentJson(stdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return { ok: false };
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.role_results)) {
+    return { ok: false };
+  }
+  for (const entry of parsed.role_results) {
+    if (!entry || typeof entry !== "object" || typeof entry.role !== "string") {
+      return { ok: false };
+    }
+    if (entry.status !== undefined && typeof entry.status !== "string" && typeof entry.status !== "number") {
+      return { ok: false };
+    }
+    if (entry.text !== undefined && typeof entry.text !== "string") {
+      return { ok: false };
+    }
+    if (entry.error !== undefined && typeof entry.error !== "string") {
+      return { ok: false };
+    }
+  }
+  return { ok: true, parsed };
+}
+
+async function runSdkSubagentMultiReview(args, gitContext) {
+  if (args.backend !== "sdk") {
+    throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
+  }
+  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model });
+  const focusText = args._.join(" ");
+  const prompt = nativeReviewTeamPrompt(args.reviewRoles, gitContext, focusText);
+  const aggregate = await runSdkNativeReview(prompt, args, {
+    cwd: process.cwd(),
+    timeout: args.timeout,
+    agents
+  });
+  if (aggregate.status !== 0) {
+    return { aggregate, results: [] };
+  }
+  const normalized = normalizeSdkSubagentJson(aggregate.stdout);
+  if (!normalized.ok) {
+    return {
+      aggregate: {
+        ...aggregate,
+        status: 1,
+        stderr: "Invalid SDK subagent JSON output.",
+        error: "Invalid SDK subagent JSON output.",
+        errorCode: "SDK_SUBAGENT_INVALID_JSON"
+      },
+      results: []
+    };
+  }
+  const roleResults = new Map(normalized.parsed.role_results.map((entry) => [entry.role, entry]));
+  const results = args.reviewRoles.map((role) => {
+    const entry = roleResults.get(role.name);
+    return {
+      role,
+      result: {
+        status: entry ? sdkSubagentStatus(entry.status, entry) : 1,
+        stdout: entry?.text ?? "",
+        stderr: entry?.error ?? (entry ? "" : `Missing SDK subagent result for role ${role.name}.`),
+        error: entry?.error ?? "",
+        errorCode: entry?.error ? "SDK_SUBAGENT_ROLE_ERROR" : "",
+        backend: "sdk",
+        metadata: { orchestration: "sdk-subagents" }
+      }
+    };
+  });
+  return { aggregate, results };
+}
+
 function renderStructuredRoleReview(results) {
   const parsedResults = [];
   const failures = [];
@@ -2138,6 +2227,12 @@ async function runClaudeMultiReview(rawArgs) {
     args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
       ? defaultRoleObjects()
       : resolveReviewRoles(args);
+    args.nativeOrchestration = args.agentTeam === "sdk-subagents"
+      ? { enabled: true, mode: "sdk-subagents", roleCount: args.reviewRoles.length }
+      : { enabled: false };
+    if (args.agentTeam === "sdk-subagents" && args.backend !== "sdk") {
+      throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
+    }
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -2202,8 +2297,26 @@ async function runClaudeMultiReview(rawArgs) {
 
   const gitContext = collectGitContext(args);
   const runInParallel = !args.sequential;
+  const executionMode = args.agentTeam === "sdk-subagents" ? "sdk-subagents" : runInParallel ? "parallel" : "sequential";
   let results = [];
-  if (runInParallel) {
+  let nativeAggregate;
+  if (args.agentTeam === "sdk-subagents") {
+    const nativeRun = await runSdkSubagentMultiReview(args, gitContext);
+    nativeAggregate = nativeRun.aggregate;
+    results = nativeRun.results;
+    if (nativeAggregate.status !== 0) {
+      const stderr = nativeAggregate.stderr || nativeAggregate.error || "SDK subagent multi-review failed.";
+      recordCommandReport("multi-review", args, {
+        ...nativeAggregate,
+        stdout: "",
+        stderr,
+        error: nativeAggregate.error || stderr,
+        backend: "sdk"
+      }, startedAt, undefined, results);
+      process.stderr.write(`${stderr.trim()}\n`);
+      process.exit(nativeAggregate.status || 1);
+    }
+  } else if (runInParallel) {
     results = await runParallelRoleReviews(args.reviewRoles, args, gitContext, multiReviewRolePrompt);
   } else {
     for (const role of args.reviewRoles) {
@@ -2244,7 +2357,7 @@ async function runClaudeMultiReview(rawArgs) {
   }
 
   const rendered = renderRoleReviewSections("# Claude Multi-Agent Review", results, "Role");
-  const summaryMode = `execution mode: ${runInParallel ? "parallel" : "sequential"}`;
+  const summaryMode = `execution mode: ${executionMode}`;
   if (args.useMailbox) {
     for (const { role, result } of results) {
       try {
@@ -2282,7 +2395,9 @@ async function runClaudeMultiReview(rawArgs) {
     stdout: output,
     stderr: "",
     error: "",
-    errorCode: ""
+    errorCode: "",
+    backend: args.agentTeam === "sdk-subagents" ? "sdk" : undefined,
+    metadata: nativeAggregate?.metadata ?? {}
   }, startedAt, undefined, results);
   process.stdout.write(output);
   process.exit(rendered.failed.length ? 1 : 0);

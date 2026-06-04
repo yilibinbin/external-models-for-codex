@@ -100,6 +100,11 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
       conflicts: args.leaseSummary.conflicts ?? 0,
       degraded: Boolean(args.leaseSummary.degraded)
     } : undefined,
+    nativeOrchestration: args.nativeOrchestration ? {
+      enabled: Boolean(args.nativeOrchestration.enabled),
+      mode: typeof args.nativeOrchestration.mode === "string" ? args.nativeOrchestration.mode : "",
+      roleCount: Number.isInteger(args.nativeOrchestration.roleCount) ? args.nativeOrchestration.roleCount : 0
+    } : { enabled: false, mode: "", roleCount: 0 },
     structured: structuredSummary(parsed),
     roleResults: roleResults.map(({ role, result: roleResult, parsed: roleParsed }) => ({
       role: role?.name ?? String(role ?? ""),
