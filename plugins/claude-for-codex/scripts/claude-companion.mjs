@@ -83,6 +83,7 @@ import { extractJsonObject, validateAdversarialJson } from "./lib/structured-out
 const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
+const POSITIVE_DECIMAL_PATTERN = /^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)$/;
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
 const CLAUDE_CODE_PATH_ENV = "CLAUDE_CODE_PATH";
@@ -348,11 +349,10 @@ function parseArgs(argv) {
       parsed.streamProgress = true;
     } else if (arg === "--max-budget-usd") {
       const value = readOptionValue(tokens, index, arg).trim();
-      const parsedValue = Number(value);
-      if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+      if (!POSITIVE_DECIMAL_PATTERN.test(value)) {
         throw new Error("--max-budget-usd must be a positive decimal number.");
       }
-      parsed.maxBudgetUsd = parsedValue;
+      parsed.maxBudgetUsd = value;
       index += 1;
     } else if (arg === "--fallback-model") {
       parsed.fallbackModel = readOptionValue(tokens, index, arg).trim();
@@ -431,6 +431,25 @@ function parseArgs(argv) {
     throw new Error("Choose either --parallel or --sequential.");
   }
   return parsed;
+}
+
+const MULTI_REVIEW_ONLY_OPTIONS = Object.freeze([
+  ["agentTeam", "--agent-team"],
+  ["nativeStructured", "--native-structured"],
+  ["streamProgress", "--stream-progress"],
+  ["maxBudgetUsd", "--max-budget-usd"],
+  ["fallbackModel", "--fallback-model"]
+]);
+
+function validateNativeModeOptions(args, command) {
+  for (const [property, option] of MULTI_REVIEW_ONLY_OPTIONS) {
+    if (args[property] !== undefined && command !== "multi-review") {
+      throw new Error(`Unsupported option ${option}: only valid for multi-review.`);
+    }
+  }
+  if (args.confirmCost !== undefined && command !== "ultrareview") {
+    throw new Error("Unsupported option --confirm-cost: only valid for ultrareview.");
+  }
 }
 
 function validateBackendArgs(args) {
@@ -726,6 +745,12 @@ function buildClaudePrintInvocation(prompt, options) {
   if (options.effort) {
     args.push("--effort", options.effort);
   }
+  if (options.maxBudgetUsd) {
+    args.push("--max-budget-usd", options.maxBudgetUsd);
+  }
+  if (options.fallbackModel) {
+    args.push("--fallback-model", options.fallbackModel);
+  }
 
   args.push(prompt);
   return { args, mcpConfig };
@@ -884,6 +909,7 @@ function maybeStartBackground(command, rawArgs) {
   let parsed;
   try {
     parsed = parseArgs(rawArgs);
+    validateNativeModeOptions(parsed, command);
   } catch {
     return false;
   }
@@ -1963,6 +1989,7 @@ async function runClaudeTask(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateNativeModeOptions(args, kind);
     validateBackendArgs(args);
     if (kind === "adversarial-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
@@ -2073,6 +2100,7 @@ async function runClaudeMultiReview(rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateNativeModeOptions(args, "multi-review");
     args.agentTeam = args.agentTeam ?? "plugin";
     if (!VALID_AGENT_TEAMS.has(args.agentTeam)) {
       throw new Error(`Invalid --agent-team "${args.agentTeam}". Valid values: ${Array.from(VALID_AGENT_TEAMS).join(", ")}.`);
@@ -2238,6 +2266,7 @@ function runClaudeUltrareview(rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateNativeModeOptions(args, "ultrareview");
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);

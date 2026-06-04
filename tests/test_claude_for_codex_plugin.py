@@ -416,6 +416,53 @@ def test_multi_review_agent_team_flags_are_validated(tmp_path):
     assert "--agent-team sdk-subagents cannot be combined with --sequential" in sequential_subagents.stderr
 
 
+def test_review_rejects_native_agent_team_flag_before_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(tmp_path, ["--agent-team", "banana"])
+
+    assert result.returncode == 2
+    assert prompt == ""
+    assert argv == []
+    assert "Unsupported option --agent-team" in result.stderr
+    assert "only valid for multi-review" in result.stderr
+
+
+def test_multi_review_max_budget_usd_requires_decimal(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--max-budget-usd", "0x10"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "positive decimal" in result.stderr
+
+
+def test_multi_review_forwards_native_budget_and_fallback_model(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        [
+            "--roles",
+            "correctness",
+            "--scope",
+            "working-tree",
+            "--max-budget-usd",
+            "1.50",
+            "--fallback-model",
+            "claude-sonnet-4-5",
+        ],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(argvs) == 1
+    argv = argvs[0]
+    assert argv[argv.index("--max-budget-usd") + 1] == "1.50"
+    assert argv[argv.index("--fallback-model") + 1] == "claude-sonnet-4-5"
+    assert argv.index("--max-budget-usd") < len(argv) - 1
+    assert argv.index("--fallback-model") < len(argv) - 1
+
+
 def test_ultrareview_requires_explicit_consent(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
 
