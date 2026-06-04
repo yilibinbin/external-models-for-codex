@@ -2636,7 +2636,7 @@ def test_sdk_native_structured_output_passes_schema(tmp_path):
         tmp_path,
         stdout=json.dumps({
             "role_results": [
-                {"role": "correctness", "status": "ok", "text": "structured ok"},
+                {"agent": "cfc_correctness", "role": "correctness", "status": "ok", "text": "structured ok"},
             ]
         }),
     )
@@ -2672,6 +2672,10 @@ def test_sdk_native_structured_output_passes_schema(tmp_path):
     assert schema["required"] == ["role_results"]
     assert schema["properties"]["role_results"]["type"] == "array"
     item_schema = schema["properties"]["role_results"]["items"]
+    assert "agent" in item_schema["properties"]
+    assert item_schema["properties"]["agent"]["type"] == "string"
+    assert {"status", "text"} in [set(shape["required"]) for shape in item_schema["anyOf"]]
+    assert {"result"} in [set(shape["required"]) for shape in item_schema["anyOf"]]
     assert {"ok", "failed"} == set(item_schema["properties"]["status"]["enum"])
     assert {"ok", "failed"} == set(item_schema["properties"]["result"]["properties"]["status"]["enum"])
 
@@ -2679,7 +2683,9 @@ def test_sdk_native_structured_output_passes_schema(tmp_path):
 def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
     repo.mkdir()
+    data.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
     secret_chunk = "raw-secret-model-chunk"
     secret_session = "sdk-session-secret"
@@ -2700,6 +2706,7 @@ def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path
     )
     env = os.environ.copy()
     env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
 
     result = subprocess.run(
         [
@@ -2725,9 +2732,88 @@ def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path
     assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
     assert secret_chunk not in result.stderr
     assert secret_session not in result.stderr
+    assert secret_chunk not in result.stdout
+    assert secret_session not in result.stdout
     query = json.loads((capture / "query.json").read_text(encoding="utf8"))
     assert query["includePartialMessages"] is True
     assert query["options"]["includePartialMessages"] is True
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    serialized = json.dumps(json.loads(latest.stdout)["report"])
+    assert secret_chunk not in serialized
+    assert secret_session not in serialized
+
+
+def test_sdk_review_stream_progress_is_sanitized_and_report_omits_raw_chunks(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+    secret_chunk = "raw-secret-review-chunk"
+    secret_session = "sdk-session-secret"
+    sdk_module, capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout="SDK_REVIEW_OK",
+        extra_js=f"""
+  yield {{
+    type: 'assistant',
+    message: {{ content: [{{ type: 'text', text: {json.dumps(secret_chunk)} }}] }},
+    session_id: {json.dumps(secret_session)}
+  }};
+""",
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "review",
+            "--backend",
+            "sdk",
+            "--stream-progress",
+            "--scope",
+            "working-tree",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "[claude-for-codex sdk progress] assistant" in result.stderr
+    assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
+    assert "SDK_REVIEW_OK" in result.stdout
+    assert secret_chunk not in result.stderr
+    assert secret_session not in result.stderr
+    assert secret_chunk not in result.stdout
+    assert secret_session not in result.stdout
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert query["includePartialMessages"] is True
+    assert query["options"]["includePartialMessages"] is True
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    serialized = json.dumps(json.loads(latest.stdout)["report"])
+    assert secret_chunk not in serialized
+    assert secret_session not in serialized
 
 
 def test_sdk_subagent_mode_parses_nested_role_results_and_failed_status(tmp_path):

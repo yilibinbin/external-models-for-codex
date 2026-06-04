@@ -122,6 +122,7 @@ const SDK_MULTI_REVIEW_OUTPUT_SCHEMA = Object.freeze({
         additionalProperties: false,
         required: ["role"],
         properties: {
+          agent: { type: "string" },
           role: { type: "string" },
           status: { type: "string", enum: ["ok", "failed"] },
           text: { type: "string" },
@@ -476,16 +477,19 @@ function parseArgs(argv) {
 const MULTI_REVIEW_ONLY_OPTIONS = Object.freeze([
   ["agentTeam", "--agent-team"],
   ["nativeStructured", "--native-structured"],
-  ["streamProgress", "--stream-progress"],
   ["maxBudgetUsd", "--max-budget-usd"],
   ["fallbackModel", "--fallback-model"]
 ]);
+const STREAM_PROGRESS_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 
 function validateNativeModeOptions(args, command) {
   for (const [property, option] of MULTI_REVIEW_ONLY_OPTIONS) {
     if (args[property] !== undefined && command !== "multi-review") {
       throw new Error(`Unsupported option ${option}: only valid for multi-review.`);
     }
+  }
+  if (args.streamProgress !== undefined && !STREAM_PROGRESS_COMMANDS.has(command)) {
+    throw new Error("Unsupported option --stream-progress: only valid for SDK prompt commands.");
   }
   if (args.confirmCost !== undefined && command !== "ultrareview") {
     throw new Error("Unsupported option --confirm-cost: only valid for ultrareview.");

@@ -398,7 +398,7 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
       includePartialMessages: sdkOptions.includePartialMessages
     });
     const output = await collectSdkOutput(queryResult, {
-      streamProgress: Boolean(options.streamProgress)
+      streamProgress: Boolean(args.streamProgress || options.streamProgress)
     });
     return {
       status: 0,
