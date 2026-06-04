@@ -2231,6 +2231,56 @@ def test_capabilities_falls_back_to_old_claude_code_sdk_package(tmp_path):
     assert payload["claudeSdk"]["version"] == "0.0.42"
 
 
+def test_capabilities_resolves_claude_agent_sdk_from_global_npm_root(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    global_root = tmp_path / "global-node-modules"
+    sdk_root = global_root / "@anthropic-ai" / "claude-agent-sdk"
+    fake_bin.mkdir()
+    sdk_root.mkdir(parents=True)
+    (sdk_root / "package.json").write_text(json.dumps({
+        "name": "@anthropic-ai/claude-agent-sdk",
+        "version": "0.3.162",
+        "type": "module",
+        "main": "index.mjs",
+        "exports": {
+            ".": "./index.mjs",
+        },
+    }), encoding="utf8")
+    (sdk_root / "index.mjs").write_text(
+        "export function query() { return [{ type: 'result', result: 'ok' }]; }\n",
+        encoding="utf8",
+    )
+    fake_npm = fake_bin / "npm"
+    fake_npm.write_text(
+        "#!/usr/bin/env sh\n"
+        "if [ \"$1\" = root ] && [ \"$2\" = -g ]; then\n"
+        f"  printf '%s\\n' {str(global_root)!r}\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf8",
+    )
+    fake_npm.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claudeSdk"]["available"] is True
+    assert payload["claudeSdk"]["source"] == "global"
+    assert payload["claudeSdk"]["packageName"] == "@anthropic-ai/claude-agent-sdk"
+    assert payload["claudeSdk"]["version"] == "0.3.162"
+
+
 def test_capabilities_reports_native_claude_cli_surfaces(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     fake_bin = tmp_path / "bin"

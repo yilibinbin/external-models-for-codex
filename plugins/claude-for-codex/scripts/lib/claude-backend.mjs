@@ -90,6 +90,50 @@ function npmGlobalRoot() {
   return result.status === 0 ? result.stdout.trim() : "";
 }
 
+function sdkSearchRoots(cwd = process.cwd()) {
+  const roots = [{
+    root: cwd,
+    requireFile: path.join(cwd, "package.json"),
+    source: "local"
+  }];
+  const globalRoot = npmGlobalRoot();
+  if (globalRoot) {
+    roots.push({
+      root: globalRoot,
+      requireFile: path.join(globalRoot, ".claude-for-codex-global-resolver.js"),
+      source: "global"
+    });
+  }
+  return roots;
+}
+
+function packagePathInNodeModules(nodeModulesRoot, packageName) {
+  return path.join(nodeModulesRoot, ...packageName.split("/"));
+}
+
+function resolveSdkFromSearchRoot(searchRoot, packageName) {
+  if (searchRoot.source === "global") {
+    const packageRoot = packagePathInNodeModules(searchRoot.root, packageName);
+    const packageJsonPath = path.join(packageRoot, "package.json");
+    if (!fs.existsSync(packageJsonPath)) {
+      return null;
+    }
+    const requireFromPackage = createRequire(packageJsonPath);
+    const modulePath = requireFromPackage.resolve(packageName);
+    return {
+      modulePath,
+      packageJsonPath: packageJsonFromEntry(modulePath, packageName) || packageJsonPath
+    };
+  }
+
+  const requireFromRoot = createRequire(searchRoot.requireFile);
+  const modulePath = requireFromRoot.resolve(packageName);
+  return {
+    modulePath,
+    packageJsonPath: packageJsonFromEntry(modulePath, packageName)
+  };
+}
+
 export function resolveSdkModule(env = process.env, cwd = process.cwd()) {
   if (env[SDK_PATH_ENV]) {
     const modulePath = path.resolve(env[SDK_PATH_ENV]);
@@ -104,17 +148,18 @@ export function resolveSdkModule(env = process.env, cwd = process.cwd()) {
     };
   }
 
-  for (const root of [cwd, npmGlobalRoot()].filter(Boolean)) {
+  for (const root of sdkSearchRoots(cwd)) {
     for (const packageName of SDK_PACKAGES) {
       try {
-        const requireFromRoot = createRequire(path.join(root, "package.json"));
-        const modulePath = requireFromRoot.resolve(packageName);
-        const packageJsonPath = packageJsonFromEntry(modulePath, packageName);
+        const resolved = resolveSdkFromSearchRoot(root, packageName);
+        if (!resolved) {
+          continue;
+        }
         return {
-          importPath: pathToFileURL(modulePath).href,
-          packageJsonPath,
+          importPath: pathToFileURL(resolved.modulePath).href,
+          packageJsonPath: resolved.packageJsonPath,
           packageName,
-          source: root === cwd ? "local" : "global"
+          source: root.source
         };
       } catch {
         // Try next package/root.
