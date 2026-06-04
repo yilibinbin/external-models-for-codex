@@ -48,9 +48,27 @@ import {
   workflowPath,
   writeWorkflow
 } from "./lib/github-actions.mjs";
+import {
+  ADVERSARIAL_LENSES,
+  DEFAULT_ADVERSARIAL_LENSES,
+  DEFAULT_MULTI_REVIEW_ROLES,
+  REVIEW_ROLES,
+  defaultRoleObjects,
+  hashRolePack,
+  listRolePacks,
+  resolveExplicitRoles,
+  resolveRolePack,
+  rolePackGateCompatible,
+  rolePackNativeAgentsCompatible,
+  rolePackReportMetadata,
+  rolePackSummary,
+  rolesForPack,
+  validateBuiltInRolePacks,
+  validateRolePackFile
+} from "./lib/role-packs.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "release-check", "github-actions", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "release-check", "github-actions", "roles", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -60,69 +78,6 @@ const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
 const REPORT_VERSION = 1;
 let geminiHelpReportCache = null;
-const ADVERSARIAL_LENSES = Object.freeze({
-  skeptic: {
-    label: "Skeptic",
-    directive: [
-      "Challenge correctness and completeness.",
-      "Ask what inputs, states, or sequences will break this.",
-      "Find unhandled error paths, race conditions, ordering dependencies, and assumptions that are not proven.",
-      "Map findings to: prove-it-works, fix-root-causes, serialize-shared-state-mutations."
-    ].join(" ")
-  },
-  architect: {
-    label: "Architect",
-    directive: [
-      "Challenge structural fitness.",
-      "Ask whether the design serves the stated goal or an assumed goal.",
-      "Find coupling points, boundary violations, responsibility leaks, and assumptions about scale, concurrency, or ordering.",
-      "Map findings to: boundary-discipline, foundational-thinking, redesign-from-first-principles."
-    ].join(" ")
-  },
-  minimalist: {
-    label: "Minimalist",
-    directive: [
-      "Challenge necessity and complexity.",
-      "Ask what can be deleted without losing the stated goal.",
-      "Find speculative abstractions, configuration without a concrete second use case, and thoroughness that does not improve the outcome.",
-      "Map findings to: subtract-before-you-add, outcome-oriented-execution, cost-aware-delegation."
-    ].join(" ")
-  }
-});
-const DEFAULT_ADVERSARIAL_LENSES = Object.freeze(["skeptic", "architect", "minimalist"]);
-const REVIEW_ROLES = Object.freeze({
-  correctness: {
-    directive: "Find bugs, regressions, edge cases, and behavioral contract breaks."
-  },
-  security: {
-    directive: "Review read-only safety, secrets exposure, injection risks, and unsafe command or path handling."
-  },
-  tests: {
-    directive: "Find missing, brittle, or overfit tests and release validation gaps."
-  },
-  release: {
-    directive: "Review install, marketplace, versioning, documentation, and upgrade risks."
-  },
-  adversarial: {
-    directive: "Challenge assumptions, simpler alternatives, hidden costs, and failure modes."
-  },
-  skeptic: {
-    directive: ADVERSARIAL_LENSES.skeptic.directive
-  },
-  architect: {
-    directive: ADVERSARIAL_LENSES.architect.directive
-  },
-  minimalist: {
-    directive: ADVERSARIAL_LENSES.minimalist.directive
-  }
-});
-const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
-  "correctness",
-  "security",
-  "tests",
-  "release",
-  "adversarial"
-]);
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
@@ -366,6 +321,14 @@ function parseArgs(argv) {
       }
       parsed.roles = [...(parsed.roles ?? []), role];
       index += 1;
+    } else if (arg === "--role-pack") {
+      parsed.rolePack = readOptionValue(tokens, index, arg).trim();
+      if (!parsed.rolePack) {
+        throw new Error("Missing value for --role-pack.");
+      }
+      index += 1;
+    } else if (arg === "--role-pack-file") {
+      throw new Error("--role-pack-file is validate/inspect-only and is not accepted by review commands.");
     } else if (arg === "--adversarial-lenses") {
       const lenses = readOptionValue(tokens, index, arg)
         .split(",")
@@ -446,28 +409,22 @@ function parseArgs(argv) {
 }
 
 function resolveReviewRoles(args) {
+  if (args.rolePack !== undefined && args.roles !== undefined) {
+    throw new Error("--role-pack conflicts with --roles/--role.");
+  }
+  if (args.rolePack !== undefined) {
+    const pack = resolveRolePack(args.rolePack);
+    args.rolePackSummary = rolePackSummary(pack);
+    args.rolePack = pack;
+    return rolesForPack(pack);
+  }
   if (args.roles === undefined) {
     return [];
   }
   if (!args.roles.length) {
     throw new Error("Missing value for --roles.");
   }
-
-  const validRoles = Object.keys(REVIEW_ROLES).sort();
-  const seenRoles = new Set();
-  for (const role of args.roles) {
-    if (!Object.hasOwn(REVIEW_ROLES, role)) {
-      throw new Error(`Unknown review role "${role}". Valid roles: ${validRoles.join(", ")}.`);
-    }
-    if (seenRoles.has(role)) {
-      throw new Error(`Duplicate review role "${role}".`);
-    }
-    seenRoles.add(role);
-  }
-  return args.roles.map((name) => ({
-    name,
-    directive: REVIEW_ROLES[name].directive
-  }));
+  return resolveExplicitRoles(args.roles);
 }
 
 function resolveAdversarialLenses(args) {
@@ -907,7 +864,7 @@ function reportFile(env = process.env) {
 
 function sanitizeReportPayload(payload) {
   const metadata = payload.contextMetadata || {};
-  return {
+  const safe = {
     version: REPORT_VERSION,
     timestamp: new Date().toISOString(),
     command: payload.command || "",
@@ -921,6 +878,18 @@ function sanitizeReportPayload(payload) {
     contextFailureReason: String(metadata.contextFailureReason || "disabled"),
     contextDegraded: Boolean(metadata.contextDegraded)
   };
+  if (payload.rolePack) {
+    safe.rolePack = {
+      name: String(payload.rolePack.name || ""),
+      source: String(payload.rolePack.source || ""),
+      schema_version: Number(payload.rolePack.schema_version || 0),
+      hash: String(payload.rolePack.hash || ""),
+      roles: Array.isArray(payload.rolePack.roles) ? payload.rolePack.roles.map((role) => String(role)) : [],
+      gate_compatible: Boolean(payload.rolePack.gate_compatible),
+      native_agents_compatible: Boolean(payload.rolePack.native_agents_compatible)
+    };
+  }
+  return safe;
 }
 
 function writeOperationReport(payload) {
@@ -953,7 +922,11 @@ function printCapabilities() {
     available: hasGemini(),
     command: geminiCommand(),
     preflight,
-    capabilities: preflight.capabilities
+    capabilities: preflight.capabilities,
+    rolePacks: {
+      available: true,
+      builtIn: listRolePacks().map((pack) => pack.name)
+    }
   }, null, 2)}\n`);
   process.exit(preflight.ok ? 0 : 1);
 }
@@ -1025,7 +998,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.6.0") failures.push(`manifest version is ${manifest.version}, expected 0.6.0`);
+    if (manifest.version !== "0.7.0") failures.push(`manifest version is ${manifest.version}, expected 0.7.0`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1045,6 +1018,8 @@ function runReleaseCheck(rawArgs = []) {
   }
   const providerChecks = releaseCheckProviderFixtures();
   failures.push(...providerChecks.failures);
+  const rolePackChecks = checkRolePacks();
+  failures.push(...rolePackChecks.failures);
   const githubActionsChecks = options.ciSimulate ? checkGithubActionsCi() : { ok: true, failures: [] };
   failures.push(...githubActionsChecks.failures);
   const payload = {
@@ -1054,6 +1029,7 @@ function runReleaseCheck(rawArgs = []) {
       docsForbiddenStrings: true,
       hooks: true,
       contextProviderFixtures: providerChecks.ok,
+      rolePacks: rolePackChecks.ok,
       githubActionsCi: githubActionsChecks.ok
     },
     failures
@@ -1076,10 +1052,32 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.6.0")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.7.0")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function checkRolePacks() {
+  const failures = [];
+  const builtIns = validateBuiltInRolePacks();
+  failures.push(...builtIns.failures.map((failure) => `role pack invalid: ${failure}`));
+  try {
+    const packs = listRolePacks();
+    const expected = ["backend", "default", "docs", "frontend", "minimal", "release", "security", "testing"];
+    const names = packs.map((pack) => pack.name).sort();
+    if (JSON.stringify(names) !== JSON.stringify(expected)) {
+      failures.push(`role pack names mismatch: ${names.join(", ")}`);
+    }
+    for (const pack of packs) {
+      if (!/^sha256:[a-f0-9]{64}$/.test(pack.hash)) {
+        failures.push(`role pack ${pack.name} hash is not stable sha256 metadata`);
+      }
+    }
+  } catch (error) {
+    failures.push(`role pack check failed: ${error.message || String(error)}`);
   }
   return { ok: failures.length === 0, failures };
 }
@@ -1769,8 +1767,13 @@ function buildSetupReport(actionsTaken = []) {
         capabilities: true,
         report: true,
         releaseCheck: true,
-        contextProvider: true
+        contextProvider: true,
+        rolePacks: true
       }
+    },
+    rolePacks: {
+      available: true,
+      builtIn: listRolePacks().map((pack) => pack.name)
     },
     hooks: hookDiagnostics(),
     actionsTaken
@@ -1906,6 +1909,75 @@ function runGithubActions(rawArgs) {
   }
 }
 
+function stripTerminalControls(text) {
+  return String(text).replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+}
+
+function runRolesCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const subcommand = tokens.shift();
+  const jsonOutput = tokens.includes("--json");
+  const filtered = tokens.filter((token) => token !== "--json");
+  try {
+    if (subcommand === "list") {
+      if (filtered.length) {
+        throw new Error("Usage: gemini-companion.mjs roles list [--json]");
+      }
+      const packs = listRolePacks();
+      if (jsonOutput) {
+        process.stdout.write(`${JSON.stringify({ rolePacks: packs }, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write([
+        "Gemini role packs:",
+        ...packs.map((pack) => `- ${pack.name}: ${pack.roles.join(", ")}${pack.gate_compatible ? " (gate-compatible)" : ""}`)
+      ].join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "inspect") {
+      const packName = filtered[0];
+      if (!packName || filtered.length !== 1) {
+        throw new Error("Usage: gemini-companion.mjs roles inspect <pack> [--json]");
+      }
+      const summary = rolePackSummary(resolveRolePack(packName));
+      if (jsonOutput) {
+        process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write([
+        `Role pack: ${summary.name}`,
+        `source: ${summary.source}`,
+        `schema: ${summary.schema_version}`,
+        `roles: ${summary.roles.join(", ")}`,
+        `gate-compatible: ${summary.gate_compatible ? "yes" : "no"}`,
+        `native-agents-compatible: ${summary.native_agents_compatible ? "yes" : "no"}`,
+        `hash: ${summary.hash}`,
+        `description: ${summary.description}`
+      ].join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "validate") {
+      const file = filtered[0];
+      if (!file || filtered.length !== 1) {
+        throw new Error("Usage: gemini-companion.mjs roles validate <file> [--json]");
+      }
+      const pack = validateRolePackFile(file, { cwd: process.cwd(), mode: "validate" });
+      const summary = rolePackSummary(pack);
+      const payload = { ok: true, executable: false, reason: "User role packs are validate/inspect-only and are not executable by review commands.", rolePack: summary };
+      if (jsonOutput) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`ok: ${summary.name} validates; execution is not enabled for user-authored role packs\n`);
+      return;
+    }
+    throw new Error("Usage: gemini-companion.mjs roles list|inspect|validate [options]");
+  } catch (error) {
+    console.error(stripTerminalControls(error.message || String(error)));
+    process.exit(2);
+  }
+}
+
 function parseGateVerdict(rawOutput) {
   const text = String(rawOutput ?? "").trim();
   if (!text) {
@@ -2014,10 +2086,30 @@ async function runReviewGate(rawArgs) {
     return;
   }
 
-  const roles = DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
-    name,
-    directive: REVIEW_ROLES[name].directive
-  }));
+  let roles;
+  try {
+    if (args.rolePack !== undefined) {
+      const pack = resolveRolePack(args.rolePack);
+      if (!rolePackGateCompatible(pack)) {
+        process.stdout.write(`${JSON.stringify({
+          decision: "block",
+          reason: `Gemini review gate role pack "${pack.name}" is not gate-compatible.`
+        })}\n`);
+        return;
+      }
+      args.rolePackSummary = rolePackSummary(pack);
+      args.rolePack = pack;
+      roles = rolesForPack(pack);
+    } else {
+      roles = defaultRoleObjects();
+    }
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify({
+      decision: "block",
+      reason: `Gemini review gate role pack configuration error: ${error.message || String(error)}`
+    })}\n`);
+    return;
+  }
   args.scope = "working-tree";
   args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
 
@@ -2038,7 +2130,7 @@ async function runReviewGate(rawArgs) {
     }
     if (args.contextStrict && context.metadata.contextStatus !== "available" && context.metadata.contextStatus !== "disabled") {
       warnGate(`context provider unavailable in strict mode; allowing stop without Gemini: ${context.metadata.contextFailureReason}`);
-      writeOperationReport({ command: "review-gate", cwd, status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+      writeOperationReport({ command: "review-gate", cwd, status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata, rolePack: args.rolePackSummary });
       return;
     }
     if (context.metadata.contextDegraded) {
@@ -2077,7 +2169,7 @@ async function runReviewGate(rawArgs) {
     return;
   }
   setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
-  writeOperationReport({ command: "review-gate", cwd, status: 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+  writeOperationReport({ command: "review-gate", cwd, status: 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata, rolePack: args.rolePackSummary });
 }
 
 async function runGeminiTask(kind, rawArgs) {
@@ -2089,6 +2181,9 @@ async function runGeminiTask(kind, rawArgs) {
     args = parseArgs(rawArgs);
     if (kind !== "multi-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
+    }
+    if (kind !== "multi-review" && args.rolePack !== undefined) {
+      throw new Error("--role-pack is only valid for multi-review and manual review-gate.");
     }
     if (args.structuredReview && kind !== "review") {
       throw new Error("--structured is only valid for review.");
@@ -2208,12 +2303,21 @@ async function runGeminiMultiReview(rawArgs) {
       throw new Error("--structured is only valid for review.");
     }
     validateGeminiSessionOptions(args);
-    args.reviewRoles = args.roles === undefined
-      ? DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
-          name,
-          directive: REVIEW_ROLES[name].directive
-        }))
+    args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
+      ? defaultRoleObjects()
       : resolveReviewRoles(args);
+    if (args.nativeAgents && args.rolePackSummary) {
+      if (!rolePackNativeAgentsCompatible(args.rolePack)) {
+        throw new Error(`Role pack "${args.rolePack.name}" is not compatible with Gemini native agents.`);
+      }
+      const maxNativeAgents = args.rolePack.limits?.max_native_agents;
+      if (Number.isInteger(maxNativeAgents) && args.reviewRoles.length > maxNativeAgents) {
+        throw new Error(`Role pack "${args.rolePack.name}" has ${args.reviewRoles.length} roles, exceeding max_native_agents ${maxNativeAgents}.`);
+      }
+      if (!currentGeminiCapabilities().includeDirectories) {
+        throw new Error("Gemini native role-pack review requires Gemini CLI --include-directories support.");
+      }
+    }
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -2239,7 +2343,7 @@ async function runGeminiMultiReview(rawArgs) {
   }
   if (args.contextStrict && context.metadata.contextStatus !== "available" && context.metadata.contextStatus !== "disabled") {
     console.error(`Context provider unavailable in strict mode: ${context.metadata.contextFailureReason}`);
-    writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+    writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata, rolePack: args.rolePackSummary });
     process.exit(2);
   }
   let results;
@@ -2288,7 +2392,7 @@ async function runGeminiMultiReview(rawArgs) {
   ];
 
   process.stdout.write(`${sections.join("\n\n")}\n`);
-  writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: failed.length ? 1 : 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+  writeOperationReport({ command: "multi-review", cwd: process.cwd(), status: failed.length ? 1 : 0, geminiAvailable: hasGemini(), contextMetadata: context.metadata, rolePack: args.rolePackSummary });
   process.exit(failed.length ? 1 : 0);
 }
 
@@ -2539,6 +2643,9 @@ switch (command) {
     break;
   case "github-actions":
     runGithubActions(rawArgs);
+    break;
+  case "roles":
+    runRolesCommand(rawArgs);
     break;
   case "review":
     await runGeminiTask("review", rawArgs);

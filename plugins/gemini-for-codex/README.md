@@ -1,6 +1,6 @@
 # Gemini for Codex
 
-Codex plugin that invokes the local Gemini CLI for independent read-only review, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
+Codex plugin that invokes the local Gemini CLI for independent read-only review, reviewer role packs, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
 
 ## Requirements
 
@@ -43,8 +43,9 @@ The plugin sends bounded inline git context and does not depend on Gemini MCP or
 - `release-check`: run offline manifest, hook, docs, context-provider, and CI-template safety checks.
 - `review`: read-only review of current git changes or a branch diff. Add `--structured` for schema-validated rendered output or `--json` for machine-readable normalized JSON.
 - `github-actions`: render, initialize, validate, and consume fork-safe GitHub Actions PR review workflows.
+- `roles`: list, inspect, and validate Gemini reviewer role packs.
 - `adversarial-review`: skeptical multi-lens review.
-- `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
+- `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--role-pack <pack>` to select a built-in reviewer team, or `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
 - `plan`: independent implementation plan for Codex to reconcile.
 - `rescue`: read-only diagnosis for stuck implementation work. Explicit `--resume`, `--session-id`, and `--worktree` are forwarded only when the installed Gemini CLI reports support.
 - `recommend-execution-mode`: return JSON guidance for foreground versus background review sizing.
@@ -68,6 +69,27 @@ gemini-result <job-id>
 - `--native-agents` creates temporary Gemini subagent definitions for the selected roles and asks Gemini CLI to dispatch `@gfc_<role>` native subagents. The temporary agent workspace is outside the repository and is removed after the run.
 
 Both modes are read-only and use bounded git context. Native subagent mode passes the repository through `--include-directories` only when the installed Gemini CLI reports support for that flag.
+
+## Reviewer Role Packs
+
+Built-in role packs are plugin-managed Gemini reviewer presets:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs roles list
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs roles inspect release
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --role-pack release
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --native-agents --role-pack minimal
+```
+
+Available built-in packs are `default`, `security`, `release`, `frontend`, `backend`, `testing`, `docs`, and `minimal`. `frontend` and `docs` are presets over existing Gemini roles in this release, not separate dedicated lenses.
+
+User-authored role packs are validate/inspect-only in `0.7.0`:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs roles validate ~/.codex/gemini-for-codex/roles/custom.json
+```
+
+User packs cannot be executed with `multi-review` or `review-gate` yet. Validation rejects workspace-local files, symlink escapes, unknown fields, and any attempt to define tools, shell commands, hooks, environment variables, MCP servers, providers, extensions, permissions, backend behavior, or write behavior.
 
 ## Optional Context Providers
 
@@ -112,7 +134,7 @@ Write the default workflow only when requested:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
 ```
 
-The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.6.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`.
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.7.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`.
 
 ## Stop Hook
 

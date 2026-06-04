@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0 - 2026-06-04
+
+- Add built-in Gemini reviewer role packs with `roles list`, `roles inspect`, and `roles validate`.
+- Add `multi-review --role-pack` for built-in review presets and support role packs with Gemini native-agent dispatch.
+- Keep user-authored role packs validate/inspect-only; `--role-pack-file` is not executable in this release.
+- Preserve the existing default multi-review and bare review-gate behavior while rejecting gate-incompatible explicit role packs.
+
 ## 0.6.0 - 2026-06-04
 
 - Add `review --json` for machine-readable, schema-validated review output while preserving `review --structured` as rendered Markdown.
