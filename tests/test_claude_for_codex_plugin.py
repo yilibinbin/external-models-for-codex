@@ -1022,17 +1022,23 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.13.0"
+    assert data["version"] == "0.14.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
 
 
+def test_claude_manifest_version_is_014():
+    manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
+    assert manifest["version"] == "0.14.0"
+
+
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.13.0"
+    assert manifest["version"] == "0.14.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    root_readme = (ROOT / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
     zh = (ROOT / "docs" / "README.zh-CN.md").read_text(encoding="utf8")
     changelog = (PLUGIN / "CHANGELOG.md").read_text(encoding="utf8")
@@ -1049,10 +1055,33 @@ def test_version_and_docs_describe_forwarding_and_mcp():
         assert "GitHub Actions" in text
         assert "pull_request_target" in text
         assert "immutable" in text
+        assert "--agent-team sdk-subagents" in text
+        assert "--backend sdk" in text
+        assert "@anthropic-ai/claude-agent-sdk" in text
+        assert "--native-structured" in text
+        assert "--stream-progress" in text
+        assert "--confirm-cost" in text
+        assert "claude-ultrareview" in text or "ultrareview" in text
+
+    for text in (root_readme, readme, en, zh):
+        assert "--agent-team sdk-subagents" in text
+        assert "--backend sdk" in text
+        assert "@anthropic-ai/claude-agent-sdk" in text
+        assert "--native-structured" in text
+        assert "--stream-progress" in text
+        assert "--confirm-cost" in text
+        assert "ultrareview" in text
 
     assert "转发" in zh
     assert "MCP" in zh
     assert "只读 Git" in zh
+    assert "--agent-team sdk-subagents" in zh
+    assert "--backend sdk" in zh
+    assert "@anthropic-ai/claude-agent-sdk" in zh
+    assert "--native-structured" in zh
+    assert "--stream-progress" in zh
+    assert "--confirm-cost" in zh
+    assert "ultrareview" in zh
 
 
 def test_plugin_stop_hook_manifest_is_autodiscoverable():
@@ -3453,6 +3482,34 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
+def test_release_check_knows_claude_014_native_assets():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["manifest-version"]["detail"] == "version=0.14.0"
+    assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
+    detail = " ".join(check.get("detail", "") for check in payload["checks"])
+    assert "claude-ultrareview" in detail
+    assert "native assets/docs" in detail
+    assert "--agent-team sdk-subagents" in detail
+    assert "--confirm-cost" in detail
+    assert "@anthropic-ai/claude-agent-sdk" in detail
+    assert checks["native-review-helper"]["ok"] is True
+    assert checks["ultrareview-skill"]["ok"] is True
+    assert checks["native-cli-flags"]["ok"] is True
+    assert checks["native-sdk-package-compat"]["ok"] is True
+    assert checks["native-docs"]["ok"] is True
+
+
 def test_release_check_remote_install_uses_requested_immutable_ref(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     fake_bin = tmp_path / "bin"
@@ -3482,7 +3539,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.13.0"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.14.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -3491,10 +3548,10 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.13.0"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.14.0"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.13.0"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.14.0"
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):

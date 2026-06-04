@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+## 0.14.0 - 2026-06-04
+
+### Added
+
+- Add native SDK subagent review teams for `multi-review --backend sdk --agent-team sdk-subagents`.
+- Add package compatibility for `@anthropic-ai/claude-agent-sdk` while retaining the existing Claude SDK fallback path.
+- Add native structured and sanitized streaming progress options with `--native-structured` and `--stream-progress`.
+- Add `claude-ultrareview` skill and `ultrareview` runtime command for explicit Claude cloud ultrareview.
+
+### Safety
+
+- Keep SDK subagent mode explicit with `--backend sdk`; reject incompatible sequential and non-SDK combinations before Claude invocation.
+- Preserve read-only SDK boundaries for native subagents and omit raw SDK messages from reports.
+- Require `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` before ultrareview can run because it may use remote/cloud execution and usage-credit billing.
+
 ## 0.13.0 - 2026-06-04
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.

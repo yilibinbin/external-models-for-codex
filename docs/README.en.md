@@ -4,7 +4,7 @@ External Models for Codex is a Codex plugin marketplace for external model CLI w
 
 Included plugins:
 
-- Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, rescue diagnosis, structured review output, and optional Stop hook gates.
+- Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates.
 - Gemini for Codex lets Codex call the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode, bounded inline git context, schema-backed structured review, and capability-gated Gemini session flags.
 
 ## Installation
@@ -12,11 +12,11 @@ Included plugins:
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.13.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
-The immutable `claude-for-codex-v0.13.0` ref is intended for installing the Claude plugin slice from this multi-plugin marketplace. Install Gemini from its own release ref or from `main` during development.
+The immutable `claude-for-codex-v0.14.0` ref is intended for installing the Claude plugin slice from this multi-plugin marketplace. Install Gemini from its own release ref or from `main` during development.
 
 Upgrade an existing installation:
 
@@ -40,6 +40,7 @@ codex plugin add gemini-for-codex@external-models-for-codex
 
 - Codex CLI with plugin support
 - Claude Code CLI available as `claude`, configured with `CLAUDE_CODE_PATH`, or installed at `~/.local/bin/claude`
+- Optional `@anthropic-ai/claude-agent-sdk` package for Claude SDK native subagent mode; `@anthropic-ai/claude-code` remains supported as a compatibility fallback
 - Gemini CLI available as `gemini`, or configured with `GEMINI_CLI_PATH`, for Gemini for Codex
 - Node.js 20 or newer
 - A Git repository for review context collection
@@ -71,6 +72,8 @@ Gemini CLI resolution order:
 - `claude-adversarial-review`: challenge assumptions, tradeoffs, rollback paths, and hidden failure modes.
 - `claude-plan`: request an independent implementation plan before Codex edits.
 - `claude-multi-review`: run parallel role reviews for correctness, security, tests, release, and adversarial perspectives.
+- `claude-multi-review --backend sdk --agent-team sdk-subagents`: run a Claude native SDK subagent review team.
+- `claude-ultrareview`: run Claude cloud ultrareview only after explicit `--confirm-cost` consent for possible usage-credit billing.
 - `claude-rescue`: ask Claude for read-only recovery diagnosis or explicit `--write` repair.
 - `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
@@ -133,6 +136,10 @@ Read-only Claude review receives a strict MCP config for bounded Git inspection.
 
 `multi-review` runs role reviewers in parallel by default. `adversarial-review --parallel` runs skeptic, architect, and minimalist lens reviewers as independent Claude CLI processes and aggregates their outputs. Use `--sequential` when a deterministic one-at-a-time run is needed.
 
+Claude native SDK mode is explicit. Use `multi-review --backend sdk --agent-team sdk-subagents` to create native SDK subagents for the selected review roles. The runtime resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. Add `--native-structured` for SDK schema-backed aggregate output and `--stream-progress` for sanitized streaming progress without printing raw SDK chunks or storing raw SDK messages in reports.
+
+`ultrareview` forwards to Claude's native cloud ultrareview command. It is not used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because it may use remote/cloud execution and usage-credit billing.
+
 Claude reviewer role packs are built-in presets for `multi-review`. Use `roles list`, `roles inspect <pack>`, and `multi-review --role-pack <pack>` for presets such as `minimal`, `release`, `security`, and `default`. User-authored JSON packs can be validated with `roles validate <file>`, but they are validate/inspect-only and are not executable by review commands. Role packs are plugin-managed presets, not native Claude subagents, and cannot grant tools, shell commands, hooks, MCP servers, environment variables, backend mode, or write permissions.
 
 Mailbox and advisory leases are optional coordination metadata. `mailbox list|show|post` stores sanitized summaries only, not transcripts. `leases list|claim|release` declares path attention without locking files. Lease conflicts are warnings only and do not change review verdicts or `review-gate` behavior.
@@ -148,6 +155,7 @@ Use the Codex skills instead:
 - `claude-for-codex:claude-review`
 - `claude-for-codex:claude-adversarial-review`
 - `claude-for-codex:claude-multi-review`
+- `claude-for-codex:claude-ultrareview`
 - `claude-for-codex:claude-rescue`
 - `claude-for-codex:claude-status`
 - `claude-for-codex:claude-result`
@@ -188,6 +196,8 @@ The Stop gate uses the `UserPromptSubmit` turn-baseline fingerprint to avoid rev
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --native-structured --stream-progress --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs ultrareview --confirm-cost --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --background --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs jobs
 node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
@@ -202,4 +212,4 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the f
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
-`capabilities` reports Claude CLI flags, optional SDK backend availability, Git/GitHub CLI, hooks, MCP, and optional semantic-provider diagnostics without initializing providers. CLI remains the default backend; `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk` explicitly selects the Claude SDK backend when it can preserve the read-only tool and Git MCP boundary. Semantic context is off by default; use `--semantic-context <provider>` only with a repo-external argv-array provider config. Semantic context is advisory, provider failures degrade confidence rather than normal review execution, and `review-gate` records degraded metadata such as `DEGRADED_PASS` when semantic context fails. `report --latest` reads a sanitized repo-external report; prompts, diffs, raw model output, source code, environment variables, semantic snippets, raw SDK messages, and raw absolute workspace paths are omitted by default. `github-actions render|init|validate` manages a GitHub Actions PR review template with immutable release refs, no default `pull_request_target`, fork PR Claude/comment/annotation skipping, env-mapped GitHub context, sanitized comments, and optional Checks annotations. `release-check --ci-simulate` validates those GitHub Actions assumptions offline without live GitHub API calls or secrets. `release-check` validates release hygiene and skips remote install smoke unless explicitly requested.
+`capabilities` reports Claude CLI flags, optional SDK backend availability, native subagent capability probes, Git/GitHub CLI, hooks, MCP, and optional semantic-provider diagnostics without initializing providers. CLI remains the default backend; `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk` explicitly selects the Claude SDK backend when it can preserve the read-only tool and Git MCP boundary. SDK native subagent review additionally requires `--agent-team sdk-subagents`. Semantic context is off by default; use `--semantic-context <provider>` only with a repo-external argv-array provider config. Semantic context is advisory, provider failures degrade confidence rather than normal review execution, and `review-gate` records degraded metadata such as `DEGRADED_PASS` when semantic context fails. `report --latest` reads a sanitized repo-external report; prompts, diffs, raw model output, source code, environment variables, semantic snippets, raw SDK messages, and raw absolute workspace paths are omitted by default. `github-actions render|init|validate` manages a GitHub Actions PR review template with immutable release refs, no default `pull_request_target`, fork PR Claude/comment/annotation skipping, env-mapped GitHub context, sanitized comments, and optional Checks annotations. `release-check --ci-simulate` validates those GitHub Actions assumptions offline without live GitHub API calls or secrets. `release-check` validates release hygiene and skips remote install smoke unless explicitly requested.

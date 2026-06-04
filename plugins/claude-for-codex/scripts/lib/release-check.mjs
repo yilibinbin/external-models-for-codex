@@ -6,7 +6,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.13.0";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.0";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -21,7 +21,8 @@ const EXPECTED_SKILLS = [
   "claude-review",
   "claude-review-gate",
   "claude-role-packs",
-  "claude-status"
+  "claude-status",
+  "claude-ultrareview"
 ];
 
 function readJson(file) {
@@ -83,8 +84,8 @@ function checkManifest(root) {
   const unreleased = changelog.match(/^## Unreleased\s*([\s\S]*?)(?=^##\s|\Z)/m);
   const unreleasedBody = unreleased ? unreleased[1].trim() : "";
   const checks = [
-    result(manifest.version === "0.13.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.13.0"), "changelog-version", "CHANGELOG contains 0.13.0"),
+    result(manifest.version === "0.14.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.14.0"), "changelog-version", "CHANGELOG contains 0.14.0"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -150,6 +151,50 @@ function checkDocs(root) {
     checks.push(result(!/\/Users\/fanghao/.test(text), `docs-no-local-path-${doc.label}`));
   }
   return checks;
+}
+
+function checkNativeReleaseAssets(root) {
+  const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
+  const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
+  const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
+  const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
+  const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
+  const docSpecs = installedPluginOnly
+    ? [{ base: pluginRoot, file: "README.md" }]
+    : [
+        { base: repoRoot, file: "README.md" },
+        { base: repoRoot, file: "docs/README.en.md" },
+        { base: repoRoot, file: "docs/README.zh-CN.md" },
+        { base: pluginRoot, file: "README.md" }
+      ];
+  const requiredDocMarkers = [
+    "--agent-team sdk-subagents",
+    "--backend sdk",
+    "@anthropic-ai/claude-agent-sdk",
+    "--native-structured",
+    "--stream-progress",
+    "--confirm-cost"
+  ];
+  const docsOk = docSpecs.every(({ base, file }) => {
+    const text = fs.readFileSync(path.join(base, file), "utf8");
+    return requiredDocMarkers.every((marker) => text.includes(marker));
+  });
+  const detail = "claude-ultrareview; native assets/docs include --agent-team sdk-subagents, --confirm-cost, @anthropic-ai/claude-agent-sdk";
+  return [
+    result(fs.existsSync(nativeHelper), "native-review-helper", path.relative(pluginRoot, nativeHelper)),
+    result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
+    result(
+      companion.includes("--agent-team") &&
+        companion.includes("sdk-subagents") &&
+        companion.includes("--native-structured") &&
+        companion.includes("--stream-progress") &&
+        companion.includes("--confirm-cost"),
+      "native-cli-flags",
+      detail
+    ),
+    result(backend.includes("@anthropic-ai/claude-agent-sdk"), "native-sdk-package-compat", "@anthropic-ai/claude-agent-sdk"),
+    result(docsOk, "native-docs", detail)
+  ];
 }
 
 function checkSecrets(root) {
@@ -281,6 +326,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkManifest(root),
     ...checkHooks(root),
     ...checkDocs(root),
+    ...checkNativeReleaseAssets(root),
     ...checkSecrets(root),
     ...checkSkills(root),
     ...checkRolePacks(),

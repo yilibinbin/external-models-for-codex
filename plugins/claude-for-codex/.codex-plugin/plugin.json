@@ -1,7 +1,7 @@
 {
   "name": "claude-for-codex",
-  "version": "0.13.0",
-  "description": "Use Claude Code from Codex for read-only review, adversarial review, role-pack review teams, advisory mailbox/leases, planning, optional SDK backend, GitHub Actions PR review templates, rescue, and tracked job workflows.",
+  "version": "0.14.0",
+  "description": "Use Claude Code from Codex for read-only review, adversarial review, native SDK subagent teams, role-pack review teams, advisory mailbox/leases, planning, optional SDK backend, GitHub Actions PR review templates, rescue, ultrareview, and tracked job workflows.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -23,7 +23,7 @@
   "interface": {
     "displayName": "Claude for Codex",
     "shortDescription": "Claude Code reviews, planning, and stop-gate workflows for Codex.",
-    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, background job tracking, lifecycle hooks, capability diagnostics, optional semantic context, sanitized review reports, release checks, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict.",
+    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, native SDK subagent review teams, background job tracking, lifecycle hooks, capability diagnostics, optional semantic context, sanitized review reports, release checks, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, native SDK mode is explicit, ultrareview requires cost consent, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
@@ -32,6 +32,7 @@
       "Implementation planning",
       "Read-only rescue diagnosis",
       "Multi-role review orchestration",
+      "Native SDK subagent review teams",
       "Reviewer role packs",
       "Sanitized mailbox coordination",
       "Advisory review leases",
@@ -41,6 +42,7 @@
       "Capability diagnostics",
       "Optional semantic context",
       "Optional Claude SDK backend",
+      "Explicit-cost Claude ultrareview",
       "GitHub Actions PR review workflow templates",
       "Sanitized review reports",
       "Release checks",
@@ -52,6 +54,8 @@
       "Use Claude to review the current git changes.",
       "Ask Claude to challenge this implementation plan.",
       "Run a multi-role Claude review across correctness, security, tests, release, and adversarial perspectives.",
+      "Run a native SDK subagent review team with structured and streaming progress output.",
+      "Run Claude ultrareview only after explicit consent for possible usage-credit billing.",
       "Inspect Claude reviewer role packs and run a built-in pack such as minimal or release.",
       "Generate a fork-safe GitHub Actions PR review workflow.",
       "Check tracked Claude jobs and retrieve a stored result by job id.",
