@@ -73,6 +73,7 @@ Gemini CLI resolution order:
 - `claude-rescue`: ask Claude for read-only recovery diagnosis or explicit `--write` repair.
 - `claude-status`, `claude-result`, `claude-cancel`: track background Claude jobs.
 - `claude-review-gate`: configure the optional Stop hook review gate.
+- `claude-github-actions-review`: generate or validate a fork-safe GitHub Actions PR review workflow.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
 - `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini-native session flags are capability-gated from the installed CLI.
 
@@ -188,8 +189,12 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs capabilities
 node plugins/claude-for-codex/scripts/claude-companion.mjs report --latest
 node plugins/claude-for-codex/scripts/claude-companion.mjs release-check
+node plugins/claude-for-codex/scripts/claude-companion.mjs release-check --ci-simulate
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions render
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions init --write
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions validate
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
-`capabilities` reports Claude CLI flags, Git/GitHub CLI, hooks, MCP, and optional semantic-provider diagnostics without initializing providers. Semantic context is off by default; use `--semantic-context <provider>` only with a repo-external argv-array provider config. Semantic context is advisory, provider failures degrade confidence rather than normal review execution, and `review-gate` records degraded metadata such as `DEGRADED_PASS` when semantic context fails. `report --latest` reads a sanitized repo-external report; prompts, diffs, raw model output, source code, environment variables, semantic snippets, and raw absolute workspace paths are omitted by default. `release-check` validates release hygiene and skips remote install smoke unless explicitly requested.
+`capabilities` reports Claude CLI flags, Git/GitHub CLI, hooks, MCP, and optional semantic-provider diagnostics without initializing providers. Semantic context is off by default; use `--semantic-context <provider>` only with a repo-external argv-array provider config. Semantic context is advisory, provider failures degrade confidence rather than normal review execution, and `review-gate` records degraded metadata such as `DEGRADED_PASS` when semantic context fails. `report --latest` reads a sanitized repo-external report; prompts, diffs, raw model output, source code, environment variables, semantic snippets, and raw absolute workspace paths are omitted by default. `github-actions render|init|validate` manages a GitHub Actions PR review template with immutable release refs, no default `pull_request_target`, fork PR Claude/comment/annotation skipping, env-mapped GitHub context, sanitized comments, and optional Checks annotations. `release-check --ci-simulate` validates those GitHub Actions assumptions offline without live GitHub API calls or secrets. `release-check` validates release hygiene and skips remote install smoke unless explicitly requested.

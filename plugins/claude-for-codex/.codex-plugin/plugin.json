@@ -1,7 +1,7 @@
 {
   "name": "claude-for-codex",
-  "version": "0.9.0",
-  "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, rescue, and tracked job workflows.",
+  "version": "0.10.0",
+  "description": "Use Claude Code from Codex for read-only review, adversarial review, planning, GitHub Actions PR review templates, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -37,6 +37,7 @@
       "Tracked background job status/result/cancel commands",
       "Capability diagnostics",
       "Optional semantic context",
+      "GitHub Actions PR review workflow templates",
       "Sanitized review reports",
       "Release checks",
       "Session lifecycle and unread-result hooks",
@@ -47,6 +48,7 @@
       "Use Claude to review the current git changes.",
       "Ask Claude to challenge this implementation plan.",
       "Run a multi-role Claude review across correctness, security, tests, release, and adversarial perspectives.",
+      "Generate a fork-safe GitHub Actions PR review workflow.",
       "Check tracked Claude jobs and retrieve a stored result by job id.",
       "Enable the opt-in Claude Stop review gate for this repository.",
       "Run a Codex-Claude collaboration loop and reconcile the findings."

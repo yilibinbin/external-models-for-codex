@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { renderWorkflow, validateWorkflow } from "./github-actions.mjs";
 
 const SECRET_PATTERNS = [
   { name: "private-key", pattern: /BEGIN (RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY/ },
@@ -56,8 +57,8 @@ function checkManifest(root) {
   const manifest = readJson(path.join(root, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(root, "plugins", "claude-for-codex", "CHANGELOG.md"), "utf8");
   const checks = [
-    result(manifest.version === "0.9.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.9.0"), "changelog-version", "CHANGELOG contains 0.9.0"),
+    result(manifest.version === "0.10.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.10.0"), "changelog-version", "CHANGELOG contains 0.10.0"),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
   ];
@@ -148,12 +149,31 @@ function checkSkills(root) {
   const skillsDir = path.join(root, "plugins", "claude-for-codex", "skills");
   const skills = fs.readdirSync(skillsDir).filter((name) => fs.existsSync(path.join(skillsDir, name, "SKILL.md")));
   return [
-    result(skills.length === 10, "skill-count", String(skills.length)),
+    result(skills.length === 11, "skill-count", String(skills.length)),
     ...skills.map((skill) => {
       const text = fs.readFileSync(path.join(skillsDir, skill, "SKILL.md"), "utf8");
       return result(text.startsWith("---") && text.includes("claude-companion.mjs"), `skill-${skill}`);
     })
   ];
+}
+
+function checkGithubActionsCi(root) {
+  const pluginRoot = path.join(root, "plugins", "claude-for-codex");
+  const defaultWorkflow = renderWorkflow(pluginRoot);
+  const annotationWorkflow = renderWorkflow(pluginRoot, { annotations: true });
+  const validation = validateWorkflow(defaultWorkflow);
+  const annotationValidation = validateWorkflow(annotationWorkflow, { annotations: true });
+  const checks = [
+    result(validation.ok && annotationValidation.ok, "github-actions-template-safe"),
+    result(validation.checks.some((check) => check.name === "github-actions-fork-safe" && check.ok), "github-actions-fork-safe"),
+    result(validation.checks.some((check) => check.name === "immutable-release-ref" && check.ok), "github-actions-immutable-ref"),
+    result(defaultWorkflow.includes("ubuntu-latest") && defaultWorkflow.includes("npm install -g @openai/codex"), "github-actions-runner-sim"),
+    result(!/\/Users\/fanghao/.test(defaultWorkflow), "github-actions-no-local-paths"),
+    result(!defaultWorkflow.includes("pull_request_target"), "github-actions-no-pull-request-target"),
+    result(defaultWorkflow.includes("BASE_SHA: ${{ github.event.pull_request.base.sha }}"), "github-actions-base-sha-env"),
+    result(defaultWorkflow.includes("retention-days: 5"), "github-actions-short-artifact-retention")
+  ];
+  return checks;
 }
 
 function checkPrompts(root) {
@@ -205,6 +225,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkSkills(root),
     ...checkPrompts(root),
     ...checkSemanticFixtures(root),
+    ...(options.ciSimulate ? checkGithubActionsCi(root) : []),
     ...remoteInstallSmoke(root, options)
   ];
   return {

@@ -24,6 +24,15 @@ import { renderPromptTemplate } from "./lib/prompt-template.mjs";
 import { latestReport, listReports, reportFromResult, safeWriteReport } from "./lib/reports.mjs";
 import { runReleaseCheck } from "./lib/release-check.mjs";
 import {
+  readReviewJson,
+  renderReviewComment,
+  renderWorkflow,
+  reviewToAnnotations,
+  validateWorkflow,
+  workflowPath,
+  writeWorkflow
+} from "./lib/github-actions.mjs";
+import {
   aggregateRoleReviewOutputs,
   normalizeAdversarialOutput,
   normalizeReviewOutput
@@ -47,7 +56,7 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -1310,6 +1319,7 @@ function runReleaseCheckCommand(rawArgs) {
   const options = {
     remoteInstall: false,
     requireRemoteInstall: false,
+    ciSimulate: false,
     timeoutMs: 30000
   };
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1319,6 +1329,8 @@ function runReleaseCheckCommand(rawArgs) {
     } else if (token === "--require-remote-install") {
       options.remoteInstall = true;
       options.requireRemoteInstall = true;
+    } else if (token === "--ci-simulate") {
+      options.ciSimulate = true;
     } else if (token === "--timeout-ms") {
       options.timeoutMs = Number(readOptionValue(tokens, index, token));
       index += 1;
@@ -1336,6 +1348,115 @@ function runReleaseCheckCommand(rawArgs) {
   const payload = runReleaseCheck(path.resolve(pluginRoot(), "..", ".."), options);
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.ok ? 0 : 1);
+}
+
+function parseGithubActionsOptions(tokens) {
+  const options = {
+    write: false,
+    force: false,
+    annotations: false,
+    multiReview: false,
+    roles: "correctness,security,tests",
+    model: "",
+    effort: "",
+    semanticContext: "off",
+    timeoutMinutes: 30,
+    releaseRef: undefined,
+    input: ""
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--write") {
+      options.write = true;
+    } else if (token === "--force") {
+      options.force = true;
+    } else if (token === "--annotations") {
+      options.annotations = true;
+    } else if (token === "--multi-review") {
+      options.multiReview = true;
+    } else if (token === "--roles") {
+      options.roles = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--model") {
+      options.model = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--effort") {
+      options.effort = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--semantic-context") {
+      options.semanticContext = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--timeout-minutes") {
+      options.timeoutMinutes = Number(readOptionValue(tokens, index, token));
+      index += 1;
+    } else if (token === "--ref") {
+      options.releaseRef = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--input") {
+      options.input = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--json") {
+      // JSON is the only structured validation output.
+    } else {
+      throw new Error(`Unknown github-actions option "${token}".`);
+    }
+  }
+  return options;
+}
+
+function runGithubActionsCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const subcommand = tokens.shift();
+  if (!subcommand || !["render", "init", "validate", "render-comment", "render-annotations"].includes(subcommand)) {
+    console.error("Usage: claude-companion.mjs github-actions render|init|validate|render-comment|render-annotations [options]");
+    process.exit(2);
+  }
+  let options;
+  try {
+    options = parseGithubActionsOptions(tokens);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  try {
+    if (subcommand === "render") {
+      process.stdout.write(renderWorkflow(pluginRoot(), options));
+      return;
+    }
+    if (subcommand === "init") {
+      const text = renderWorkflow(pluginRoot(), options);
+      if (!options.write) {
+        process.stdout.write(`${JSON.stringify({ ok: true, written: false, path: workflowPath(process.cwd()) }, null, 2)}\n`);
+        return;
+      }
+      const target = writeWorkflow(process.cwd(), text, { force: options.force });
+      process.stdout.write(`${JSON.stringify({ ok: true, written: true, path: target }, null, 2)}\n`);
+      return;
+    }
+    if (subcommand === "validate") {
+      const target = workflowPath(process.cwd());
+      const text = fs.existsSync(target) ? fs.readFileSync(target, "utf8") : renderWorkflow(pluginRoot(), options);
+      const payload = validateWorkflow(text, options);
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      process.exit(payload.ok ? 0 : 1);
+    }
+    if (subcommand === "render-comment") {
+      if (!options.input) {
+        throw new Error("render-comment requires --input <review-json>.");
+      }
+      process.stdout.write(`${renderReviewComment(readReviewJson(options.input))}\n`);
+      return;
+    }
+    if (subcommand === "render-annotations") {
+      if (!options.input) {
+        throw new Error("render-annotations requires --input <review-json>.");
+      }
+      process.stdout.write(`${JSON.stringify(reviewToAnnotations(readReviewJson(options.input)), null, 2)}\n`);
+    }
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(subcommand === "init" ? 1 : 2);
+  }
 }
 
 function parseGateVerdict(rawOutput) {
@@ -2029,6 +2150,9 @@ switch (command) {
     break;
   case "release-check":
     runReleaseCheckCommand(rawArgs);
+    break;
+  case "github-actions":
+    runGithubActionsCommand(rawArgs);
     break;
   case "__run-job":
     runJobWorker(rawArgs);

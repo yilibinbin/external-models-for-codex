@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.9.0`
+- Current version: `0.10.0`
 
 Published capabilities:
 
@@ -27,6 +27,7 @@ Published capabilities:
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
 - Capability diagnostics for Claude CLI, Git, GitHub CLI, hooks, MCP, and optional semantic providers.
 - Optional semantic context for review commands, disabled by default.
+- GitHub Actions PR review workflow templates with fork-safe defaults.
 - Sanitized per-run review reports that omit prompts, diffs, raw model output, and secrets by default.
 - Release checks for manifest, hook, docs, prompt, skill, and secret-scan hygiene.
 - Background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
@@ -42,6 +43,7 @@ Safety and operating model:
 - The Stop gate is disabled by default after installation.
 - Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
 - The Stop gate reviews current git working-tree changes, not an exact previous-turn file list.
+- Generated GitHub Actions workflows use `pull_request`, avoid default `pull_request_target`, pin immutable release refs, and skip fork PR Claude/comment/annotation steps by default.
 
 Important routing note:
 
@@ -135,6 +137,7 @@ Then remove or downgrade the plugin through Codex. If Codex Settings > Hooks sti
 - `claude-result`: retrieve a tracked Claude job result by job id.
 - `claude-cancel`: cancel only when the runtime can safely validate the job state.
 - `claude-review-gate`: configure the opt-in Stop-time Claude review gate.
+- `claude-github-actions-review`: generate or validate fork-safe GitHub Actions PR review workflows.
 - `claude-plan`: independent Claude implementation plan for Codex reconciliation.
 - `claude-collaboration-loop`: full plan, reconcile, implement, adversarial review, report workflow.
 
@@ -158,6 +161,10 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs cancel <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs capabilities
 node plugins/claude-for-codex/scripts/claude-companion.mjs report --latest
 node plugins/claude-for-codex/scripts/claude-companion.mjs release-check
+node plugins/claude-for-codex/scripts/claude-companion.mjs release-check --ci-simulate
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions render
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions init --write
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions validate
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin and include tests
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
@@ -176,7 +183,11 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `report --latest` reads the latest sanitized review report from the repo-external plugin data directory. Reports are minimal metadata only: command, scope, roles/lenses, backend, model/effort, timestamps, exit status, output byte counts, and structured verdict/finding counts when available. Reports do not store prompts, source code, diffs, raw model output, environment variables, or raw absolute workspace paths by default. Set `CLAUDE_FOR_CODEX_NO_TELEMETRY=1` to disable all non-job report writes.
 
-`release-check` validates release hygiene for this repository. Remote install smoke is skipped by default for local development; use `--remote-install` for a fail-soft smoke or `--require-remote-install` when a release must fail if GitHub install fails.
+`github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
+
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.10.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install` for a fail-soft smoke or `--require-remote-install` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

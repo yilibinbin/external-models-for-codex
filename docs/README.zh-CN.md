@@ -73,6 +73,7 @@ Gemini CLI 查找顺序：
 - `claude-rescue`：让 Claude 做只读故障诊断，或在显式 `--write` 时执行修复。
 - `claude-status`、`claude-result`、`claude-cancel`：跟踪后台 Claude job。
 - `claude-review-gate`：配置可选 Stop Hook 审阅门禁。
+- `claude-github-actions-review`：生成或校验 fork-safe GitHub Actions PR 审阅工作流。
 - `claude-collaboration-loop`：执行规划、对齐、实现、审阅、报告的 Codex-Claude 协作流程。
 - `gemini-review`、`gemini-adversarial-review`、`gemini-plan`、`gemini-multi-review`、`gemini-rescue`：对应的 Gemini CLI 复审/规划能力；Gemini rescue 保持只读。`gemini-review --structured` 会验证 schema-backed findings，`gemini-multi-review` 默认并行运行角色 fan-out，也支持 `--native-agents`，Gemini 原生 session flags 会按当前 CLI 能力探测启用。
 
@@ -188,8 +189,12 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs result <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs capabilities
 node plugins/claude-for-codex/scripts/claude-companion.mjs report --latest
 node plugins/claude-for-codex/scripts/claude-companion.mjs release-check
+node plugins/claude-for-codex/scripts/claude-companion.mjs release-check --ci-simulate
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions render
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions init --write
+node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions validate
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan "implement the feature and include tests"
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
 
-`capabilities` 输出 Claude CLI flags、Git/GitHub CLI、hooks、MCP 和可选语义 provider 诊断，但不会初始化 provider。语义上下文默认关闭；只有配置 repo 外 argv-array provider 后，才使用 `--semantic-context <provider>` 显式启用。语义上下文只是辅助信息，provider 失败会降低审阅可信度但不阻断普通审阅；如果 `review-gate` 的语义上下文失败，会记录 `DEGRADED_PASS` 等降级元数据。`report --latest` 读取 repo 外的脱敏报告；默认不保存 prompt、diff、模型原文、源码、环境变量、语义片段或原始绝对工作区路径。`release-check` 校验发布卫生，除非显式要求，否则跳过远端安装 smoke。
+`capabilities` 输出 Claude CLI flags、Git/GitHub CLI、hooks、MCP 和可选语义 provider 诊断，但不会初始化 provider。语义上下文默认关闭；只有配置 repo 外 argv-array provider 后，才使用 `--semantic-context <provider>` 显式启用。语义上下文只是辅助信息，provider 失败会降低审阅可信度但不阻断普通审阅；如果 `review-gate` 的语义上下文失败，会记录 `DEGRADED_PASS` 等降级元数据。`report --latest` 读取 repo 外的脱敏报告；默认不保存 prompt、diff、模型原文、源码、环境变量、语义片段或原始绝对工作区路径。`github-actions render|init|validate` 管理 GitHub Actions PR 审阅模板，默认使用不可变 release ref，不默认启用 `pull_request_target`，fork PR 会跳过 Claude、评论和 annotation，GitHub context 先映射到环境变量再进入 shell，评论会脱敏清洗，Checks annotations 需要显式开启。`release-check --ci-simulate` 离线验证这些 GitHub Actions 假设，不调用真实 GitHub API、不需要 secrets、不依赖用户 HOME 或本地 Codex cache。`release-check` 校验发布卫生，除非显式要求，否则跳过远端安装 smoke。

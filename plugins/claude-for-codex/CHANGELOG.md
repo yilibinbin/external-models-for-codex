@@ -4,6 +4,15 @@
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.10.0 - 2026-06-04
+
+- Add `github-actions render|init|validate` for fork-safe Claude PR review workflow templates.
+- Add offline PR comment and Checks annotation rendering helpers with markdown, HTML, local-path, and annotation-path sanitization.
+- Extend `release-check` with fixture-driven `--ci-simulate` validation for GitHub Actions workflow assumptions.
+- Add `claude-github-actions-review` skill guidance for installing, validating, and reviewing generated workflows.
+- Keep generated workflows on `pull_request` and validate against accidental `pull_request_target` usage.
+- Pin generated workflow installs to immutable release refs instead of mutable `main`.
+
 ## 0.9.0 - 2026-06-04
 
 - Add optional semantic context for `review`, `multi-review`, `adversarial-review`, and `review-gate`.

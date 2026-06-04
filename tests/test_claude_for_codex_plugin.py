@@ -680,7 +680,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.9.0"
+    assert data["version"] == "0.10.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -688,7 +688,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.9.0"
+    assert manifest["version"] == "0.10.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -704,6 +704,9 @@ def test_version_and_docs_describe_forwarding_and_mcp():
         assert "report --latest" in text
         assert "release-check" in text
         assert "semantic context" in text.lower()
+        assert "GitHub Actions" in text
+        assert "pull_request_target" in text
+        assert "immutable" in text
 
     assert "转发" in zh
     assert "MCP" in zh
@@ -727,7 +730,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "reserve-job", "run-reserved-job"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -2091,6 +2094,250 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["semantic-fixture-safe"]["ok"] is True
     assert checks["semantic-fixture-unsafe"]["ok"] is True
     assert checks["remote-install-smoke"]["detail"] == "skipped"
+
+
+def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / ".github" / "workflows" / "claude-for-codex-review.yml").exists()
+    text = result.stdout
+    assert "pull_request:" in text
+    assert "pull_request_target" not in text
+    assert "permissions:" in text
+    assert "contents: read" in text
+    assert "pull-requests: write" in text
+    assert "checks: write" not in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.10.0" in text
+    assert "codex plugin add claude-for-codex@external-models-for-codex" in text
+    assert "github.event.pull_request.base.sha" in text
+    assert "fetch-depth: 0" in text
+    assert "retention-days: 5" in text
+    assert "github.*" not in text
+    assert "/Users/fanghao" not in text
+
+    run_blocks = re.findall(r"run: \|\n((?:        .+\n)+)", text)
+    assert run_blocks
+    assert all("${{ github." not in block for block in run_blocks)
+    assert "$BASE_SHA" in text
+    assert '"$BASE_SHA"' in text
+    assert "$HEAD_REPO" in text
+    assert "$BASE_REPO" in text
+
+
+def test_github_actions_init_write_and_force(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    no_write = subprocess.run(
+        [NODE, str(runtime), "github-actions", "init"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert no_write.returncode == 0, no_write.stderr
+    workflow = repo / ".github" / "workflows" / "claude-for-codex-review.yml"
+    assert not workflow.exists()
+
+    write = subprocess.run(
+        [NODE, str(runtime), "github-actions", "init", "--write"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert write.returncode == 0, write.stderr
+    assert workflow.exists()
+    assert "claude-for-codex-v0.10.0" in workflow.read_text(encoding="utf8")
+
+    overwrite = subprocess.run(
+        [NODE, str(runtime), "github-actions", "init", "--write"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert overwrite.returncode == 1
+    assert "already exists" in overwrite.stderr
+
+    forced = subprocess.run(
+        [NODE, str(runtime), "github-actions", "init", "--write", "--force", "--annotations"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert forced.returncode == 0, forced.stderr
+    workflow_text = workflow.read_text(encoding="utf8")
+    assert "checks: write" in workflow_text
+    assert "github.rest.checks.create" in workflow_text
+    assert "withBackoff" in workflow_text
+
+
+def test_github_actions_validate_rejects_unsafe_workflows(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    workflow_dir = repo / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    workflow = workflow_dir / "claude-for-codex-review.yml"
+
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    workflow.write_text(rendered.stdout, encoding="utf8")
+
+    valid = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert valid.returncode == 0, valid.stderr
+    assert json.loads(valid.stdout)["ok"] is True
+
+    workflow.write_text("on:\n  pull_request_target:\njobs:\n  review:\n    permissions:\n      contents: read\n", encoding="utf8")
+    invalid = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid.returncode == 1
+    checks = {check["name"]: check for check in json.loads(invalid.stdout)["checks"]}
+    assert checks["no-pull-request-target"]["ok"] is False
+
+    unsafe = rendered.stdout.replace('echo "Base SHA: $BASE_SHA"', 'echo "${{ github.event.pull_request.head.ref }}"')
+    workflow.write_text(unsafe, encoding="utf8")
+    invalid = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid.returncode == 1
+    checks = {check["name"]: check for check in json.loads(invalid.stdout)["checks"]}
+    assert checks["no-github-context-in-run"]["ok"] is False
+
+
+def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    workflow_dir = repo / ".github" / "workflows"
+    workflow_dir.mkdir(parents=True)
+    workflow = workflow_dir / "claude-for-codex-review.yml"
+
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    workflow.write_text(
+        rendered.stdout.replace("--ref claude-for-codex-v0.10.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        encoding="utf8",
+    )
+
+    invalid = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert invalid.returncode == 1
+    checks = {check["name"]: check for check in json.loads(invalid.stdout)["checks"]}
+    assert checks["immutable-release-ref"]["ok"] is False
+    assert checks["no-local-absolute-paths"]["ok"] is False
+
+
+def test_github_actions_comment_and_annotation_sanitization():
+    module = PLUGIN / "scripts" / "lib" / "github-actions.mjs"
+    review = {
+        "verdict": "needs-attention",
+        "summary": "<script>alert(1)</script> fix branch `$(rm -rf /)`",
+        "findings": [
+            {
+                "severity": "high",
+                "title": "Unsafe <b>path</b>",
+                "file": "src/app.js",
+                "line": 7,
+                "end_line": 8,
+                "recommendation": "Quote `BASE_SHA`; do not leak /Users/fanghao/secret",
+            },
+            {
+                "severity": "critical",
+                "title": "Traversal",
+                "file": "../secret.txt",
+                "line": 1,
+                "recommendation": "bad",
+            },
+            {
+                "severity": "medium",
+                "title": "Windows",
+                "file": "C:\\\\secret.txt",
+                "line": 2,
+                "recommendation": "bad",
+            },
+        ],
+        "raw_output": "must not appear",
+        "prompt": "must not appear",
+    }
+    script = f"""
+import {{ renderReviewComment, reviewToAnnotations }} from {json.dumps(module.as_posix())};
+const review = {json.dumps(review)};
+console.log(JSON.stringify({{ comment: renderReviewComment(review), annotations: reviewToAnnotations(review) }}));
+"""
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "<script>" not in payload["comment"]
+    assert "&lt;script&gt;" in payload["comment"]
+    assert "/Users/fanghao" not in payload["comment"]
+    assert "must not appear" not in payload["comment"]
+    assert payload["annotations"] == [
+        {
+            "path": "src/app.js",
+            "start_line": 7,
+            "end_line": 8,
+            "annotation_level": "failure",
+            "title": "Unsafe &lt;b&gt;path&lt;/b&gt;",
+            "message": "Quote `BASE_SHA`; do not leak [local-path]",
+        }
+    ]
+
+
+def test_release_check_ci_simulate_passes():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check", "--ci-simulate"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["github-actions-template-safe"]["ok"] is True
+    assert checks["github-actions-fork-safe"]["ok"] is True
+    assert checks["github-actions-immutable-ref"]["ok"] is True
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
@@ -3603,9 +3850,10 @@ def test_all_skills_have_frontmatter_and_runtime_call():
     skills = sorted((PLUGIN / "skills").glob("*/SKILL.md"))
     expected_commands = {
         "claude-adversarial-review": "adversarial-review",
-        "claude-cancel": "cancel",
-        "claude-collaboration-loop": "plan",
-        "claude-multi-review": "multi-review",
+            "claude-cancel": "cancel",
+            "claude-collaboration-loop": "plan",
+            "claude-github-actions-review": "github-actions",
+            "claude-multi-review": "multi-review",
         "claude-plan": "plan",
         "claude-rescue": "rescue",
         "claude-result": "result",
@@ -3615,9 +3863,10 @@ def test_all_skills_have_frontmatter_and_runtime_call():
     }
     assert {p.parent.name for p in skills} == {
         "claude-adversarial-review",
-        "claude-cancel",
-        "claude-collaboration-loop",
-        "claude-multi-review",
+            "claude-cancel",
+            "claude-collaboration-loop",
+            "claude-github-actions-review",
+            "claude-multi-review",
         "claude-plan",
         "claude-rescue",
         "claude-result",
