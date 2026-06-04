@@ -572,6 +572,89 @@ def test_ultrareview_requires_explicit_consent(tmp_path):
     assert "--confirm-cost" in result.stderr
 
 
+def test_ultrareview_runs_only_with_cost_consent(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+sys.stderr.write("session: https://claude.example/session\\n")
+print('{"verdict":"ok"}')
+"""
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "ultrareview",
+            "--confirm-cost",
+            "--json",
+            "--timeout",
+            "7",
+            "origin/main",
+        ],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == '{"verdict":"ok"}\n'
+    assert "session: https://claude.example/session" in result.stderr
+    assert json.loads((capture_dir / "argv.json").read_text()) == [
+        "ultrareview",
+        "--json",
+        "--timeout",
+        "7",
+        "origin/main",
+    ]
+
+
+def test_ultrareview_rejects_unsupported_option(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "ultrareview", "--confirm-cost", "--model", "opus"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Unsupported ultrareview option: --model" in result.stderr
+
+
+def test_ultrareview_rejects_invalid_timeout(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "ultrareview", "--confirm-cost", "--timeout", "soon"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Missing or invalid --timeout minutes." in result.stderr
+
+
 def test_multi_review_runs_roles_in_parallel_by_default(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -5257,11 +5340,12 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-review-gate": "review-gate",
         "claude-review": "review",
         "claude-status": "jobs",
+        "claude-ultrareview": "ultrareview",
     }
     assert {p.parent.name for p in skills} == {
         "claude-adversarial-review",
-            "claude-cancel",
-            "claude-collaboration-loop",
+        "claude-cancel",
+        "claude-collaboration-loop",
             "claude-github-actions-review",
         "claude-leases",
         "claude-mailbox",
@@ -5273,6 +5357,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-review-gate",
         "claude-review",
         "claude-status",
+        "claude-ultrareview",
     }
     for skill in skills:
         text = skill.read_text()

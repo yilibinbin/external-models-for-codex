@@ -2464,20 +2464,40 @@ async function runClaudeMultiReview(rawArgs) {
 }
 
 function runClaudeUltrareview(rawArgs) {
-  let args;
-  try {
-    args = parseArgs(rawArgs);
-    validateNativeModeOptions(args, "ultrareview");
-  } catch (error) {
-    console.error(error.message || String(error));
+  const forwarded = [];
+  let confirmed = process.env.CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW === "1";
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const arg = rawArgs[index];
+    if (arg === "--confirm-cost") {
+      confirmed = true;
+    } else if (arg === "--json") {
+      forwarded.push(arg);
+    } else if (arg === "--timeout") {
+      const minutes = rawArgs[index + 1];
+      if (!minutes || !/^[1-9]\d*$/.test(minutes)) {
+        console.error("Missing or invalid --timeout minutes.");
+        process.exit(2);
+      }
+      forwarded.push(arg, minutes);
+      index += 1;
+    } else if (arg.startsWith("-")) {
+      console.error(`Unsupported ultrareview option: ${arg}`);
+      process.exit(2);
+    } else {
+      forwarded.push(arg);
+    }
+  }
+  if (!confirmed) {
+    console.error("ultrareview may use remote/cloud usage and usage-credit billing; pass --confirm-cost or set CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1 to continue.");
     process.exit(2);
   }
-  if (!args.confirmCost && process.env.CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW !== "1") {
-    console.error("ultrareview may use remote/cloud billing; pass --confirm-cost or set CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1 to continue.");
-    process.exit(2);
+  const result = runClaude(["ultrareview", ...forwarded], { timeout: 35 * 60 * 1000 });
+  process.stdout.write(result.stdout);
+  process.stderr.write(result.stderr);
+  if (result.error) {
+    process.stderr.write(result.error);
   }
-  process.stdout.write("ultrareview execution is implemented in Task 6.\n");
-  process.exit(2);
+  process.exit(result.status);
 }
 
 function printJobs() {
