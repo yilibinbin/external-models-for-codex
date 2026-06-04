@@ -80,8 +80,9 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
+const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
 const CLAUDE_CODE_PATH_ENV = "CLAUDE_CODE_PATH";
@@ -335,6 +336,32 @@ function parseArgs(argv) {
     } else if (arg === "--backend") {
       parsed.backend = readOptionValue(tokens, index, arg);
       index += 1;
+    } else if (arg === "--agent-team") {
+      parsed.agentTeam = readOptionValue(tokens, index, arg).trim();
+      if (!parsed.agentTeam) {
+        throw new Error("Missing value for --agent-team.");
+      }
+      index += 1;
+    } else if (arg === "--native-structured") {
+      parsed.nativeStructured = true;
+    } else if (arg === "--stream-progress") {
+      parsed.streamProgress = true;
+    } else if (arg === "--max-budget-usd") {
+      const value = readOptionValue(tokens, index, arg).trim();
+      const parsedValue = Number(value);
+      if (!Number.isFinite(parsedValue) || parsedValue <= 0) {
+        throw new Error("--max-budget-usd must be a positive decimal number.");
+      }
+      parsed.maxBudgetUsd = parsedValue;
+      index += 1;
+    } else if (arg === "--fallback-model") {
+      parsed.fallbackModel = readOptionValue(tokens, index, arg).trim();
+      if (!parsed.fallbackModel) {
+        throw new Error("Missing value for --fallback-model.");
+      }
+      index += 1;
+    } else if (arg === "--confirm-cost") {
+      parsed.confirmCost = true;
     } else if (arg === "--roles") {
       const roles = readOptionValue(tokens, index, arg)
         .split(",")
@@ -2046,6 +2073,13 @@ async function runClaudeMultiReview(rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    args.agentTeam = args.agentTeam ?? "plugin";
+    if (!VALID_AGENT_TEAMS.has(args.agentTeam)) {
+      throw new Error(`Invalid --agent-team "${args.agentTeam}". Valid values: ${Array.from(VALID_AGENT_TEAMS).join(", ")}.`);
+    }
+    if (args.agentTeam === "sdk-subagents" && args.sequential) {
+      throw new Error("--agent-team sdk-subagents cannot be combined with --sequential");
+    }
     validateBackendArgs(args);
     args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
       ? defaultRoleObjects()
@@ -2198,6 +2232,22 @@ async function runClaudeMultiReview(rawArgs) {
   }, startedAt, undefined, results);
   process.stdout.write(output);
   process.exit(rendered.failed.length ? 1 : 0);
+}
+
+function runClaudeUltrareview(rawArgs) {
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  if (!args.confirmCost && process.env.CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW !== "1") {
+    console.error("ultrareview may use remote/cloud billing; pass --confirm-cost or set CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1 to continue.");
+    process.exit(2);
+  }
+  process.stdout.write("ultrareview execution is implemented in Task 6.\n");
+  process.exit(2);
 }
 
 function printJobs() {
@@ -2424,6 +2474,9 @@ switch (command) {
     break;
   case "multi-review":
     await runClaudeMultiReview(rawArgs);
+    break;
+  case "ultrareview":
+    runClaudeUltrareview(rawArgs);
     break;
   case "plan":
     await runClaudeTask("plan", rawArgs);

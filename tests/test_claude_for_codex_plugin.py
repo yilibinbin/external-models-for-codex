@@ -394,6 +394,41 @@ print(f"FAKE_CLAUDE_OK call {role}")
     return result, prompts, argvs
 
 
+def test_multi_review_agent_team_flags_are_validated(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    invalid_team = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--agent-team", "banana"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid_team.returncode == 2
+    assert "Invalid --agent-team" in invalid_team.stderr
+
+    sequential_subagents = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--agent-team", "sdk-subagents", "--sequential"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert sequential_subagents.returncode == 2
+    assert "--agent-team sdk-subagents cannot be combined with --sequential" in sequential_subagents.stderr
+
+
+def test_ultrareview_requires_explicit_consent(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "ultrareview"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert "--confirm-cost" in result.stderr
+
+
 def test_multi_review_runs_roles_in_parallel_by_default(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -763,7 +798,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
