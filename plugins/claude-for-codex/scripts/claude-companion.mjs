@@ -43,6 +43,23 @@ import {
   normalizeReviewOutput
 } from "./lib/render-review.mjs";
 import {
+  ADVERSARIAL_LENSES,
+  DEFAULT_ADVERSARIAL_LENSES,
+  DEFAULT_MULTI_REVIEW_ROLES,
+  REVIEW_ROLES,
+  defaultRoleObjects,
+  hashRolePack,
+  listRolePacks,
+  resolveExplicitRoles,
+  resolveRolePack,
+  rolePackGateCompatible,
+  rolePackSummary,
+  rolesForPack,
+  userRolePackDir,
+  validateBuiltInRolePacks,
+  validateRolePackFile
+} from "./lib/role-packs.mjs";
+import {
   buildSemanticContext,
   parseSemanticOptions,
   semanticCapabilities,
@@ -61,7 +78,7 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
@@ -69,69 +86,6 @@ const CLAUDE_CODE_PATH_ENV = "CLAUDE_CODE_PATH";
 const REVIEW_GATE_ENV = "CLAUDE_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
-const ADVERSARIAL_LENSES = Object.freeze({
-  skeptic: {
-    label: "Skeptic",
-    directive: [
-      "Challenge correctness and completeness.",
-      "Ask what inputs, states, or sequences will break this.",
-      "Find unhandled error paths, race conditions, ordering dependencies, and assumptions that are not proven.",
-      "Map findings to: prove-it-works, fix-root-causes, serialize-shared-state-mutations."
-    ].join(" ")
-  },
-  architect: {
-    label: "Architect",
-    directive: [
-      "Challenge structural fitness.",
-      "Ask whether the design serves the stated goal or an assumed goal.",
-      "Find coupling points, boundary violations, responsibility leaks, and assumptions about scale, concurrency, or ordering.",
-      "Map findings to: boundary-discipline, foundational-thinking, redesign-from-first-principles."
-    ].join(" ")
-  },
-  minimalist: {
-    label: "Minimalist",
-    directive: [
-      "Challenge necessity and complexity.",
-      "Ask what can be deleted without losing the stated goal.",
-      "Find speculative abstractions, configuration without a concrete second use case, and thoroughness that does not improve the outcome.",
-      "Map findings to: subtract-before-you-add, outcome-oriented-execution, cost-aware-delegation."
-    ].join(" ")
-  }
-});
-const DEFAULT_ADVERSARIAL_LENSES = Object.freeze(["skeptic", "architect", "minimalist"]);
-const REVIEW_ROLES = Object.freeze({
-  correctness: {
-    directive: "Find bugs, regressions, edge cases, and behavioral contract breaks."
-  },
-  security: {
-    directive: "Review read-only safety, secrets exposure, injection risks, and unsafe command or path handling."
-  },
-  tests: {
-    directive: "Find missing, brittle, or overfit tests and release validation gaps."
-  },
-  release: {
-    directive: "Review install, marketplace, versioning, documentation, and upgrade risks."
-  },
-  adversarial: {
-    directive: "Challenge assumptions, simpler alternatives, hidden costs, and failure modes."
-  },
-  skeptic: {
-    directive: ADVERSARIAL_LENSES.skeptic.directive
-  },
-  architect: {
-    directive: ADVERSARIAL_LENSES.architect.directive
-  },
-  minimalist: {
-    directive: ADVERSARIAL_LENSES.minimalist.directive
-  }
-});
-const DEFAULT_MULTI_REVIEW_ROLES = Object.freeze([
-  "correctness",
-  "security",
-  "tests",
-  "release",
-  "adversarial"
-]);
 const READ_ONLY_BUILTIN_TOOLS = Object.freeze([
   "Read",
   "Grep",
@@ -287,6 +241,11 @@ function buildCapabilitiesReport() {
     githubCli: commandVersion("gh"),
     hooks: hookDiagnostics(),
     mcp: mcpDiagnostics(),
+    rolePacks: {
+      builtIn: listRolePacks(),
+      userPackDirectory: userRolePackDir(process.env),
+      userPackExecution: false
+    },
     semanticProviders: semanticProviderCandidates(),
     semanticContext: semanticCapabilities(process.cwd(), process.env)
   };
@@ -341,6 +300,14 @@ function parseArgs(argv) {
       }
       parsed.roles = [...(parsed.roles ?? []), role];
       index += 1;
+    } else if (arg === "--role-pack") {
+      parsed.rolePack = readOptionValue(tokens, index, arg).trim();
+      if (!parsed.rolePack) {
+        throw new Error("Missing value for --role-pack.");
+      }
+      index += 1;
+    } else if (arg === "--role-pack-file") {
+      throw new Error("--role-pack-file is validate/inspect-only in 0.12.0 and is not accepted by review commands.");
     } else if (arg === "--adversarial-lenses") {
       const lenses = readOptionValue(tokens, index, arg)
         .split(",")
@@ -390,6 +357,14 @@ function validateBackendArgs(args) {
 }
 
 function resolveReviewRoles(args) {
+  if (args.rolePack !== undefined && args.roles !== undefined) {
+    throw new Error("--role-pack conflicts with --roles/--role.");
+  }
+  if (args.rolePack !== undefined) {
+    const pack = resolveRolePack(args.rolePack);
+    args.rolePackSummary = rolePackSummary(pack);
+    return rolesForPack(pack);
+  }
   if (args.roles === undefined) {
     return [];
   }
@@ -397,21 +372,7 @@ function resolveReviewRoles(args) {
     throw new Error("Missing value for --roles.");
   }
 
-  const validRoles = Object.keys(REVIEW_ROLES).sort();
-  const seenRoles = new Set();
-  for (const role of args.roles) {
-    if (!Object.hasOwn(REVIEW_ROLES, role)) {
-      throw new Error(`Unknown review role "${role}". Valid roles: ${validRoles.join(", ")}.`);
-    }
-    if (seenRoles.has(role)) {
-      throw new Error(`Duplicate review role "${role}".`);
-    }
-    seenRoles.add(role);
-  }
-  return args.roles.map((name) => ({
-    name,
-    directive: REVIEW_ROLES[name].directive
-  }));
+  return resolveExplicitRoles(args.roles);
 }
 
 function resolveAdversarialLenses(args) {
@@ -1466,6 +1427,67 @@ function runGithubActionsCommand(rawArgs) {
   }
 }
 
+function runRolesCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const subcommand = tokens.shift();
+  const jsonOutput = tokens.includes("--json");
+  const filtered = tokens.filter((token) => token !== "--json");
+  try {
+    if (subcommand === "list") {
+      const packs = listRolePacks();
+      if (jsonOutput) {
+        process.stdout.write(`${JSON.stringify({ rolePacks: packs }, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write([
+        "Claude role packs:",
+        ...packs.map((pack) => `- ${pack.name}: ${pack.roles.join(", ")}${pack.gate_compatible ? " (gate-compatible)" : ""}`)
+      ].join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "inspect") {
+      const packName = filtered[0];
+      if (!packName || filtered.length !== 1) {
+        throw new Error("Usage: claude-companion.mjs roles inspect <pack> [--json]");
+      }
+      const summary = rolePackSummary(resolveRolePack(packName));
+      if (jsonOutput) {
+        process.stdout.write(`${JSON.stringify(summary, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write([
+        `Role pack: ${summary.name}`,
+        `source: ${summary.source}`,
+        `schema: ${summary.schema_version}`,
+        `roles: ${summary.roles.join(", ")}`,
+        `gate-compatible: ${summary.gate_compatible ? "yes" : "no"}`,
+        `hash: ${summary.hash}`,
+        `description: ${summary.description}`
+      ].join("\n") + "\n");
+      return;
+    }
+    if (subcommand === "validate") {
+      const file = filtered[0];
+      if (!file || filtered.length !== 1) {
+        throw new Error("Usage: claude-companion.mjs roles validate <file> [--json]");
+      }
+      const pack = validateRolePackFile(file, { cwd: process.cwd(), mode: "validate" });
+      const summary = rolePackSummary(pack);
+      const payload = { ok: true, executable: false, reason: "User role packs are validate/inspect-only in 0.12.0.", rolePack: summary };
+      if (jsonOutput) {
+        process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+        return;
+      }
+      process.stdout.write(`ok: ${summary.name} validates; execution is deferred in 0.12.0\n`);
+      return;
+    }
+    throw new Error("Usage: claude-companion.mjs roles list|inspect|validate [options]");
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+}
+
 function parseGateVerdict(rawOutput) {
   const text = String(rawOutput ?? "").trim();
   if (!text) {
@@ -1561,10 +1583,29 @@ async function runReviewGate(rawArgs) {
     return;
   }
 
-  const roles = DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
-    name,
-    directive: REVIEW_ROLES[name].directive
-  }));
+  let roles;
+  try {
+    if (args.rolePack !== undefined) {
+      const pack = resolveRolePack(args.rolePack);
+      if (!rolePackGateCompatible(pack)) {
+        process.stdout.write(`${JSON.stringify({
+          decision: "block",
+          reason: `Claude review gate role pack "${pack.name}" is not gate-compatible.`
+        })}\n`);
+        return;
+      }
+      args.rolePackSummary = rolePackSummary(pack);
+      roles = rolesForPack(pack);
+    } else {
+      roles = defaultRoleObjects();
+    }
+  } catch (error) {
+    process.stdout.write(`${JSON.stringify({
+      decision: "block",
+      reason: `Claude review gate role pack configuration error: ${error.message || String(error)}`
+    })}\n`);
+    return;
+  }
   args.scope = "working-tree";
   args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
   try {
@@ -1825,11 +1866,8 @@ async function runClaudeMultiReview(rawArgs) {
   try {
     args = parseArgs(rawArgs);
     validateBackendArgs(args);
-    args.reviewRoles = args.roles === undefined
-      ? DEFAULT_MULTI_REVIEW_ROLES.map((name) => ({
-          name,
-          directive: REVIEW_ROLES[name].directive
-        }))
+    args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
+      ? defaultRoleObjects()
       : resolveReviewRoles(args);
   } catch (error) {
     console.error(error.message || String(error));
@@ -2163,6 +2201,9 @@ switch (command) {
     break;
   case "github-actions":
     runGithubActionsCommand(rawArgs);
+    break;
+  case "roles":
+    runRolesCommand(rawArgs);
     break;
   case "__run-job":
     runJobWorker(rawArgs);

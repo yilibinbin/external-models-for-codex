@@ -76,6 +76,14 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
     semanticFailureReason: args.semantic?.report?.semanticFailureReason ?? "",
     semanticFailed: Boolean(args.semantic?.report?.semanticFailed),
     semanticVerdict: args.semanticVerdict ?? "",
+    rolePack: args.rolePackSummary ? {
+      name: args.rolePackSummary.name,
+      source: args.rolePackSummary.source,
+      schemaVersion: args.rolePackSummary.schema_version,
+      hash: args.rolePackSummary.hash,
+      roles: args.rolePackSummary.roles,
+      gateCompatible: Boolean(args.rolePackSummary.gate_compatible)
+    } : undefined,
     structured: structuredSummary(parsed),
     roleResults: roleResults.map(({ role, result: roleResult, parsed: roleParsed }) => ({
       role: role?.name ?? String(role ?? ""),

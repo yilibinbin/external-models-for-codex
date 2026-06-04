@@ -132,6 +132,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 
 `multi-review` 默认并行运行角色 reviewer。`adversarial-review --parallel` 会将 skeptic、architect、minimalist 等 lens 作为独立 Claude CLI reviewer 并行执行并聚合输出。需要逐个运行排查问题或降低速率压力时使用 `--sequential`。
 
+Claude reviewer role packs 是 `multi-review` 的内置审阅预设。可以用 `roles list`、`roles inspect <pack>` 和 `multi-review --role-pack <pack>` 选择 `minimal`、`release`、`security`、`default` 等预设。用户自定义 JSON pack 可以用 `roles validate <file>` 校验，但在 `0.12.0` 中不能执行。Role packs 是插件管理的 reviewer 预设，不是 Claude 原生 subagents，也不能授予工具、shell、hooks、MCP servers、环境变量、backend mode 或写权限。
+
 Claude 审阅输出是审阅材料，不是自动实施授权。报告时要保留文件路径、行号、role 名、uncertainty 标记和 residual risk；除非用户明确要求采纳并修复哪些发现，否则不要在同一步自动修复审阅发现。
 
 ## 正确调用方式

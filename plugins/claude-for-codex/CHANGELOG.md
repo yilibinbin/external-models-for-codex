@@ -4,6 +4,13 @@
 
 - Rename the repository marketplace to `external-models-for-codex` so it can host multiple Codex plugins backed by external model CLIs.
 
+## 0.12.0 - 2026-06-04
+
+- Add built-in Claude reviewer role packs with `roles list`, `roles inspect`, and `multi-review --role-pack`.
+- Keep user-authored role packs validate/inspect-only; `--role-pack-file` is not executable in this release.
+- Add schema and boundary validation for role-pack files, including forbidden tool/shell/hook/MCP/write fields and workspace/symlink rejection.
+- Preserve the existing default multi-review and bare review-gate behavior while rejecting gate-incompatible explicit role packs.
+
 ## 0.11.0 - 2026-06-04
 
 - Add opt-in `--backend sdk` execution for Claude review, structured review, multi-review, review gate, plan, and rescue flows.

@@ -713,7 +713,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.11.0"
+    assert data["version"] == "0.12.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -721,7 +721,7 @@ def test_plugin_manifest_is_valid():
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.11.0"
+    assert manifest["version"] == "0.12.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
@@ -763,7 +763,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "reserve-job", "run-reserved-job"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -994,11 +994,11 @@ def test_runtime_keeps_claude_tools_read_only():
 
 
 def test_default_multi_review_roles_exist_in_registry():
-    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    runtime = PLUGIN / "scripts" / "lib" / "role-packs.mjs"
     text = runtime.read_text()
-    registry_match = re.search(r"const REVIEW_ROLES = Object\.freeze\(\{(?P<body>.*?)\n\}\);", text, re.S)
+    registry_match = re.search(r"export const REVIEW_ROLES = Object\.freeze\(\{(?P<body>.*?)\n\}\);", text, re.S)
     defaults_match = re.search(
-        r"const DEFAULT_MULTI_REVIEW_ROLES = Object\.freeze\(\[(?P<body>.*?)\]\);",
+        r"export const DEFAULT_MULTI_REVIEW_ROLES = Object\.freeze\(\[(?P<body>.*?)\]\);",
         text,
         re.S,
     )
@@ -1008,6 +1008,89 @@ def test_default_multi_review_roles_exist_in_registry():
     default_roles = re.findall(r'"([^"]+)"', defaults_match.group("body"))
     assert default_roles == ["correctness", "security", "tests", "release", "adversarial"]
     assert set(default_roles).issubset(registry_roles)
+
+
+def test_builtin_role_packs_validate_and_default_derives_from_default_roles():
+    role_packs = PLUGIN / "scripts" / "lib" / "role-packs.mjs"
+    script = f"""
+import {{ DEFAULT_MULTI_REVIEW_ROLES, listRolePacks, resolveRolePack, validateBuiltInRolePacks }} from {json.dumps(role_packs.as_uri())};
+const validation = validateBuiltInRolePacks();
+if (!validation.ok) {{
+  console.error(JSON.stringify(validation));
+  process.exit(1);
+}}
+const packs = listRolePacks().map((pack) => pack.name).sort();
+const expected = ["backend", "default", "docs", "frontend", "minimal", "release", "security", "testing"].sort();
+if (JSON.stringify(packs) !== JSON.stringify(expected)) {{
+  console.error(JSON.stringify({{ packs, expected }}));
+  process.exit(2);
+}}
+const defaultPack = resolveRolePack("default");
+if (JSON.stringify(defaultPack.roles) !== JSON.stringify(DEFAULT_MULTI_REVIEW_ROLES)) {{
+  console.error(JSON.stringify({{ defaultPack, defaults: DEFAULT_MULTI_REVIEW_ROLES }}));
+  process.exit(3);
+}}
+console.log("ok");
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_user_role_pack_schema_rejects_inline_roles_and_forbidden_fields(tmp_path):
+    role_packs = PLUGIN / "scripts" / "lib" / "role-packs.mjs"
+    pack = tmp_path / "pack.json"
+    pack.write_text(json.dumps({
+        "schema_version": 1,
+        "name": "unsafe",
+        "description": "bad",
+        "roles": [{"name": "security", "directive": "override"}],
+        "tools": ["Bash"],
+    }))
+    script = f"""
+import {{ validateRolePackFile }} from {json.dumps(role_packs.as_uri())};
+try {{
+  validateRolePackFile({json.dumps(str(pack))}, {{ cwd: {json.dumps(str(tmp_path / "repo"))}, mode: "validate" }});
+  process.exit(1);
+}} catch (error) {{
+  console.log(error.message);
+}}
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "Forbidden role pack field" in result.stdout or "Role pack roles must be strings" in result.stdout
+
+
+def test_user_role_pack_validation_rejects_workspace_and_symlink_paths(tmp_path):
+    repo = tmp_path / "repo"
+    external = tmp_path / "external"
+    repo.mkdir()
+    external.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    pack = repo / "pack.json"
+    pack.write_text(json.dumps({
+        "schema_version": 1,
+        "name": "local",
+        "description": "repo local",
+        "roles": ["correctness"],
+    }))
+    link = external / "link.json"
+    link.symlink_to(pack)
+    role_packs = PLUGIN / "scripts" / "lib" / "role-packs.mjs"
+    script = f"""
+import {{ validateRolePackFile }} from {json.dumps(role_packs.as_uri())};
+for (const file of [{json.dumps(str(pack))}, {json.dumps(str(link))}]) {{
+  try {{
+    validateRolePackFile(file, {{ cwd: {json.dumps(str(repo))}, mode: "validate" }});
+    console.error("accepted " + file);
+    process.exit(1);
+  }} catch (error) {{
+    console.log(error.message);
+  }}
+}}
+"""
+    result = subprocess.run(["node", "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.count("must not live inside the workspace") == 2
 
 
 def test_runtime_avoids_head_name_only_diff_without_head():
@@ -1499,6 +1582,89 @@ def test_multi_review_supports_adversarial_lens_roles(tmp_path):
     assert "Challenge correctness and completeness." in prompts_by_role["skeptic"]
     assert "Challenge structural fitness." in prompts_by_role["architect"]
     assert "Challenge necessity and complexity." in prompts_by_role["minimalist"]
+
+
+def test_roles_command_lists_and_inspects_builtin_packs():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    listed = subprocess.run(
+        [NODE, str(runtime), "roles", "list", "--json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert listed.returncode == 0, listed.stderr
+    payload = json.loads(listed.stdout)
+    names = {pack["name"] for pack in payload["rolePacks"]}
+    assert {"default", "security", "release", "frontend", "backend", "testing", "docs", "minimal"}.issubset(names)
+
+    inspected = subprocess.run(
+        [NODE, str(runtime), "roles", "inspect", "minimal", "--json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert inspected.returncode == 0, inspected.stderr
+    summary = json.loads(inspected.stdout)
+    assert summary["roles"] == ["correctness"]
+    assert summary["gate_compatible"] is True
+    assert summary["hash"].startswith("sha256:")
+
+
+def test_multi_review_role_pack_expands_builtin_pack(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--role-pack", "minimal", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(prompts) == 1
+    assert "<role_name>correctness</role_name>" in prompts[0]
+    assert "roles requested: correctness" in result.stdout
+
+
+def test_multi_review_role_pack_conflicts_with_roles(tmp_path):
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--role-pack", "minimal", "--roles", "security", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert "--role-pack conflicts with --roles/--role." in result.stderr
+    assert prompts == []
+
+
+def test_review_gate_rejects_default_role_pack_but_bare_gate_still_uses_default(tmp_path):
+    blocked, prompts, _capture = run_fake_review_gate(
+        tmp_path,
+        extra_env={},
+        hook_input={"hook_event_name": "Stop"},
+    )
+    assert blocked.returncode == 0, blocked.stderr
+    assert blocked.stdout == ""
+    assert len(prompts) == 5
+
+    with_pack = tmp_path / "with-pack"
+    with_pack.mkdir()
+    runtime, repo, _capture_dir, env = prepare_gate_repo(with_pack, with_change=True)
+    setup = subprocess.run(
+        [NODE, str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    rejected = subprocess.run(
+        [NODE, str(runtime), "review-gate", "--role-pack", "default"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+    assert rejected.returncode == 0
+    assert json.loads(rejected.stdout)["decision"] == "block"
+    assert "not gate-compatible" in rejected.stdout
 
 
 def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):
@@ -2313,7 +2479,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.11.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.12.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "github.event.pull_request.base.sha" in text
     assert "fetch-depth: 0" in text
@@ -2353,7 +2519,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.11.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.12.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -2441,7 +2607,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.11.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.12.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -4050,6 +4216,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
             "claude-collaboration-loop": "plan",
             "claude-github-actions-review": "github-actions",
             "claude-multi-review": "multi-review",
+        "claude-role-packs": "roles",
         "claude-plan": "plan",
         "claude-rescue": "rescue",
         "claude-result": "result",
@@ -4063,6 +4230,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
             "claude-collaboration-loop",
             "claude-github-actions-review",
             "claude-multi-review",
+        "claude-role-packs",
         "claude-plan",
         "claude-rescue",
         "claude-result",

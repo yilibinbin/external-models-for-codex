@@ -52,6 +52,7 @@ Additional opt-in adversarial lens roles:
 Arguments:
 - `--roles <a,b,c>` runs a comma-separated role list in order instead of the defaults.
 - `--role <name>` adds one role; repeat it to build an ordered role list.
+- `--role-pack <pack>` selects a built-in reviewer preset such as `minimal`, `release`, `security`, or `default`. It conflicts with `--roles` and `--role`.
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
@@ -65,6 +66,8 @@ Arguments:
 
 Examples:
 - `--base main`
+- `--role-pack minimal --scope working-tree`
+- `--role-pack release --base main`
 - `--roles correctness,security --scope branch --base main`
 - `--role release --role adversarial check upgrade and rollback risk`
 - `--roles skeptic,architect,minimalist --base main`

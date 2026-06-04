@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { renderWorkflow, validateWorkflow } from "./github-actions.mjs";
+import { validateBuiltInRolePacks } from "./role-packs.mjs";
 
 const SECRET_PATTERNS = [
   { name: "private-key", pattern: /BEGIN (RSA|OPENSSH|EC|DSA)? ?PRIVATE KEY/ },
@@ -57,8 +58,8 @@ function checkManifest(root) {
   const manifest = readJson(path.join(root, "plugins", "claude-for-codex", ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(root, "plugins", "claude-for-codex", "CHANGELOG.md"), "utf8");
   const checks = [
-    result(manifest.version === "0.11.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.11.0"), "changelog-version", "CHANGELOG contains 0.11.0"),
+    result(manifest.version === "0.12.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.12.0"), "changelog-version", "CHANGELOG contains 0.12.0"),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
   ];
@@ -149,7 +150,7 @@ function checkSkills(root) {
   const skillsDir = path.join(root, "plugins", "claude-for-codex", "skills");
   const skills = fs.readdirSync(skillsDir).filter((name) => fs.existsSync(path.join(skillsDir, name, "SKILL.md")));
   return [
-    result(skills.length === 11, "skill-count", String(skills.length)),
+    result(skills.length === 12, "skill-count", String(skills.length)),
     ...skills.map((skill) => {
       const text = fs.readFileSync(path.join(skillsDir, skill, "SKILL.md"), "utf8");
       return result(text.startsWith("---") && text.includes("claude-companion.mjs"), `skill-${skill}`);
@@ -183,6 +184,13 @@ function checkPrompts(root) {
     const text = fs.readFileSync(path.join(promptDir, prompt), "utf8");
     return result(text.includes("<task>") && text.includes("{{"), `prompt-${prompt}`);
   });
+}
+
+function checkRolePacks() {
+  const validation = validateBuiltInRolePacks();
+  return [
+    result(validation.ok, "role-packs-valid", validation.failures.join("; "))
+  ];
 }
 
 function remoteInstallSmoke(root, options) {
@@ -223,6 +231,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkDocs(root),
     ...checkSecrets(root),
     ...checkSkills(root),
+    ...checkRolePacks(),
     ...checkPrompts(root),
     ...checkSemanticFixtures(root),
     ...(options.ciSimulate ? checkGithubActionsCi(root) : []),

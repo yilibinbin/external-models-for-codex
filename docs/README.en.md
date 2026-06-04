@@ -132,6 +132,8 @@ Read-only Claude review receives a strict MCP config for bounded Git inspection.
 
 `multi-review` runs role reviewers in parallel by default. `adversarial-review --parallel` runs skeptic, architect, and minimalist lens reviewers as independent Claude CLI processes and aggregates their outputs. Use `--sequential` when a deterministic one-at-a-time run is needed.
 
+Claude reviewer role packs are built-in presets for `multi-review`. Use `roles list`, `roles inspect <pack>`, and `multi-review --role-pack <pack>` for presets such as `minimal`, `release`, `security`, and `default`. User-authored JSON packs can be validated with `roles validate <file>`, but they are not executable in `0.12.0`. Role packs are plugin-managed presets, not native Claude subagents, and cannot grant tools, shell commands, hooks, MCP servers, environment variables, backend mode, or write permissions.
+
 Claude review output is a review artifact, not implementation authority. Preserve file paths, line numbers, role names, uncertainty markers, and residual-risk notes. Do not auto-fix review findings in the same step unless the user explicitly asks which findings to adopt.
 
 ## Routing
