@@ -965,7 +965,9 @@ function handleReserveJob(rawArgs) {
     throw new Error(`Command "${command}" cannot be reserved as a background job.`);
   }
   const commandArgs = stripBackgroundArgs(tokens.slice(1));
-  validateCommandNativeModeOptions(command, commandArgs);
+  const parsed = validateCommandNativeModeOptions(command, commandArgs);
+  validateBackendArgs(parsed);
+  validateBackendCompatibleOptions(parsed);
   const workerCommand = [
     process.argv0 || process.execPath,
     process.argv[1],

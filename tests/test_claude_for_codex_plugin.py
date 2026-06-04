@@ -3450,6 +3450,93 @@ def test_reserve_job_validates_child_native_flags_before_reserving(tmp_path, com
     assert json.loads(jobs.stdout)["jobs"] == []
 
 
+@pytest.mark.parametrize(
+    ("command_args", "env_backend", "stderr_marker"),
+    [
+        (["multi-review", "--backend", "sdk", "--max-budget-usd", "1.50"], None, "--max-budget-usd"),
+        (["multi-review", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5"], None, "--fallback-model"),
+        (["multi-review", "--max-budget-usd", "1.50"], "sdk", "--max-budget-usd"),
+    ],
+)
+def test_reserve_job_validates_child_backend_compatibility_before_reserving(
+    tmp_path, command_args, env_backend, stderr_marker
+):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    if env_backend is not None:
+        env["CLAUDE_FOR_CODEX_BACKEND"] = env_backend
+
+    result = subprocess.run(
+        [NODE, str(runtime), "reserve-job", *command_args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert stderr_marker in result.stderr
+    assert "CLI-only" in result.stderr or "unsupported for SDK backend" in result.stderr
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    assert json.loads(jobs.stdout)["jobs"] == []
+
+
+def test_reserve_job_env_sdk_backend_allows_explicit_cli_budget_flags(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_BACKEND"] = "sdk"
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "reserve-job",
+            "multi-review",
+            "--backend",
+            "cli",
+            "--max-budget-usd",
+            "1.50",
+            "--fallback-model",
+            "claude-sonnet-4-5",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "reserved"
+    assert payload["job"]["status"] == "queued"
+    assert payload["job"]["command"] == "multi-review"
+    assert payload["job"]["args"] == [
+        "--backend",
+        "cli",
+        "--max-budget-usd",
+        "1.50",
+        "--fallback-model",
+        "claude-sonnet-4-5",
+    ]
+
+
 def test_run_reserved_job_executes_existing_job_with_fake_claude(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
