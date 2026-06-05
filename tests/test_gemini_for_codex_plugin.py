@@ -104,6 +104,46 @@ def fake_gemini_jsonl(tmp_path, log_file, delay_ms=0, help_text=FAKE_GEMINI_HELP
     return script
 
 
+def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None, delay_ms=0, exit_code=0, native_exit_code=None):
+    review = review or {
+        "verdict": "approve",
+        "summary": "Fake review smoke ok.",
+        "findings": [],
+        "next_steps": []
+    }
+    native = native or {
+        "mode": "native-agents",
+        "role_results": [
+            {"agent": "gfc_correctness", "role": "correctness", "status": "ok", "text": "No correctness issues.", "error": ""},
+            {"agent": "gfc_tests", "role": "tests", "status": "ok", "text": "No test issues.", "error": ""}
+        ],
+        "summary": "Fake native smoke ok.",
+        "residual_risk": []
+    }
+    script = tmp_path / "gemini"
+    script.parent.mkdir(parents=True, exist_ok=True)
+    capture = f"fs.appendFileSync({json.dumps(str(capture_argv))}, JSON.stringify({{argv, cwd: process.cwd()}}) + '\\n');\n" if capture_argv else ""
+    script.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        "const argv = process.argv.slice(2);\n"
+        "if (argv.join(' ') === '--version') { console.log('0.0.0-fake'); process.exit(0); }\n"
+        f"if (argv.join(' ') === '--help') {{ process.stdout.write({json.dumps(FAKE_GEMINI_HELP_FULL)}); process.exit(0); }}\n"
+        f"{capture}"
+        f"const review = {json.dumps(review)};\n"
+        f"const native = {json.dumps(native)};\n"
+        f"const delayMs = {int(delay_ms)};\n"
+        f"const exitCode = {int(exit_code)};\n"
+        f"const nativeExitCode = {int(native_exit_code if native_exit_code is not None else exit_code)};\n"
+        "const isNative = argv.includes('--include-directories');\n"
+        "const response = isNative ? JSON.stringify(native) : JSON.stringify(review);\n"
+        "setTimeout(() => { process.stdout.write(JSON.stringify({response, stats: {}})); process.exit(isNative ? nativeExitCode : exitCode); }, delayMs);\n",
+        encoding="utf8",
+    )
+    script.chmod(0o755)
+    return script
+
+
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
@@ -207,8 +247,16 @@ def test_real_smoke_runs_fake_cli_when_enabled(tmp_path):
     repo.mkdir()
     init_git_repo(repo)
     (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    native = {
+        "mode": "native-agents",
+        "role_results": [
+            {"agent": "gfc_tests", "role": "tests", "status": "ok", "text": "No test issues.", "error": ""}
+        ],
+        "summary": "Fake native quick smoke ok.",
+        "residual_risk": []
+    }
     env = os.environ.copy()
-    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="ALLOW: fake smoke ok"))
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, native=native))
     env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
 
     result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
@@ -216,10 +264,787 @@ def test_real_smoke_runs_fake_cli_when_enabled(tmp_path):
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
+    assert payload["mode"] == "quick"
+    assert payload["roles"] == ["tests"]
+    assert payload["model"] == "gemini-cli-default"
     assert "review-json" in payload["checks"]
     assert "multi-review-stream-progress" in payload["checks"]
-    assert "native-agent-structured" in payload["checks"]
+    assert payload["checks"]["multi-review-stream-progress"]["stderrProgressEvents"] is True
+    assert "native-agent-structured" not in payload["checks"]
     assert "capabilities" in payload["checks"]
+
+
+def test_real_smoke_uses_internal_dirty_workspace_from_clean_cwd(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    clean_dir = tmp_path / "clean"
+    clean_dir.mkdir()
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=clean_dir, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+
+
+def test_real_smoke_workspace_ignores_global_gpgsign(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    clean_dir = tmp_path / "clean"
+    home = tmp_path / "home"
+    clean_dir.mkdir()
+    home.mkdir()
+    (home / ".gitconfig").write_text("[commit]\n\tgpgsign = true\n", encoding="utf8")
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=clean_dir, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+
+
+def test_real_smoke_full_includes_native_and_forwards_model_timeout_and_roles(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "argv.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, capture_argv=log_file))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "real-smoke", "--full", "--model", "user-selected-model", "--timeout-seconds", "30", "--roles", "correctness,tests"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "full"
+    assert payload["includeNative"] is True
+    assert payload["model"] == "user-selected-model"
+    assert payload["timeoutSeconds"] == 30
+    assert payload["roles"] == ["correctness", "tests"]
+    assert "native-agent-structured" in payload["checks"]
+    calls = [json.loads(line)["argv"] for line in log_file.read_text(encoding="utf8").splitlines()]
+    prompt_calls = [argv for argv in calls if "--prompt" in argv]
+    assert len(prompt_calls) == 4
+    assert all("--model" in argv and "user-selected-model" in argv for argv in prompt_calls)
+    assert any("--include-directories" in argv for argv in prompt_calls)
+
+
+def test_real_smoke_reports_per_check_timeout(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, delay_ms=5000))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick", "--timeout-seconds", "1"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["timeoutSeconds"] == 1
+    assert payload["checks"]["review-json"]["timedOut"] is True
+    assert "review-json timed out after 1 seconds" in payload["failures"]
+
+
+def test_real_smoke_rejects_nonzero_review_json_even_with_valid_payload(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, exit_code=7))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["status"] == 7
+    assert payload["checks"]["review-json"]["ok"] is False
+    assert "review-json failed with status 7" in payload["failures"]
+
+
+def test_real_smoke_rejects_invalid_options(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--timeout-seconds", "0"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 2
+    assert "--timeout-seconds must be an integer from 1 to 1800." in result.stderr
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--roles", ","], env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "Missing role in --roles." in result.stderr
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--model=-bad"], env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "Invalid --model value." in result.stderr
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--roles", "bogus"], env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "Unknown role in --roles: bogus." in result.stderr
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--unknown-flag"], env=env, capture_output=True, text=True)
+    assert result.returncode == 2
+    assert 'Unknown real-smoke option "--unknown-flag".' in result.stderr
+
+
+def test_real_smoke_full_accepts_valid_native_structured_role_error(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    native = {
+        "mode": "native-agents",
+        "role_results": [
+            {"agent": "gfc_correctness", "role": "correctness", "status": "ok", "text": "No correctness issues.", "error": ""},
+            {"agent": "gfc_tests", "role": "tests", "status": "error", "text": "Found a test gap.", "error": ""}
+        ],
+        "summary": "Valid native smoke output with a role-level finding.",
+        "residual_risk": []
+    }
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, native=native))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--full"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["checks"]["native-agent-structured"]["status"] == 1
+    assert payload["checks"]["native-agent-structured"]["ok"] is True
+
+
+def test_real_smoke_full_rejects_nonzero_native_without_role_error(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, native_exit_code=7))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--full"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+    assert payload["checks"]["multi-review-stream-progress"]["ok"] is True
+    assert payload["checks"]["native-agent-structured"]["status"] == 7
+    assert payload["checks"]["native-agent-structured"]["ok"] is False
+
+
+def test_real_smoke_full_rejects_native_payload_with_missing_role(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    native = {
+        "mode": "native-agents",
+        "role_results": [
+            {"agent": "gfc_correctness", "role": "correctness", "status": "ok", "text": "No correctness issues.", "error": ""}
+        ],
+        "summary": "Missing tests role.",
+        "residual_risk": []
+    }
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, native=native))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--full"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["native-agent-structured"]["ok"] is False
+
+
+def test_real_smoke_full_rejects_status_zero_invalid_native_schema(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    native = {
+        "mode": "native-agents",
+        "summary": "Missing role_results even though process exited zero."
+    }
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, native=native))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--full"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["native-agent-structured"]["status"] == 1
+    assert payload["checks"]["native-agent-structured"]["ok"] is False
+    assert "native-agent-structured did not return expected aggregate JSON" in payload["failures"]
+
+
+def test_real_smoke_accepts_review_json_with_stdout_preamble(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`warning: ignored diagnostic\\n${JSON.stringify(parsed, null, 2)}\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+
+
+def test_real_smoke_accepts_review_json_embedded_midline(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`warning before ${JSON.stringify(parsed, null, 2)} warning after\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+
+
+def test_real_smoke_accepts_review_json_after_quoted_preamble(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`warning \"quoted preamble\" before ${JSON.stringify(parsed)} warning after\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+
+
+def test_real_smoke_accepts_review_json_after_unmatched_preamble_brace(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`warning: unresolved {path before ${JSON.stringify(parsed)} warning after\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+
+
+def test_real_smoke_accepts_review_json_with_braces_inside_strings(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "const noisy = { ...parsed, summary: 'contains } and { inside a string' }; process.stdout.write(`warning before ${JSON.stringify(noisy)} warning after\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+
+
+def test_real_smoke_accepts_review_json_with_complex_finding_text(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`warning before ${JSON.stringify(parsed)} warning after\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    review = {
+        "verdict": "approve",
+        "summary": "Complex finding payload.",
+        "findings": [
+            {
+                "severity": "low",
+                "title": "Parser exercise",
+                "body": "Snippet: const x = {value: [1, 2, 3], quoted: \"brace } bracket ]\"};",
+                "file": "file.txt",
+                "line_start": 1,
+                "line_end": 1,
+                "confidence": 0.6,
+                "recommendation": "Keep parser coverage."
+            }
+        ],
+        "next_steps": ["escaped quote: \" and slash: \\"]
+    }
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, review=review))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is True
+
+
+def test_real_smoke_rejects_review_json_beyond_block_scan_limit(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`warning ${'x'.repeat(600000)} ${JSON.stringify(parsed)}\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is False
+    assert "review-json did not return expected structured review JSON" in payload["failures"]
+
+
+def test_real_smoke_reports_output_limit(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace(
+        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+        "process.stdout.write(`${'x'.repeat(21 * 1024 * 1024)}${JSON.stringify(parsed)}\\n`);",
+        2
+    )
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["outputTooLarge"] is True
+    assert "review-json exceeded output limit" in payload["failures"]
+
+
+def test_real_smoke_include_native_keeps_quick_roles_with_native_timeout(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    native = {
+        "mode": "native-agents",
+        "role_results": [
+            {"agent": "gfc_tests", "role": "tests", "status": "ok", "text": "No test issues.", "error": ""}
+        ],
+        "summary": "Fake native quick smoke ok.",
+        "residual_risk": []
+    }
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, native=native))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--include-native"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "quick"
+    assert payload["roles"] == ["tests"]
+    assert payload["timeoutSeconds"] == 600
+    assert "native-agent-structured" in payload["checks"]
+
+
+def test_real_smoke_full_without_model_uses_cli_default(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "argv.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, capture_argv=log_file))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--full"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"] == "gemini-cli-default"
+    calls = [json.loads(line)["argv"] for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert all("--model" not in argv for argv in calls)
+
+
+def test_real_smoke_uses_env_model_without_hard_coding(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "argv.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, capture_argv=log_file))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+    env["GEMINI_FOR_CODEX_REAL_SMOKE_MODEL"] = "account/model-1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"] == "account/model-1"
+    calls = [json.loads(line)["argv"] for line in log_file.read_text(encoding="utf8").splitlines()]
+    prompt_calls = [argv for argv in calls if "--prompt" in argv]
+    assert all("--model" in argv and "account/model-1" in argv for argv in prompt_calls)
+
+
+def test_real_smoke_uses_fallback_env_model(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "argv.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, capture_argv=log_file))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+    env["GEMINI_FOR_CODEX_MODEL"] = "fallback/model"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"] == "fallback/model"
+    calls = [json.loads(line)["argv"] for line in log_file.read_text(encoding="utf8").splitlines()]
+    prompt_calls = [argv for argv in calls if "--prompt" in argv]
+    assert all("--model" in argv and "fallback/model" in argv for argv in prompt_calls)
+
+
+def test_real_smoke_model_flag_overrides_env_models(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "argv.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, capture_argv=log_file))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+    env["GEMINI_FOR_CODEX_REAL_SMOKE_MODEL"] = "env/primary"
+    env["GEMINI_FOR_CODEX_MODEL"] = "env/fallback"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick", "--model", "flag/model"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"] == "flag/model"
+    calls = [json.loads(line)["argv"] for line in log_file.read_text(encoding="utf8").splitlines()]
+    prompt_calls = [argv for argv in calls if "--prompt" in argv]
+    assert all("--model" in argv and "flag/model" in argv for argv in prompt_calls)
+
+
+def test_real_smoke_model_flag_overrides_invalid_env_model(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "argv.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, capture_argv=log_file))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+    env["GEMINI_FOR_CODEX_REAL_SMOKE_MODEL"] = "-bad-env-model"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick", "--model", "flag/model"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["model"] == "flag/model"
+
+
+def test_real_smoke_rejects_invalid_env_model_when_not_overridden(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+    env["GEMINI_FOR_CODEX_MODEL"] = "-bad-env-model"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 2
+    assert "Invalid --model value." in result.stderr
+
+
+def test_real_smoke_fails_when_stream_progress_events_are_missing(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace('...smokeRoleArgs, "--stream-progress", ...commonScopeArgs', '...smokeRoleArgs, ...commonScopeArgs')
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["multi-review-stream-progress"]["ok"] is False
+    assert payload["checks"]["multi-review-stream-progress"]["stderrProgressEvents"] is False
+    assert "multi-review-stream-progress did not emit expected sanitized start and finish progress events" in payload["failures"]
+
+
+def test_real_smoke_fails_when_stream_progress_command_exits_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, exit_code=7))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["multi-review-stream-progress"]["status"] == 1
+    assert payload["checks"]["multi-review-stream-progress"]["ok"] is False
+    assert "multi-review-stream-progress failed with status 1" in payload["failures"]
+
+
+def test_real_smoke_fails_on_malformed_stream_progress_events(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    progress_lib = fake_plugin_root / "scripts" / "lib" / "progress.mjs"
+    progress_source = progress_lib.read_text(encoding="utf8")
+    patched = progress_source.replace(
+        "return `${PROGRESS_EVENT_PREFIX} ${JSON.stringify(payload)}\\n`;",
+        "return `${PROGRESS_EVENT_PREFIX} not-json\\n`;"
+    )
+    assert patched != progress_source
+    progress_lib.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["multi-review-stream-progress"]["malformedProgressEvents"] > 0
+    assert "multi-review-stream-progress emitted malformed progress events" in payload["failures"]
+
+
+def test_real_smoke_fails_on_malformed_stream_progress_prefix(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    progress_lib = fake_plugin_root / "scripts" / "lib" / "progress.mjs"
+    progress_source = progress_lib.read_text(encoding="utf8")
+    patched = progress_source.replace(
+        "return `${PROGRESS_EVENT_PREFIX} ${JSON.stringify(payload)}\\n`;",
+        "return `[gemini-for-codex progress ${JSON.stringify(payload)}\\n`;"
+    )
+    assert patched != progress_source
+    progress_lib.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["multi-review-stream-progress"]["malformedProgressPrefixes"] > 0
+    assert "multi-review-stream-progress emitted malformed progress prefixes" in payload["failures"]
+
+
+def test_progress_helpers_parse_valid_malformed_and_crlf_lines():
+    progress_lib = (PLUGIN / "scripts" / "lib" / "progress.mjs").as_uri()
+    code = f"""
+const mod = await import({json.dumps(progress_lib)});
+const valid = mod.formatProgressEvent({{ event: "multi-review started", mode: "plugin-managed" }});
+const stderr = valid.replace("\\n", "\\r\\n") + "[gemini-for-codex progress] not-json\\r\\n[gemini-for-codex progress {{bad}}\\nplain stderr\\n";
+process.stdout.write(JSON.stringify(mod.progressEventsFromStderr(stderr)));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["events"] == [{"event": "multi-review started", "mode": "plugin-managed"}]
+    assert payload["malformedCount"] == 1
+    assert payload["malformedPrefixCount"] == 1
+
+
+def test_real_smoke_fails_on_invalid_review_json(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path, review={"summary": "missing verdict and findings"}))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["review-json"]["ok"] is False
+    assert "review-json did not return expected structured review JSON" in payload["failures"]
+
+
+def test_real_smoke_fails_on_invalid_capabilities_schema(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion = runtime.read_text(encoding="utf8")
+    patched = companion.replace("rawOutputAllowed: false,", "rawOutputAllowed: true,", 1)
+    assert patched != companion
+    runtime.write_text(patched, encoding="utf8")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini_real_smoke(tmp_path))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["capabilities"]["ok"] is False
+    assert "capabilities did not return expected JSON diagnostics" in payload["failures"]
 
 
 def test_capabilities_reports_gemini_cli_surface_without_enabling_it(tmp_path):
@@ -248,38 +1073,82 @@ def test_capabilities_reports_gemini_cli_surface_without_enabling_it(tmp_path):
 def test_release_check_rejects_raw_output_in_review_paths(tmp_path):
     fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
     shutil.copytree(PLUGIN, fake_plugin_root)
-    
+
     # Modify the copied companion.mjs to include the forbidden flag
     companion_path = fake_plugin_root / "scripts" / "gemini-companion.mjs"
     original_content = companion_path.read_text(encoding="utf8")
     companion_path.write_text(original_content + "\nconst FORBIDDEN_FLAG = '--raw-output';\n", encoding="utf8")
-    
+
     runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
-    
+
     result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
     payload = json.loads(result.stdout)
     assert payload["ok"] is False # The overall check should fail
     assert payload["checks"]["rawOutputSafety"] is False # Expecting false, indicating rejection
-    assert "companion contains forbidden Gemini review flag --raw-output" in payload["failures"]
-    
+    assert any(failure.endswith("contains forbidden Gemini review flag --raw-output") for failure in payload["failures"])
+
+
+def test_release_check_rejects_raw_output_in_script_lib(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    progress_path = fake_plugin_root / "scripts" / "lib" / "progress.mjs"
+    progress_path.write_text(progress_path.read_text(encoding="utf8") + "\nconst FORBIDDEN_FLAG = '--raw-output';\n", encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["rawOutputSafety"] is False
+    assert any("progress.mjs" in failure and "--raw-output" in failure for failure in payload["failures"])
+
+
+def test_release_check_rejects_raw_output_in_nested_script_lib(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    nested_path = fake_plugin_root / "scripts" / "lib" / "nested" / "helper.mjs"
+    nested_path.parent.mkdir(parents=True)
+    nested_path.write_text("const FORBIDDEN_FLAG = '--raw-output';\n", encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["rawOutputSafety"] is False
+    assert any("nested" in failure and "helper.mjs" in failure and "--raw-output" in failure for failure in payload["failures"])
+
 
 def test_release_check_keeps_extension_mcp_and_native_out_of_default_paths(tmp_path):
     fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
     shutil.copytree(PLUGIN, fake_plugin_root)
-    
+
     # Modify hooks.json to include a forbidden flag
     hooks_path = fake_plugin_root / "hooks" / "hooks.json"
     hooks_path.write_text('{"hooks":{"Stop":"gemini-companion.mjs review-gate --agent-team native-agents"}}', encoding="utf8")
-    
+
     runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
-    
+
     result = subprocess.run([NODE, str(runtime), "release-check", "--ci-simulate"], capture_output=True, text=True, cwd=fake_plugin_root)
     payload = json.loads(result.stdout)
     assert payload["ok"] is False # The overall check should fail
     assert payload["checks"]["externalSurfaceSafety"] is False # Expecting false, indicating rejection
     assert "hooks unexpectedly contain --agent-team native-agents" in payload["failures"]
-    # assert "default GitHub Actions workflow unexpectedly contains" in payload["failures"] # This requires mocking renderWorkflow or creating a fake one
-    # For now, we only check the hooks part because mocking renderWorkflow would be too complex.
+
+
+def test_release_check_rejects_native_flags_in_default_workflow_template(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    workflow_template = fake_plugin_root / "templates" / "github-actions" / "gemini-for-codex-review.yml"
+    workflow_template.write_text(workflow_template.read_text(encoding="utf8") + "\n# --native-structured\n", encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check", "--ci-simulate"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["externalSurfaceSafety"] is False
+    assert "default GitHub Actions workflow unexpectedly contains --native-structured" in payload["failures"]
 
 
 def test_gemini_extension_mcp_evaluation_docs_are_present_and_conservative():

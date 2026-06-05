@@ -3,6 +3,8 @@
 ## 0.10.0 - 2026-06-05
 
 - Add opt-in real Gemini smoke diagnostics for `review --json`, plugin-managed `multi-review --stream-progress`, native-agent structured review, and capability reporting.
+- Split real smoke into lightweight `--quick` and heavier `--full` profiles. Quick smoke now validates install/runtime plumbing without native-agent checks; use `--full` or `--include-native` to include native structured diagnostics.
+- Add real-smoke controls `--model`, `--roles`, `--timeout-seconds`, `--include-native`, plus `GEMINI_FOR_CODEX_REAL_SMOKE_MODEL` / `GEMINI_FOR_CODEX_MODEL` model selection.
 - Expand Gemini CLI capability diagnostics for stream JSON, sessions, extensions, MCP, skills, hooks, policy flags, and raw-output support without enabling those surfaces by default.
 - Add release-check guards that keep raw-output, extension/MCP execution, native-agent orchestration, native structured output, and stream progress out of Stop hooks and generated default CI.
 - Add an evaluation-only Gemini extension/MCP design note for future opt-in work.

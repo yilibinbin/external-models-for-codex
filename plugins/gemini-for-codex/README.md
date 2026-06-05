@@ -71,7 +71,19 @@ Real smoke is opt-in because it invokes the user's authenticated Gemini CLI.
 GEMINI_FOR_CODEX_REAL_SMOKE=1 node plugins/gemini-for-codex/scripts/gemini-companion.mjs real-smoke --quick
 ```
 
-The smoke runner checks `review --json`, plugin-managed `multi-review --stream-progress`, native-agent `multi-review --agent-team native-agents --native-structured`, and capability diagnostics. It is not used by default tests, hooks, or generated GitHub Actions workflows.
+The quick smoke runner checks capability diagnostics, `review --json`, and plugin-managed `multi-review --stream-progress` with a lightweight role set. It is intended to prove the installed plugin and authenticated Gemini CLI can complete the review pipeline without depending on a specific model name, local path, Stop hook, or generated GitHub Actions workflow.
+
+For heavier release diagnostics, use full smoke and choose the model that matches your review policy:
+
+```bash
+GEMINI_FOR_CODEX_REAL_SMOKE=1 node plugins/gemini-for-codex/scripts/gemini-companion.mjs real-smoke --full --model <your-gemini-model> --timeout-seconds 600
+```
+
+`--full` also checks native-agent `multi-review --agent-team native-agents --native-structured`. You can opt into native checks with `--include-native`; this keeps the quick role profile but uses the longer native-capable default timeout budget unless `--timeout-seconds` is given. By default, quick smoke gives each live check up to five minutes and full/native smoke gives each live check up to ten minutes, because Gemini CLI defaults vary by account and can be slow under load. Use `--timeout-seconds` to tighten or expand that budget. `--model` is optional; when omitted, Gemini CLI uses its configured default. You can also set `GEMINI_FOR_CODEX_REAL_SMOKE_MODEL` or `GEMINI_FOR_CODEX_MODEL` instead of passing `--model`. The plugin does not hard-code a provider model because available Gemini models vary by account, region, and CLI version.
+
+`--stream-progress` and `--native-structured` are allowed in this explicit local diagnostic because the command is manually invoked and gated by `GEMINI_FOR_CODEX_REAL_SMOKE=1`. The same flags remain forbidden in Stop hooks and generated default CI workflows; `release-check` fails if they appear in those automatic/default surfaces.
+
+Progress events are an explicit `--stream-progress` interface, not default command output. When enabled, events are emitted as prefixed JSON lines on stderr so stdout remains reserved for command results and machine-readable payloads. Consumers should parse only lines beginning with `[gemini-for-codex progress]`; that prefix is reserved for valid progress JSON and malformed uses are treated as diagnostic failures. Omit `--stream-progress` in CI or tools that treat any stderr output as failure.
 
 `capabilities` reports the Gemini CLI surface detected from `gemini --help`, including sessions, `stream-json`, extension/MCP/skills/hooks commands, policy flags, and raw-output support. Reporting a feature does not enable it; Gemini extension and MCP execution remain disabled by default.
 

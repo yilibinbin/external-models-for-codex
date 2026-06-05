@@ -79,6 +79,7 @@ import {
   releaseLease
 } from "./lib/leases.mjs";
 import { mailboxDirForCwd, leasesDirForCwd } from "./lib/state.mjs";
+import { formatProgressEvent, progressEventsFromStderr } from "./lib/progress.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "real-smoke", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
@@ -91,6 +92,8 @@ const REVIEW_GATE_ENV = "GEMINI_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
 const REPORT_VERSION = 1;
+const JSON_BLOCK_SCAN_LIMIT = 512 * 1024;
+const JSON_BLOCK_CANDIDATE_LIMIT = 32;
 let geminiHelpReportCache = null;
 
 function run(command, args, options = {}) {
@@ -998,7 +1001,155 @@ function emitProgress(args, event, metadata = {}) {
     roles: Array.isArray(args.reviewRoles) ? args.reviewRoles.map((role) => role.name) : [],
     ...safeMetadata
   };
-  process.stderr.write(`[gemini-for-codex progress] ${JSON.stringify(payload)}\n`);
+  process.stderr.write(formatProgressEvent(payload));
+}
+
+function jsonValidation(stdout, validate, failureMessage) {
+  for (const value of jsonCandidatesFromOutput(stdout)) {
+    try {
+      if (validate(value)) {
+        return [];
+      }
+    } catch {
+      continue;
+    }
+  }
+  return [failureMessage];
+}
+
+function jsonCandidatesFromOutput(stdout) {
+  const text = String(stdout ?? "").trim();
+  if (!text) {
+    return [];
+  }
+  const candidates = [text];
+  for (const line of text.split(/\r?\n/)) {
+    const candidate = line.trim();
+    if (candidate.startsWith("{") || candidate.startsWith("[")) {
+      candidates.push(candidate);
+    }
+  }
+  for (const candidate of jsonBlockCandidates(text)) {
+    candidates.push(candidate);
+  }
+  const values = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (seen.has(candidate)) continue;
+    seen.add(candidate);
+    try {
+      values.push(JSON.parse(candidate));
+    } catch {
+      // Ignore noisy lines and malformed fragments; schema validation still
+      // decides whether any parsed payload is acceptable for this smoke check.
+    }
+  }
+  return values;
+}
+
+function jsonBlockCandidates(text) {
+  const blocks = [];
+  if (text.length > JSON_BLOCK_SCAN_LIMIT) {
+    return blocks;
+  }
+  const starts = [];
+  for (let index = 0; index < text.length && starts.length < JSON_BLOCK_CANDIDATE_LIMIT; index += 1) {
+    if ((text[index] === "{" || text[index] === "[") && looksLikeJsonStart(text, index)) {
+      starts.push(index);
+    }
+  }
+  const seen = new Set();
+  for (const start of starts) {
+    if (blocks.length >= JSON_BLOCK_CANDIDATE_LIMIT) break;
+    const block = scanJsonBlockFrom(text, start);
+    if (block && !seen.has(block)) {
+      seen.add(block);
+      blocks.push(block);
+    }
+  }
+  return blocks;
+}
+
+function looksLikeJsonStart(text, index) {
+  const opener = text[index];
+  let next = "";
+  for (let cursor = index + 1; cursor < text.length; cursor += 1) {
+    if (!/\s/.test(text[cursor])) {
+      next = text[cursor];
+      break;
+    }
+  }
+  if (opener === "{") {
+    return next === "\"" || next === "}";
+  }
+  return next === "{" || next === "[" || next === "\"" || next === "]" || next === "-" || /[0-9tfn]/.test(next);
+}
+
+function scanJsonBlockFrom(text, start) {
+  const pairs = { "{": "}", "[": "]" };
+  const stack = [pairs[text[start]]];
+  let inString = false;
+  let escaped = false;
+  for (let index = start + 1; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+    } else if (pairs[char]) {
+      stack.push(pairs[char]);
+    } else if (stack.length && char === stack[stack.length - 1]) {
+      stack.pop();
+      if (!stack.length) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+  return "";
+}
+
+function validateCapabilitiesSmoke(stdout) {
+  return jsonValidation(
+    stdout,
+    (value) => Boolean(value?.capabilities && value?.defaults?.rawOutputAllowed === false),
+    "capabilities did not return expected JSON diagnostics"
+  );
+}
+
+function validateReviewJsonSmoke(stdout) {
+  return jsonValidation(
+    stdout,
+    (value) => typeof value?.verdict === "string" && Array.isArray(value?.findings),
+    "review-json did not return expected structured review JSON"
+  );
+}
+
+function validateNativeAgentStructuredSmoke(stdout) {
+  return jsonValidation(
+    stdout,
+    (value) => value?.mode === "native-agents" && Array.isArray(value?.role_results),
+    "native-agent-structured did not return expected aggregate JSON"
+  );
+}
+
+function nativeStructuredSmokeStatusOk(result) {
+  const aggregates = jsonCandidatesFromOutput(result.stdout)
+    .filter((value) => value?.mode === "native-agents" && Array.isArray(value?.role_results));
+  if (!aggregates.length) {
+    return false;
+  }
+  if (result.status === 0) {
+    return true;
+  }
+  return aggregates.some((aggregate) => aggregate.role_results.some((entry) => entry?.status === "error"));
 }
 
 function printReport(rawArgs) {
@@ -1094,15 +1245,107 @@ function scanFileForForbidden(filePath, forbidden) {
 
 function realSmokeOptions(rawArgs = []) {
   const tokens = normalizeArgv(rawArgs);
-  const options = { quick: false };
-  for (const token of tokens) {
+  const options = {
+    mode: "quick",
+    includeNative: false,
+    model: "",
+    modelFromArg: false,
+    timeoutMs: undefined,
+    roles: undefined
+  };
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
     if (token === "--quick") {
-      options.quick = true;
+      options.mode = "quick";
+    } else if (token === "--full") {
+      options.mode = "full";
+      options.includeNative = true;
+    } else if (token === "--include-native") {
+      options.includeNative = true;
+    } else if (token === "--model") {
+      options.model = normalizeRealSmokeModel(readOptionValue(tokens, index, token));
+      options.modelFromArg = true;
+      index += 1;
+    } else if (token.startsWith("--model=")) {
+      options.model = normalizeRealSmokeModel(token.slice("--model=".length));
+      options.modelFromArg = true;
+    } else if (token === "--timeout-seconds") {
+      options.timeoutMs = parseRealSmokeTimeout(readOptionValue(tokens, index, token));
+      index += 1;
+    } else if (token.startsWith("--timeout-seconds=")) {
+      options.timeoutMs = parseRealSmokeTimeout(token.slice("--timeout-seconds=".length));
+    } else if (token === "--roles") {
+      options.roles = parseRealSmokeRoles(readOptionValue(tokens, index, token));
+      index += 1;
+    } else if (token.startsWith("--roles=")) {
+      options.roles = parseRealSmokeRoles(token.slice("--roles=".length));
     } else {
       throw new Error(`Unknown real-smoke option "${token}".`);
     }
   }
+  if (!options.timeoutMs) {
+    options.timeoutMs = options.mode === "full" || options.includeNative ? 10 * 60 * 1000 : 5 * 60 * 1000;
+  }
+  if (!options.roles) {
+    options.roles = options.mode === "quick" ? ["tests"] : ["correctness", "tests"];
+  }
+  if (!options.modelFromArg) {
+    options.model = normalizeRealSmokeModel(process.env.GEMINI_FOR_CODEX_REAL_SMOKE_MODEL || process.env.GEMINI_FOR_CODEX_MODEL || "");
+  }
+  delete options.modelFromArg;
   return options;
+}
+
+function normalizeRealSmokeModel(value) {
+  const model = String(value || "").trim();
+  if (!model) {
+    return "";
+  }
+  if (model.startsWith("-") || !/^[A-Za-z0-9._:@/-]+$/.test(model)) {
+    throw new Error("Invalid --model value.");
+  }
+  return model;
+}
+
+function parseRealSmokeTimeout(value) {
+  const seconds = Number(value);
+  if (!Number.isInteger(seconds) || seconds < 1 || seconds > 1800) {
+    throw new Error("--timeout-seconds must be an integer from 1 to 1800.");
+  }
+  return seconds * 1000;
+}
+
+function parseRealSmokeRoles(value) {
+  const roles = String(value || "").split(",").map((role) => role.trim()).filter(Boolean);
+  if (!roles.length) {
+    throw new Error("Missing role in --roles.");
+  }
+  for (const role of roles) {
+    if (!Object.hasOwn(REVIEW_ROLES, role)) {
+      throw new Error(`Unknown role in --roles: ${role}.`);
+    }
+  }
+  return roles;
+}
+
+function createRealSmokeWorkspace() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemini-for-codex-smoke-"));
+  const target = path.join(dir, "review-target.txt");
+  fs.writeFileSync(target, "before\n", "utf8");
+  const init = spawnSync("git", ["init"], { cwd: dir, encoding: "utf8" });
+  if (init.status !== 0) {
+    throw new Error(`real-smoke workspace git init failed: ${init.stderr || init.stdout || "unknown error"}`);
+  }
+  const add = spawnSync("git", ["add", "review-target.txt"], { cwd: dir, encoding: "utf8" });
+  if (add.status !== 0) {
+    throw new Error(`real-smoke workspace git add failed: ${add.stderr || add.stdout || "unknown error"}`);
+  }
+  const commit = spawnSync("git", ["-c", "user.name=Gemini for Codex Smoke", "-c", "user.email=gemini-for-codex-smoke@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Initial smoke fixture"], { cwd: dir, encoding: "utf8" });
+  if (commit.status !== 0) {
+    throw new Error(`real-smoke workspace git commit failed: ${commit.stderr || commit.stdout || "unknown error"}`);
+  }
+  fs.writeFileSync(target, "before\nafter\n", "utf8");
+  return dir;
 }
 
 async function runRealSmoke(rawArgs = []) {
@@ -1110,42 +1353,211 @@ async function runRealSmoke(rawArgs = []) {
     console.error("real-smoke is opt-in. Set GEMINI_FOR_CODEX_REAL_SMOKE=1 to run live Gemini CLI smoke checks.");
     process.exit(2);
   }
-  const options = realSmokeOptions(rawArgs);
+  let options;
+  try {
+    options = realSmokeOptions(rawArgs);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  try {
+    options.smokeCwd = createRealSmokeWorkspace();
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(1);
+  }
   const checks = {};
   const failures = [];
-
-  function record(name, result) {
-    checks[name] = { status: result.status, ok: result.status === 0 };
-    if (result.status !== 0) failures.push(`${name} failed with status ${result.status}`);
+  try {
+    for (const smoke of realSmokeChecks(options)) {
+      const started = Date.now();
+      const result = await smoke.run();
+      const validation = validateSmokeResult(smoke.name, result, smoke.validate);
+      const statusOk = validation.statusOk ?? result.status === 0;
+      const resultError = String(result.error || "");
+      checks[smoke.name] = {
+        status: result.status,
+        ok: statusOk && validation.failures.length === 0,
+        durationMs: Date.now() - started,
+        timedOut: result.timedOut || result.errorCode === "ETIMEDOUT" || resultError.includes("ETIMEDOUT"),
+        outputTooLarge: result.errorCode === "EOUTPUT" || resultError.includes("EOUTPUT"),
+        ...validation.metadata
+      };
+      if (!statusOk) failures.push(`${smoke.name} failed with status ${result.status}`);
+      if (checks[smoke.name].timedOut) failures.push(`${smoke.name} timed out after ${Math.round(options.timeoutMs / 1000)} seconds`);
+      if (checks[smoke.name].outputTooLarge) failures.push(`${smoke.name} exceeded output limit`);
+      failures.push(...validation.failures);
+    }
+  } finally {
+    fs.rmSync(options.smokeCwd, { recursive: true, force: true });
   }
 
-  record("capabilities", runGemini(["capabilities"]));
-  record("review-json", geminiPrint("", {
-    _: [],
-    paths: ["."],
-    scope: "working-tree",
-    jsonOutput: true
-  }));
-  record("multi-review-stream-progress", await geminiPrintAsync("", {
-    _: [],
-    paths: ["."],
-    scope: "working-tree",
-    reviewRoles: [{name: "correctness"}, {name: "tests"}],
-    streamProgress: true
-  }));
-  record("native-agent-structured", await geminiPrintAsync("", {
-    _: [],
-    paths: ["."],
-    scope: "working-tree",
-    agentTeam: "native-agents",
-    nativeAgents: true,
-    nativeStructured: true,
-    reviewRoles: [{name: "correctness"}, {name: "tests"}]
-  }));
-
-  const payload = { ok: failures.length === 0, quick: options.quick, checks, failures };
+  const payload = {
+    ok: failures.length === 0,
+    mode: options.mode,
+    quick: options.mode === "quick",
+    includeNative: options.includeNative,
+    model: options.model || "gemini-cli-default",
+    timeoutSeconds: Math.round(options.timeoutMs / 1000),
+    roles: options.roles,
+    checks,
+    failures
+  };
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.ok ? 0 : 1);
+}
+
+function validateSmokeResult(name, result, validate = () => ({ metadata: {}, failures: [] })) {
+  try {
+    const validation = validate(result);
+    return {
+      metadata: validation?.metadata || {},
+      statusOk: validation?.statusOk,
+      failures: Array.isArray(validation?.failures) ? validation.failures : [`${name} returned invalid smoke validation metadata`]
+    };
+  } catch {
+    return { metadata: {}, failures: [`${name} smoke validation failed unexpectedly`] };
+  }
+}
+
+function runSmokeCommand(command, args, options) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd ?? process.cwd(),
+      env: options.env ?? process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let timedOut = false;
+    let outputTooLarge = false;
+    const timeoutMs = options.timeout ?? 15 * 60 * 1000;
+    function killGroup(signal) {
+      try {
+        process.kill(-child.pid, signal);
+      } catch {
+        try {
+          child.kill(signal);
+        } catch {
+          // Process may already be gone.
+        }
+      }
+    }
+    const timer = setTimeout(() => {
+      timedOut = true;
+      killGroup("SIGTERM");
+      setTimeout(() => {
+        if (!settled) killGroup("SIGKILL");
+      }, 2000).unref();
+    }, timeoutMs);
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+      if (stdout.length > 20 * 1024 * 1024) {
+        outputTooLarge = true;
+        stdout = stdout.slice(0, 20 * 1024 * 1024);
+        child.stdout.destroy();
+        child.stderr.destroy();
+        killGroup("SIGKILL");
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+      if (stderr.length > 20 * 1024 * 1024) {
+        outputTooLarge = true;
+        stderr = stderr.slice(0, 20 * 1024 * 1024);
+        child.stdout.destroy();
+        child.stderr.destroy();
+        killGroup("SIGKILL");
+      }
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ status: 1, stdout, stderr, error: String(error.message ?? error), errorCode: error.code ? String(error.code) : "", timedOut });
+    });
+    child.on("close", (status, signal) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        status: timedOut ? 1 : status ?? 1,
+        stdout,
+        stderr: signal ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal}` : stderr,
+        error: timedOut ? "ETIMEDOUT" : outputTooLarge ? "EOUTPUT" : "",
+        errorCode: timedOut ? "ETIMEDOUT" : outputTooLarge ? "EOUTPUT" : "",
+        timedOut
+      });
+    });
+  });
+}
+
+function realSmokeChecks(options) {
+  const commonScopeArgs = ["--scope", "working-tree", "--path", "."];
+  const smokeRoleArgs = ["--roles", options.roles.join(",")];
+  const modelArgs = options.model ? ["--model", options.model] : [];
+  const companion = fileURLToPath(import.meta.url);
+  const node = process.execPath;
+  const checks = [
+    {
+      name: "capabilities",
+      run: () => runSmokeCommand(node, [companion, "capabilities"], { cwd: options.smokeCwd, timeout: options.timeoutMs }),
+      validate: (result) => ({ metadata: {}, failures: validateCapabilitiesSmoke(result.stdout) })
+    },
+    {
+      name: "review-json",
+      run: () => runSmokeCommand(node, [companion, "review", "--json", ...modelArgs, ...commonScopeArgs], { cwd: options.smokeCwd, timeout: options.timeoutMs }),
+      validate: (result) => {
+        const failures = validateReviewJsonSmoke(result.stdout);
+        return { metadata: {}, statusOk: result.status === 0 && failures.length === 0, failures };
+      }
+    },
+    {
+      name: "multi-review-stream-progress",
+      run: () => runSmokeCommand(node, [companion, "multi-review", ...modelArgs, ...smokeRoleArgs, "--stream-progress", ...commonScopeArgs], { cwd: options.smokeCwd, timeout: options.timeoutMs }),
+      validate: validateStreamProgressSmoke
+    }
+  ];
+  if (options.includeNative) {
+    checks.push(
+      {
+        name: "native-agent-structured",
+        run: () => runSmokeCommand(node, [companion, "multi-review", ...modelArgs, "--agent-team", "native-agents", "--native-structured", ...smokeRoleArgs, ...commonScopeArgs], { cwd: options.smokeCwd, timeout: options.timeoutMs }),
+        validate: (result) => {
+          const failures = validateNativeAgentStructuredSmoke(result.stdout);
+          return { metadata: {}, statusOk: nativeStructuredSmokeStatusOk(result), failures };
+        }
+      }
+    );
+  }
+  return checks;
+}
+
+function validateStreamProgressSmoke(result) {
+  const progress = progressEventsFromStderr(result.stderr);
+  const pluginEvents = progress.events.filter((event) => event.mode === "plugin-managed");
+  const eventNames = pluginEvents.map((event) => String(event.event || ""));
+  const hasStarted = eventNames.includes("multi-review started");
+  const hasFinished = eventNames.includes("multi-review finished");
+  const stderrProgressEvents = hasStarted && hasFinished;
+  const validationFailures = [];
+  if (!stderrProgressEvents) validationFailures.push("multi-review-stream-progress did not emit expected sanitized start and finish progress events");
+  if (progress.malformedCount) validationFailures.push("multi-review-stream-progress emitted malformed progress events");
+  if (progress.malformedPrefixCount) validationFailures.push("multi-review-stream-progress emitted malformed progress prefixes");
+  return {
+    metadata: {
+      stderrProgressEvents,
+      progressEvents: eventNames,
+      malformedProgressEvents: progress.malformedCount,
+      malformedProgressPrefixes: progress.malformedPrefixCount
+    },
+    statusOk: result.status === 0 && stderrProgressEvents && progress.malformedCount === 0 && progress.malformedPrefixCount === 0,
+    failures: validationFailures
+  };
 }
 
 function releaseCheckOptions(rawArgs = []) {
@@ -1180,11 +1592,14 @@ function runReleaseCheck(rawArgs = []) {
   } catch (error) {
     failures.push(`manifest parse failed: ${error.message || String(error)}`);
   }
-  failures.push(...scanFileForForbidden(path.join(ROOT_DIR, "README.md"), [
+  const forbiddenStrings = [
     ["", "Users", "fanghao"].join("/"),
     ["CLAUDE", "PLUGIN_ROOT"].join("_"),
     ["CLAUDE", "FOR_CODEX"].join("_")
-  ]));
+  ];
+  for (const file of releaseTextFiles()) {
+    failures.push(...scanFileForForbidden(file, forbiddenStrings));
+  }
   const hooksPath = path.join(ROOT_DIR, "hooks", "hooks.json");
   try {
     const hooks = JSON.parse(fs.readFileSync(hooksPath, "utf8"));
@@ -1250,17 +1665,45 @@ function checkGithubActionsCi() {
 
 function checkRawOutputSafety() {
   const failures = [];
-  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
   const dangerous = [
     ["--raw", "output"].join("-"),
     ["--accept", "raw", "output", "risk"].join("-")
   ];
-  for (const token of dangerous) {
-    if (companion.includes(token)) {
-      failures.push(`companion contains forbidden Gemini review flag ${token}`);
+  for (const file of scriptTextFiles()) {
+    const text = fs.readFileSync(file, "utf8");
+    for (const token of dangerous) {
+      if (text.includes(token)) {
+        failures.push(`${file} contains forbidden Gemini review flag ${token}`);
+      }
     }
   }
   return { ok: failures.length === 0, failures };
+}
+
+function scriptTextFiles() {
+  const files = [path.join(ROOT_DIR, "scripts", "gemini-companion.mjs")];
+  const libDir = path.join(ROOT_DIR, "scripts", "lib");
+  collectMjsFiles(libDir, files);
+  return files;
+}
+
+function collectMjsFiles(dir, files) {
+  if (!fs.existsSync(dir)) return;
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      collectMjsFiles(fullPath, files);
+    } else if (entry.isFile() && entry.name.endsWith(".mjs")) {
+      files.push(fullPath);
+    }
+  }
+}
+
+function releaseTextFiles() {
+  return [
+    path.join(ROOT_DIR, "README.md"),
+    ...scriptTextFiles()
+  ];
 }
 
 function checkExternalSurfaceSafety() {
