@@ -110,6 +110,40 @@ const READ_ONLY_MCP_TOOLS = Object.freeze([
   "mcp__claude-for-codex-git__git_grep",
   "mcp__claude-for-codex-git__git_ls_files"
 ]);
+const STRUCTURED_REVIEW_FINDING_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["severity", "title", "body", "file", "line_start", "line_end", "confidence", "recommendation"],
+  properties: {
+    severity: { type: "string", enum: ["critical", "high", "medium", "low"] },
+    title: { type: "string" },
+    body: { type: "string" },
+    file: { type: "string" },
+    line_start: { type: "integer", minimum: 1 },
+    line_end: { type: "integer", minimum: 1 },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    recommendation: { type: "string" }
+  }
+});
+
+const STRUCTURED_REVIEW_SCHEMA = Object.freeze({
+  type: "object",
+  additionalProperties: false,
+  required: ["verdict", "summary", "findings", "next_steps"],
+  properties: {
+    verdict: { type: "string", enum: ["approve", "needs-attention"] },
+    summary: { type: "string" },
+    findings: {
+      type: "array",
+      items: STRUCTURED_REVIEW_FINDING_SCHEMA
+    },
+    next_steps: {
+      type: "array",
+      items: { type: "string" }
+    }
+  }
+});
+
 const SDK_MULTI_REVIEW_OUTPUT_SCHEMA = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -120,28 +154,21 @@ const SDK_MULTI_REVIEW_OUTPUT_SCHEMA = Object.freeze({
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["role"],
+        required: ["role", "result"],
         properties: {
           agent: { type: "string" },
           role: { type: "string" },
-          status: { type: "string", enum: ["ok", "failed"] },
-          text: { type: "string" },
-          error: { type: "string" },
           result: {
             type: "object",
             additionalProperties: false,
-            required: ["status", "text"],
+            required: ["status"],
             properties: {
               status: { type: "string", enum: ["ok", "failed"] },
-              text: { type: "string" },
+              review: STRUCTURED_REVIEW_SCHEMA,
               error: { type: "string" }
             }
           }
-        },
-        anyOf: [
-          { required: ["status", "text"] },
-          { required: ["result"] }
-        ]
+        }
       }
     }
   }
@@ -150,7 +177,7 @@ const SDK_MULTI_REVIEW_OUTPUT_SCHEMA = Object.freeze({
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? process.cwd(),
-    env: process.env,
+    env: options.env ? { ...process.env, ...options.env } : process.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: 20 * 1024 * 1024,
@@ -353,7 +380,7 @@ function hasBaseRef(base) {
   return git(["rev-parse", "--verify", `${base}^{commit}`]).status === 0;
 }
 
-function parseArgs(argv) {
+function parseArgs(argv, options = {}) {
   const tokens = normalizeArgv(argv);
   const parsed = { _: [], paths: [] };
   for (let index = 0; index < tokens.length; index += 1) {
@@ -465,6 +492,9 @@ function parseArgs(argv) {
         index = semanticIndex;
         continue;
       }
+      if (options.rejectUnknownOptions && arg.startsWith("-")) {
+        throw new Error(`Unsupported option ${arg}`);
+      }
       parsed._.push(arg);
     }
   }
@@ -481,6 +511,7 @@ const MULTI_REVIEW_ONLY_OPTIONS = Object.freeze([
   ["fallbackModel", "--fallback-model"]
 ]);
 const STREAM_PROGRESS_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
+const PROMPT_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "plan", "rescue"]);
 
 function validateNativeModeOptions(args, command) {
   for (const [property, option] of MULTI_REVIEW_ONLY_OPTIONS) {
@@ -497,7 +528,7 @@ function validateNativeModeOptions(args, command) {
 }
 
 function validateCommandNativeModeOptions(command, rawArgs) {
-  const parsed = parseArgs(rawArgs);
+  const parsed = parseArgs(rawArgs, { rejectUnknownOptions: PROMPT_COMMANDS.has(command) });
   validateNativeModeOptions(parsed, command);
   if (command === "multi-review") {
     if (parsed.agentTeam !== undefined && !VALID_AGENT_TEAMS.has(parsed.agentTeam)) {
@@ -529,6 +560,87 @@ function validateBackendCompatibleOptions(args) {
       throw new Error(`Unsupported option ${option}: CLI-only and not supported for SDK backend.`);
     }
   }
+}
+
+function commandHelp(command) {
+  const common = [
+    "--scope auto|working-tree|branch",
+    "--base <ref>",
+    "--path <path>",
+    "--model <model>",
+    "--effort <effort>",
+    "--backend cli|sdk",
+    "--json",
+    "--stream-progress"
+  ];
+  const help = {
+    review: [
+      "Usage: claude-companion.mjs review [options] [focus]",
+      ...common,
+      "--role <role>",
+      "--roles <a,b>",
+      "--semantic-context off|auto|<provider>"
+    ],
+    "adversarial-review": [
+      "Usage: claude-companion.mjs adversarial-review [options] [focus]",
+      ...common,
+      "--adversarial-lens <lens>",
+      "--adversarial-lenses <a,b>",
+      "--parallel"
+    ],
+    "multi-review": [
+      "Usage: claude-companion.mjs multi-review [options] [focus]",
+      ...common,
+      "--role <role>",
+      "--roles <a,b>",
+      "--role-pack <pack>",
+      "--agent-team plugin|sdk-subagents",
+      "--native-structured",
+      "--parallel",
+      "--sequential",
+      "--use-mailbox",
+      "--advisory-leases"
+    ],
+    rescue: [
+      "Usage: claude-companion.mjs rescue [options] [focus]",
+      ...common,
+      "--write"
+    ],
+    plan: [
+      "Usage: claude-companion.mjs plan [options] [focus]",
+      ...common
+    ],
+    ultrareview: [
+      "Usage: claude-companion.mjs ultrareview --confirm-cost [options] [target]",
+      "--json",
+      "--timeout <minutes>",
+      "--confirm-cost"
+    ],
+    "review-gate": [
+      "Usage: claude-companion.mjs review-gate [options]",
+      "--backend cli|sdk",
+      "--semantic-context off|auto|<provider>"
+    ]
+  };
+  return help[command] ? `${help[command].join("\n")}\n` : "";
+}
+
+function maybePrintCommandHelp(command, rawArgs) {
+  let tokens;
+  try {
+    tokens = normalizeArgv(rawArgs);
+  } catch {
+    return false;
+  }
+  if (!tokens.includes("--help") && !tokens.includes("-h")) {
+    return false;
+  }
+  const text = commandHelp(command);
+  if (!text) {
+    return false;
+  }
+  process.stdout.write(text);
+  return true;
 }
 
 function resolveReviewRoles(args) {
@@ -796,6 +908,10 @@ function buildClaudePrintInvocation(prompt, options) {
   if (!options.write) {
     mcpConfig = createGitMcpConfig(process.cwd(), process.env);
     args.push(
+      "--disable-slash-commands",
+      "--no-session-persistence",
+      "--setting-sources",
+      "",
       "--tools",
       READ_ONLY_BUILTIN_TOOLS.join(","),
       "--allowedTools",
@@ -833,7 +949,10 @@ function buildClaudePrintInvocation(prompt, options) {
 function claudePrint(prompt, options) {
   const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
   try {
-    return runClaude(args, { timeout: options.timeout });
+    return runClaude(args, {
+      timeout: options.timeout,
+      env: options.write ? undefined : { CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1" }
+    });
   } finally {
     if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
       mcpConfig.cleanup();
@@ -845,7 +964,7 @@ function runClaudeAsync(args, options = {}) {
   return new Promise((resolve) => {
     const child = spawn(claudeCommand(), args, {
       cwd: options.cwd ?? process.cwd(),
-      env: process.env,
+      env: options.env ? { ...process.env, ...options.env } : process.env,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const stdoutChunks = [];
@@ -904,7 +1023,10 @@ async function claudePrintAsync(prompt, options) {
   }
   const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
   try {
-    return await runClaudeAsync(args, { timeout: options.timeout });
+    return await runClaudeAsync(args, {
+      timeout: options.timeout,
+      env: options.write ? undefined : { CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1" }
+    });
   } finally {
     if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
       mcpConfig.cleanup();
@@ -2038,7 +2160,15 @@ function sdkSubagentStatus(value, entry) {
   return entry?.error ? 1 : 0;
 }
 
-function normalizeSdkSubagentRoleEntry(entry) {
+function normalizeSdkReviewObject(value, roleNameForError) {
+  try {
+    return normalizeReviewOutput(value, { role: roleNameForError });
+  } catch (error) {
+    throw new Error(`role ${roleNameForError} has invalid role_results[].result.review: ${error.message || String(error)}`);
+  }
+}
+
+function normalizeSdkSubagentRoleEntry(entry, { requireReview = false } = {}) {
   if (!entry || typeof entry !== "object" || typeof entry.role !== "string") {
     return null;
   }
@@ -2049,67 +2179,130 @@ function normalizeSdkSubagentRoleEntry(entry) {
   if (source.status !== undefined && typeof source.status !== "string" && typeof source.status !== "number") {
     return null;
   }
+  if (source.review !== undefined && (!source.review || typeof source.review !== "object" || Array.isArray(source.review))) {
+    return null;
+  }
   if (source.text !== undefined && typeof source.text !== "string") {
     return null;
   }
   if (source.error !== undefined && typeof source.error !== "string") {
     return null;
   }
+  if (requireReview && source.review === undefined && source.status !== "failed") {
+    throw new Error(`role_results[].result.review is required for ${entry.role}.`);
+  }
   return {
     role: entry.role,
     status: source.status,
     text: source.text,
-    error: source.error
+    error: source.error,
+    review: source.review === undefined ? undefined : normalizeSdkReviewObject(source.review, entry.role)
   };
 }
 
-function normalizeSdkSubagentJson(stdout) {
+function normalizeSdkSubagentJson(stdout, { requireReview = false } = {}) {
   let parsed;
   try {
     parsed = JSON.parse(stdout);
   } catch {
-    return { ok: false };
+    return { ok: false, reason: "SDK output was not valid JSON." };
   }
   if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.role_results)) {
-    return { ok: false };
+    return { ok: false, reason: "SDK output must contain role_results array." };
   }
   const roleResults = [];
   for (const entry of parsed.role_results) {
-    const roleEntry = normalizeSdkSubagentRoleEntry(entry);
+    let roleEntry;
+    try {
+      roleEntry = normalizeSdkSubagentRoleEntry(entry, { requireReview });
+    } catch (error) {
+      return { ok: false, reason: error.message || String(error) };
+    }
     if (!roleEntry) {
-      return { ok: false };
+      return { ok: false, reason: "Each role result must include role and result fields." };
     }
     roleResults.push(roleEntry);
   }
   return { ok: true, parsed: { ...parsed, role_results: roleResults } };
 }
 
+function sdkSubagentCoverageError(expectedRoles, roleResults) {
+  const expected = expectedRoles.map((role) => role.name);
+  const actual = roleResults.map((entry) => entry.role);
+  const countRoles = (roles) => {
+    const counts = new Map();
+    for (const role of roles) {
+      counts.set(role, (counts.get(role) ?? 0) + 1);
+    }
+    return counts;
+  };
+  const expectedCounts = countRoles(expected);
+  const actualCounts = countRoles(actual);
+  const missing = [...expectedCounts.entries()]
+    .filter(([role, count]) => (actualCounts.get(role) ?? 0) < count)
+    .map(([role]) => role);
+  const extra = [...actualCounts.entries()]
+    .filter(([role, count]) => (expectedCounts.get(role) ?? 0) < count)
+    .map(([role]) => role);
+  if (!missing.length && !extra.length) {
+    return "";
+  }
+  const parts = ["SDK subagent role coverage mismatch."];
+  if (missing.length) {
+    parts.push(`missing=${missing.join(",")}`);
+  }
+  if (extra.length) {
+    parts.push(`extra=${extra.join(",")}`);
+  }
+  return parts.join(" ");
+}
+
 async function runSdkSubagentMultiReview(args, gitContext) {
   if (args.backend !== "sdk") {
     throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
   }
-  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model });
+  const structuredJson = Boolean(args.jsonOutput && args.nativeStructured);
+  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model, structuredJson });
   const focusText = args._.join(" ");
-  const prompt = nativeReviewTeamPrompt(args.reviewRoles, gitContext, focusText);
+  const prompt = nativeReviewTeamPrompt(args.reviewRoles, gitContext, focusText, { structuredJson });
   const aggregate = await runSdkNativeReview(prompt, args, {
     cwd: process.cwd(),
     timeout: args.timeout,
     agents,
-    outputSchema: args.nativeStructured ? SDK_MULTI_REVIEW_OUTPUT_SCHEMA : undefined,
+    outputSchema: structuredJson ? SDK_MULTI_REVIEW_OUTPUT_SCHEMA : undefined,
     streamProgress: Boolean(args.streamProgress)
   });
   if (aggregate.status !== 0) {
     return { aggregate, results: [] };
   }
-  const normalized = normalizeSdkSubagentJson(aggregate.stdout);
+  const structuredOutput = aggregate.metadata?.structuredOutput;
+  const normalized = normalizeSdkSubagentJson(
+    structuredOutput === undefined ? aggregate.stdout : JSON.stringify(structuredOutput),
+    { requireReview: structuredJson }
+  );
   if (!normalized.ok) {
+    const message = `Invalid SDK subagent JSON output.${normalized.reason ? ` ${normalized.reason}` : ""}`;
     return {
       aggregate: {
         ...aggregate,
         status: 1,
-        stderr: "Invalid SDK subagent JSON output.",
-        error: "Invalid SDK subagent JSON output.",
+        stderr: message,
+        error: message,
         errorCode: "SDK_SUBAGENT_INVALID_JSON"
+      },
+      results: []
+    };
+  }
+  const coverageError = sdkSubagentCoverageError(args.reviewRoles, normalized.parsed.role_results);
+  if (coverageError) {
+    return {
+      aggregate: {
+        ...aggregate,
+        status: 1,
+        stdout: "",
+        stderr: coverageError,
+        error: coverageError,
+        errorCode: "SDK_SUBAGENT_ROLE_COVERAGE"
       },
       results: []
     };
@@ -2126,7 +2319,10 @@ async function runSdkSubagentMultiReview(args, gitContext) {
         error: entry?.error ?? "",
         errorCode: entry?.error ? "SDK_SUBAGENT_ROLE_ERROR" : "",
         backend: "sdk",
-        metadata: { orchestration: "sdk-subagents" }
+        metadata: {
+          orchestration: "sdk-subagents",
+          structuredReview: entry?.review
+        }
       }
     };
   });
@@ -2144,7 +2340,9 @@ function renderStructuredRoleReview(results) {
     try {
       parsedResults.push({
         role,
-        result: parseStructuredReviewResult(result.stdout, { role: role.name })
+        result: result.metadata?.structuredReview
+          ? result.metadata.structuredReview
+          : parseStructuredReviewResult(result.stdout, { role: role.name })
       });
     } catch (error) {
       failures.push(`${role.name}: ${error.message || String(error)}; raw output: ${result.stdout.trim()}`);
@@ -2158,7 +2356,8 @@ function renderStructuredRoleReview(results) {
   }
   return {
     ok: true,
-    text: `${JSON.stringify(aggregateRoleReviewOutputs(parsedResults), null, 2)}\n`
+    text: `${JSON.stringify(aggregateRoleReviewOutputs(parsedResults), null, 2)}\n`,
+    parsedResults
   };
 }
 
@@ -2394,7 +2593,9 @@ async function runClaudeMultiReview(rawArgs) {
         stdout: "",
         stderr: renderedJson.text,
         error: "",
-        errorCode: ""
+        errorCode: "",
+        backend: args.agentTeam === "sdk-subagents" ? "sdk" : undefined,
+        metadata: nativeAggregate?.metadata ?? {}
       }, startedAt, undefined, results);
       process.stderr.write(renderedJson.text);
       process.exit(1);
@@ -2405,13 +2606,19 @@ async function runClaudeMultiReview(rawArgs) {
     } catch {
       parsedAggregate = undefined;
     }
+    const parsedByRole = new Map((renderedJson.parsedResults ?? [])
+      .map(({ role, result }) => [role.name, result]));
+    const reportRoleResults = results.map((entry) => ({
+      ...entry,
+      parsed: parsedByRole.get(entry.role.name)
+    }));
     recordCommandReport("multi-review", args, {
       status: 0,
       stdout: renderedJson.text,
       stderr: "",
       error: "",
       errorCode: ""
-    }, startedAt, parsedAggregate, results);
+    }, startedAt, parsedAggregate, reportRoleResults);
     process.stdout.write(renderedJson.text);
     process.exit(0);
   }
@@ -2711,6 +2918,10 @@ const [command, ...rawArgs] = process.argv.slice(2);
 if (!VALID_COMMANDS.has(command)) {
   console.error(`Usage: claude-companion.mjs ${Array.from(VALID_COMMANDS).join("|")} [args]`);
   process.exit(2);
+}
+
+if (maybePrintCommandHelp(command, rawArgs)) {
+  process.exit(0);
 }
 
 if (command !== "reserve-job") {

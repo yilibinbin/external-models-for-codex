@@ -239,6 +239,65 @@ function checkNativeReleaseAssets(root) {
   ];
 }
 
+export function readOnlyIsolationChecksFromSource({ companion = "", backend = "" } = {}) {
+  const combined = `${companion}\n${backend}`;
+  const cliMarkers = [
+    "--disable-slash-commands",
+    "--no-session-persistence",
+    "--setting-sources",
+    "READ_ONLY_BUILTIN_TOOLS.join(\",\")",
+    "READ_ONLY_MCP_TOOLS.join(\",\")",
+    "--disallowedTools",
+    "Edit,Write,MultiEdit,Bash",
+    "--strict-mcp-config"
+  ];
+  const sdkMarkers = [
+    "settingSources: []",
+    "skills: []",
+    "hooks: {}",
+    "plugins: []",
+    "persistSession: false",
+    "CLAUDE_FOR_CODEX_ISOLATED_REVIEW",
+    "structuredOutput = event.structured_output"
+  ];
+  return [
+    result(
+      cliMarkers.every((marker) => companion.includes(marker)),
+      "read-only-cli-isolation",
+      "disable slash commands/session persistence/settings; read allow-list; write deny-list; strict MCP"
+    ),
+    result(
+      sdkMarkers.every((marker) => backend.includes(marker)),
+      "read-only-sdk-isolation",
+      "settingSources=[], skills=[], hooks={}, plugins=[], persistSession=false"
+    ),
+    result(
+      !/CLAUDE_CONFIG_DIR\s*[:=]/.test(combined),
+      "read-only-no-config-dir-relocation",
+      "CLAUDE_CONFIG_DIR is not assigned in read-only companion/backend code"
+    ),
+    result(
+      backend.includes("metadata.structuredOutput") && companion.includes("aggregate.metadata?.structuredOutput"),
+      "read-only-sdk-structured-output",
+      "SDK structured_output is captured as metadata and consumed by native subagent aggregation"
+    ),
+    result(
+      companion.includes("structuredReview") &&
+        companion.includes("role_results[].result.review") &&
+        companion.includes("result.metadata?.structuredReview"),
+      "sdk-native-structured-review-contract",
+      "SDK native structured multi-review consumes nested role review objects"
+    )
+  ];
+}
+
+function checkReadOnlyIsolation(root) {
+  const { pluginRoot } = resolveLayout(root);
+  const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
+  const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
+  return readOnlyIsolationChecksFromSource({ companion, backend });
+}
+
 function checkSecrets(root) {
   const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
   const scanRoot = installedPluginOnly ? pluginRoot : repoRoot;
@@ -370,6 +429,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkHooks(root),
     ...checkDocs(root),
     ...checkNativeReleaseAssets(root),
+    ...checkReadOnlyIsolation(root),
     ...checkSecrets(root),
     ...checkSkills(root),
     ...checkRolePacks(),

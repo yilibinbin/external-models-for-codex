@@ -132,11 +132,13 @@ For `--json` modes, exit status reports command/parsing success. Inspect `verdic
 
 ## MCP-backed read-only Git review
 
-Read-only Claude review receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments while `Bash`, `Edit`, `Write`, and `MultiEdit` remain disallowed.
+Read-only Claude review receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments while `Bash`, `Edit`, `Write`, and `MultiEdit` remain disallowed. CLI read-only review also disables Claude Code slash commands, settings sources, and session persistence while preserving normal Claude authentication.
 
 `multi-review` runs role reviewers in parallel by default. `adversarial-review --parallel` runs skeptic, architect, and minimalist lens reviewers as independent Claude CLI processes and aggregates their outputs. Use `--sequential` when a deterministic one-at-a-time run is needed.
 
-Claude native SDK mode is explicit. Use `multi-review --backend sdk --agent-team sdk-subagents` to create native SDK subagents for the selected review roles. The runtime resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. Add `--native-structured` for SDK schema-backed aggregate output and `--stream-progress` for sanitized streaming progress without printing raw SDK chunks or storing raw SDK messages in reports.
+Claude native SDK mode is explicit and experimental until live SDK subagent smoke tests are stable. Use `multi-review --backend sdk --agent-team sdk-subagents` to create native SDK subagents for the selected review roles; plugin-managed CLI `multi-review` remains the default. The runtime resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. SDK read-only review disables settings sources, skills, hooks, plugins, and session persistence while preserving normal Claude authentication. Combine `--json --native-structured` for SDK schema-backed aggregate output where `role_results[].result.review` is a full per-role review JSON object validated locally by the plugin. Raw role text and raw SDK `structured_output` are not stored in reports. Add `--stream-progress` for sanitized streaming progress without printing raw SDK chunks or storing raw SDK messages in reports.
+
+SDK native subagent structured reviews use nested per-role review objects and remain an explicit opt-in path. The default review backend is unchanged.
 
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is not used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because it may use remote/cloud execution and usage-credit billing.
 
@@ -184,7 +186,7 @@ The Stop gate uses the `UserPromptSubmit` turn-baseline fingerprint to avoid rev
 
 ## Safety Model
 
-- Review workflows call Claude with read-only permissions.
+- Review workflows call Claude with read-only permissions, disabled slash/settings/session side effects, and explicit write-tool denial.
 - Background jobs persist outside the repository under plugin data state.
 - Codex remains responsible for accepting or rejecting Claude findings.
 - The Stop gate blocks only when Claude explicitly returns `BLOCK:`.
@@ -196,7 +198,7 @@ The Stop gate uses the `UserPromptSubmit` turn-baseline fingerprint to avoid rev
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
-node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --native-structured --stream-progress --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --json --native-structured --stream-progress --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs ultrareview --confirm-cost --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --background --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs jobs

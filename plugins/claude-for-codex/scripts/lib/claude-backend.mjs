@@ -209,7 +209,16 @@ export function sdkReadOnlyOptions(mcpConfig) {
     allowedTools: [...READ_ONLY_BUILTIN_TOOLS, ...READ_ONLY_MCP_TOOLS],
     disallowedTools: [...WRITE_DENY_TOOLS],
     mcpServers: config.mcpServers ?? {},
-    strictMcpConfig: true
+    strictMcpConfig: true,
+    settingSources: [],
+    skills: [],
+    hooks: {},
+    plugins: [],
+    persistSession: false,
+    env: {
+      ...process.env,
+      CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1"
+    }
   };
 }
 
@@ -246,6 +255,9 @@ function metadataFromEvents(events) {
         metadata.sdkTokenCounts = Object.fromEntries(
           Object.entries(event.usage).filter(([, value]) => typeof value === "number")
         );
+      }
+      if (Object.prototype.hasOwnProperty.call(event, "structured_output")) {
+        metadata.structuredOutput = event.structured_output;
       }
     }
   }
@@ -393,6 +405,12 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
       disallowedTools: sdkOptions.disallowedTools,
       mcpServers: sdkOptions.mcpServers,
       strictMcpConfig: sdkOptions.strictMcpConfig,
+      settingSources: sdkOptions.settingSources,
+      skills: sdkOptions.skills,
+      hooks: sdkOptions.hooks,
+      plugins: sdkOptions.plugins,
+      persistSession: sdkOptions.persistSession,
+      env: sdkOptions.env,
       agents: sdkOptions.agents,
       outputFormat: sdkOptions.outputFormat,
       includePartialMessages: sdkOptions.includePartialMessages

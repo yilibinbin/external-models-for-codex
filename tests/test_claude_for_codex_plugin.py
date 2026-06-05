@@ -158,7 +158,7 @@ print({json.dumps(json.dumps(response))})
     return provider, config_path, tmp_path / "semantic-capture"
 
 
-def write_fake_claude_sdk(tmp_path, *, stdout="SDK_OK", extra_js=""):
+def write_fake_claude_sdk(tmp_path, *, stdout="SDK_OK", structured_output=None, extra_js=""):
     sdk_dir = tmp_path / "fake-claude-sdk"
     capture = tmp_path / "sdk-capture"
     sdk_dir.mkdir()
@@ -176,7 +176,7 @@ const capture = {json.dumps(str(capture))};
 export async function* query(input) {{
   fs.writeFileSync(`${{capture}}/query.json`, JSON.stringify(input, null, 2));
   {extra_js}
-  yield {{
+  const resultEvent = {{
     type: 'result',
     subtype: 'success',
     result: {json.dumps(stdout)},
@@ -184,11 +184,38 @@ export async function* query(input) {{
     total_cost_usd: 0.01,
     usage: {{ input_tokens: 3, output_tokens: 4 }}
   }};
+  const structuredOutput = {json.dumps(structured_output)};
+  if (structuredOutput !== null) {{
+    resultEvent.structured_output = structuredOutput;
+  }}
+  yield resultEvent;
 }}
 """,
         encoding="utf8",
     )
     return sdk_dir / "index.mjs", capture
+
+
+def structured_review_payload(summary="structured sdk review ok", verdict="approve", findings=None):
+    return {
+        "verdict": verdict,
+        "summary": summary,
+        "findings": [] if findings is None else findings,
+        "next_steps": [],
+    }
+
+
+def structured_review_finding_payload():
+    return {
+        "severity": "high",
+        "title": "Regression title",
+        "body": "Regression body",
+        "file": "calc.py",
+        "line_start": 2,
+        "line_end": 2,
+        "confidence": 0.95,
+        "recommendation": "Restore the expected behavior.",
+    }
 
 
 def run_fake_claude_adversarial_review(tmp_path, args, commit_head=False):
@@ -557,6 +584,115 @@ def test_multi_review_env_sdk_backend_allows_explicit_cli_budget_flags(tmp_path)
     argv = argvs[0]
     assert argv[argv.index("--max-budget-usd") + 1] == "1.50"
     assert argv[argv.index("--fallback-model") + 1] == "claude-sonnet-4-5"
+
+
+def test_multi_review_help_does_not_invoke_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "claude-invoked.txt"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"""#!/usr/bin/env python3
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+pathlib.Path({json.dumps(str(marker))}).write_text("invoked\\n", encoding="utf8")
+raise SystemExit(99)
+""",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "Usage: claude-companion.mjs multi-review" in result.stdout
+    assert "--agent-team plugin|sdk-subagents" in result.stdout
+    assert not marker.exists()
+
+
+def test_unknown_review_option_fails_before_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "claude-invoked.txt"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"""#!/usr/bin/env python3
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+pathlib.Path({json.dumps(str(marker))}).write_text("invoked\\n", encoding="utf8")
+raise SystemExit(99)
+""",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--definitely-not-a-real-option"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Unsupported option --definitely-not-a-real-option" in result.stderr
+    assert not marker.exists()
+
+
+def test_unknown_short_review_option_fails_before_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "claude-invoked.txt"
+    fake_bin.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"""#!/usr/bin/env python3
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+pathlib.Path({json.dumps(str(marker))}).write_text("invoked\\n", encoding="utf8")
+raise SystemExit(99)
+""",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "-not-real"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Unsupported option -not-real" in result.stderr
+    assert not marker.exists()
 
 
 def test_ultrareview_requires_explicit_consent(tmp_path):
@@ -1634,6 +1770,9 @@ def test_read_only_review_invokes_claude_with_strict_mcp_config(tmp_path):
     argv = json.loads(argv_file.read_text(encoding="utf8"))
     assert "--mcp-config" in argv
     assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--no-session-persistence" in argv
+    assert argv[argv.index("--setting-sources") + 1] == ""
     builtin_tools = argv[argv.index("--tools") + 1].split(",")
     assert builtin_tools == ["Read", "Grep", "Glob"]
     allowed_tools = argv[argv.index("--allowedTools") + 1].split(",")
@@ -1650,6 +1789,60 @@ def test_read_only_review_invokes_claude_with_strict_mcp_config(tmp_path):
     assert server["args"][-1] == "server"
     assert "mcp-git.mjs" in " ".join(server["args"])
     assert server["cwd"] == str(repo)
+
+
+def test_read_only_review_does_not_create_planning_side_effect_files(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    argv_file = tmp_path / "argv.json"
+    repo.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "calc.py").write_text("def div(a, b):\n    return a / b\n", encoding="utf8")
+    subprocess.run(["git", "add", "calc.py"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "calc.py").write_text("def div(a, b):\n    return 0\n", encoding="utf8")
+
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        f"fs.writeFileSync({json.dumps(str(argv_file))}, JSON.stringify(process.argv.slice(2)));\n"
+        "for (const name of ['task_plan.md', 'findings.md', 'progress.md']) {\n"
+        "  if (!process.argv.includes('--disable-slash-commands') || !process.argv.includes('--no-session-persistence')) {\n"
+        "    fs.writeFileSync(name, 'side effect');\n"
+        "  }\n"
+        "}\n"
+        "process.stdout.write('OK\\n');\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert not (repo / "task_plan.md").exists()
+    assert not (repo / "findings.md").exists()
+    assert not (repo / "progress.md").exists()
+    status = subprocess.run(
+        ["git", "status", "--short"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    assert status == " M calc.py\n"
 
 
 def test_review_splits_single_quoted_arguments_token(tmp_path):
@@ -2691,6 +2884,15 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     assert "focus" in query["prompt"]
     assert query["permissionMode"] == "dontAsk"
     assert query["options"]["permissionMode"] == "dontAsk"
+    assert query["options"]["settingSources"] == []
+    assert query["options"]["skills"] == []
+    assert query["options"]["hooks"] == {}
+    assert query["options"]["plugins"] == []
+    assert query["options"]["persistSession"] is False
+    assert query["options"]["env"]["CLAUDE_FOR_CODEX_ISOLATED_REVIEW"] == "1"
+    assert query["options"]["env"]["HOME"] == os.environ["HOME"]
+    assert query["options"]["env"]["PATH"] == env["PATH"]
+    assert query["options"]["env"].get("CLAUDE_CONFIG_DIR") == os.environ.get("CLAUDE_CONFIG_DIR")
     assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
     assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
     assert "mcp__claude-for-codex-git__git_status" in query["allowedTools"]
@@ -2747,10 +2949,20 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     query = json.loads((capture / "query.json").read_text(encoding="utf8"))
     assert "Agent" in query["allowedTools"]
     assert "Agent" in query["options"]["allowedTools"]
+    assert query["options"]["settingSources"] == []
+    assert query["options"]["skills"] == []
+    assert query["options"]["hooks"] == {}
+    assert query["options"]["plugins"] == []
+    assert query["options"]["persistSession"] is False
+    assert query["options"]["env"]["CLAUDE_FOR_CODEX_ISOLATED_REVIEW"] == "1"
+    assert query["options"]["env"]["HOME"] == os.environ["HOME"]
+    assert query["options"]["env"]["PATH"] == env["PATH"]
+    assert query["options"]["env"].get("CLAUDE_CONFIG_DIR") == os.environ.get("CLAUDE_CONFIG_DIR")
     assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
     assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
     assert "claude-for-codex-git" in query["mcpServers"]
     assert "Invoke every listed role agent exactly once" in query["prompt"]
+    assert "outputFormat" not in query
 
     agents = query["agents"]
     assert set(agents) == {"cfc_correctness", "cfc_security"}
@@ -2796,7 +3008,15 @@ def test_sdk_native_structured_output_passes_schema(tmp_path):
         tmp_path,
         stdout=json.dumps({
             "role_results": [
-                {"agent": "cfc_correctness", "role": "correctness", "status": "ok", "text": "structured ok"},
+                {
+                    "agent": "cfc_correctness",
+                    "role": "correctness",
+                    "result": {
+                        "status": "ok",
+                        "review": structured_review_payload("schema structured ok"),
+                        "error": "",
+                    },
+                },
             ]
         }),
     )
@@ -2814,6 +3034,7 @@ def test_sdk_native_structured_output_passes_schema(tmp_path):
             "correctness",
             "--backend",
             "sdk",
+            "--json",
             "--native-structured",
         ],
         cwd=repo,
@@ -2834,10 +3055,372 @@ def test_sdk_native_structured_output_passes_schema(tmp_path):
     item_schema = schema["properties"]["role_results"]["items"]
     assert "agent" in item_schema["properties"]
     assert item_schema["properties"]["agent"]["type"] == "string"
-    assert {"status", "text"} in [set(shape["required"]) for shape in item_schema["anyOf"]]
-    assert {"result"} in [set(shape["required"]) for shape in item_schema["anyOf"]]
-    assert {"ok", "failed"} == set(item_schema["properties"]["status"]["enum"])
-    assert {"ok", "failed"} == set(item_schema["properties"]["result"]["properties"]["status"]["enum"])
+    assert set(item_schema["required"]) == {"role", "result"}
+    result_schema = item_schema["properties"]["result"]
+    assert set(result_schema["required"]) == {"status"}
+    assert {"ok", "failed"} == set(result_schema["properties"]["status"]["enum"])
+    review_schema = result_schema["properties"]["review"]
+    assert review_schema["type"] == "object"
+    assert set(review_schema["required"]) == {"verdict", "summary", "findings", "next_steps"}
+    assert review_schema["properties"]["verdict"]["enum"] == ["approve", "needs-attention"]
+    assert "text" not in result_schema["properties"]
+    assert "result.review" in query["prompt"]
+    assert "Each result.review must be the exact JSON object" in query["prompt"]
+    assert "Return exactly one JSON object and no Markdown" in query["agents"]["cfc_correctness"]["prompt"]
+    assert '"verdict": "approve | needs-attention"' in query["agents"]["cfc_correctness"]["prompt"]
+
+
+def test_sdk_native_structured_output_prefers_sdk_result_metadata(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    structured = {
+        "role_results": [
+            {
+                "agent": "cfc_correctness",
+                "role": "correctness",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload(
+                        "metadata structured ok",
+                        verdict="needs-attention",
+                        findings=[structured_review_finding_payload()],
+                    ),
+                    "error": "",
+                },
+            },
+        ]
+    }
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout="human-readable non-json transcript",
+        structured_output=structured,
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+            "--json",
+            "--native-structured",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "needs-attention"
+    assert payload["findings"][0]["role"] == "correctness"
+    assert payload["findings"][0]["title"] == "Regression title"
+    assert "metadata structured ok" in payload["summary"]
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    serialized = json.dumps(json.loads(latest.stdout)["report"])
+    assert "structuredOutput" not in serialized
+    assert "metadata structured ok" not in serialized
+    assert "structuredReview" not in serialized
+    assert "role_results" not in serialized
+    report = json.loads(latest.stdout)["report"]
+    assert report["structured"]["verdict"] == "needs-attention"
+    assert report["roleResults"][0]["structured"]["verdict"] == "needs-attention"
+
+
+def test_sdk_subagent_role_coverage_mismatch_is_reported(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {"role": "correctness", "status": "ok", "text": "correctness ok"},
+            ]
+        }),
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness,security",
+            "--backend",
+            "sdk",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "SDK subagent role coverage mismatch" in result.stderr
+    assert "missing=security" in result.stderr
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    report = json.loads(latest.stdout)["report"]
+    assert report["errorCode"] == "SDK_SUBAGENT_ROLE_COVERAGE"
+
+
+def test_sdk_subagent_role_coverage_allows_reordered_results(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {"role": "security", "status": "ok", "text": "security ok"},
+                {"role": "correctness", "status": "ok", "text": "correctness ok"},
+            ]
+        }),
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness,security",
+            "--backend",
+            "sdk",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.index("Role: correctness") < result.stdout.index("Role: security")
+    assert "correctness ok" in result.stdout
+    assert "security ok" in result.stdout
+
+
+def test_sdk_native_structured_role_parse_failure_report_backend_is_sdk(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout=json.dumps({
+            "role_results": [
+                {"role": "correctness", "status": "ok", "text": "plain text is not review JSON"},
+            ]
+        }),
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+            "--json",
+            "--native-structured",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid SDK subagent JSON output" in result.stderr
+    assert "role_results[].result.review" in result.stderr
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    report = json.loads(latest.stdout)["report"]
+    assert report["backend"] == "sdk"
+    assert report["errorCode"] == "SDK_SUBAGENT_INVALID_JSON"
+    assert report["nativeOrchestration"]["enabled"] is True
+    assert report["roleResults"] == []
+
+
+def test_sdk_native_structured_rejects_plain_text_role_result_with_actionable_error(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        structured_output={
+            "role_results": [
+                {
+                    "agent": "cfc_correctness",
+                    "role": "correctness",
+                    "result": {
+                        "status": "ok",
+                        "text": "plain language review instead of structured JSON",
+                        "error": "",
+                    },
+                },
+            ]
+        },
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+            "--json",
+            "--native-structured",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Invalid SDK subagent JSON output" in result.stderr
+    assert "role_results[].result.review" in result.stderr
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    report = json.loads(latest.stdout)["report"]
+    assert report["backend"] == "sdk"
+    assert report["errorCode"] == "SDK_SUBAGENT_INVALID_JSON"
+
+
+def test_sdk_native_structured_preserves_failed_role_result_in_structured_mode(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        structured_output={
+            "role_results": [
+                {
+                    "agent": "cfc_correctness",
+                    "role": "correctness",
+                    "result": {
+                        "status": "failed",
+                        "error": "rate limit hit",
+                    },
+                },
+            ]
+        },
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--agent-team",
+            "sdk-subagents",
+            "--roles",
+            "correctness",
+            "--backend",
+            "sdk",
+            "--json",
+            "--native-structured",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "correctness: Claude exited 1: rate limit hit" in result.stderr
+    assert "SDK_SUBAGENT_INVALID_JSON" not in result.stderr
+    latest = subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert latest.returncode == 0, latest.stderr
+    report = json.loads(latest.stdout)["report"]
+    assert report["backend"] == "sdk"
+    assert report["errorCode"] != "SDK_SUBAGENT_INVALID_JSON"
+    assert report["roleResults"][0]["exitStatus"] == 1
 
 
 def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path):
@@ -3516,6 +4099,63 @@ def test_release_check_knows_claude_014_native_assets():
     assert "--confirm-cost" in checks["ultrareview-cost-consent"]["detail"]
     assert checks["ultrareview-not-hook-default"]["ok"] is True
     assert "generated workflow calls review" in checks["ultrareview-not-hook-default"]["detail"]
+    assert checks["read-only-cli-isolation"]["ok"] is True
+    assert checks["read-only-sdk-isolation"]["ok"] is True
+    assert checks["read-only-no-config-dir-relocation"]["ok"] is True
+    assert checks["read-only-sdk-structured-output"]["ok"] is True
+    assert checks["sdk-native-structured-review-contract"]["ok"] is True
+
+
+def test_release_check_config_dir_negative_control_fails():
+    release_check_uri = (PLUGIN / "scripts" / "lib" / "release-check.mjs").as_uri()
+    result = subprocess.run(
+        [
+            NODE,
+            "--input-type=module",
+            "-e",
+            f"""
+import {{ readOnlyIsolationChecksFromSource }} from {json.dumps(release_check_uri)};
+const checks = readOnlyIsolationChecksFromSource({{
+  companion: 'const x = 1;\\nprocess.env.CLAUDE_CONFIG_DIR = "/tmp/isolated";',
+  backend: 'settingSources: []\\nskills: []\\nhooks: {{}}\\nplugins: []\\npersistSession: false\\nCLAUDE_FOR_CODEX_ISOLATED_REVIEW\\nmetadata.structuredOutput = event.structured_output;'
+}});
+console.log(JSON.stringify(checks));
+""",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    checks = {check["name"]: check for check in json.loads(result.stdout)}
+    assert checks["read-only-no-config-dir-relocation"]["ok"] is False
+
+
+def test_release_check_sdk_native_structured_review_contract_negative_control_fails():
+    release_check_uri = (PLUGIN / "scripts" / "lib" / "release-check.mjs").as_uri()
+    result = subprocess.run(
+        [
+            NODE,
+            "--input-type=module",
+            "-e",
+            f"""
+import {{ readOnlyIsolationChecksFromSource }} from {json.dumps(release_check_uri)};
+const checks = readOnlyIsolationChecksFromSource({{
+  companion: 'aggregate.metadata?.structuredOutput',
+  backend: 'settingSources: []\\nskills: []\\nhooks: {{}}\\nplugins: []\\npersistSession: false\\nCLAUDE_FOR_CODEX_ISOLATED_REVIEW\\nmetadata.structuredOutput = event.structured_output;'
+}});
+console.log(JSON.stringify(checks));
+""",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    checks = {check["name"]: check for check in json.loads(result.stdout)}
+    assert checks["sdk-native-structured-review-contract"]["ok"] is False
 
 
 def test_release_check_remote_install_uses_requested_immutable_ref(tmp_path):

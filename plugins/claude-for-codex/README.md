@@ -42,6 +42,8 @@ Published capabilities:
 Safety and operating model:
 
 - Review commands invoke Claude Code with read-only tool permissions.
+- Read-only CLI review disables Claude Code slash commands, settings sources, and session persistence while preserving the normal Claude authentication path.
+- Read-only SDK review disables Claude Code settings, skills, hooks, plugins, and SDK session persistence while preserving the normal Claude authentication path.
 - CLI remains the default backend. The SDK backend runs only with `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk`.
 - Native SDK subagent teams require the SDK backend and keep the read-only Git MCP boundary.
 - Ultrareview may use remote/cloud execution and usage-credit billing; it requires `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1`.
@@ -165,7 +167,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs review --backend sdk 
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
-node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --native-structured --stream-progress --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --json --native-structured --stream-progress --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles correctness,security --scope branch --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs ultrareview --confirm-cost --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs rescue diagnose the failing release validation
@@ -187,7 +189,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs status
 
 `multi-review` runs several role-specialized Claude review prompts in parallel by default and prints one section per role plus an orchestration summary. This plugin-managed CLI fan-out is read-only; Codex must reconcile findings before any follow-up changes. Use `--sequential` to run one role at a time for debugging or rate-limit-sensitive environments. For Claude native SDK mode, use `multi-review --backend sdk --agent-team sdk-subagents`; this requires the Claude SDK backend, configures native subagents for the selected roles, and rejects incompatible `--sequential` or non-SDK combinations before invoking Claude.
 
-Native SDK mode resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. Add `--native-structured` to request SDK schema-backed aggregate output for the subagent team, and add `--stream-progress` to show sanitized progress events without printing raw SDK chunks or storing raw SDK messages in reports.
+Native SDK mode resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. It is opt-in and experimental until live SDK subagent smoke tests are stable; plugin-managed CLI `multi-review` remains the default. Combine `--json --native-structured` to request a schema-backed SDK aggregate where `role_results[].result.review` is a full review JSON object. The plugin validates that object locally and does not serialize raw role text or raw SDK `structured_output` into reports. Add `--stream-progress` to show sanitized progress events without printing raw SDK chunks or storing raw SDK messages in reports.
 
 Role packs are named reviewer presets for `multi-review`. Use `roles list`, `roles inspect <pack>`, and `multi-review --role-pack <pack>` for built-in packs such as `minimal`, `release`, `security`, and `default`. User-authored JSON packs can be validated with `roles validate <file>`, but they are validate/inspect-only and are not executable by review commands. Role packs are plugin-managed presets, not native Claude subagents, and they cannot grant tools, shell commands, hooks, MCP servers, environment variables, backend mode, or write permissions.
 
@@ -201,7 +203,7 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
 
-`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies `Edit`, `Write`, `MultiEdit`, and `Bash`, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
+`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies `Edit`, `Write`, `MultiEdit`, and `Bash`, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
 
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is never used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because the command may use remote/cloud execution and usage-credit billing.
 
@@ -266,7 +268,7 @@ If the local Codex runtime does not expose one of these hook events, the plugin 
 
 ## Read-Only Git Boundary
 
-Claude review commands run with `Read,Grep,Glob` only and explicitly disallow `Edit,Write,MultiEdit,Bash`. Read-only Claude review also receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments; unsupported paths, refs, and operations are rejected before Git is invoked.
+Claude review commands run with `Read,Grep,Glob` only and explicitly disallow `Edit,Write,MultiEdit,Bash`. Read-only Claude CLI review also passes `--disable-slash-commands`, `--no-session-persistence`, and an empty `--setting-sources` value so repository-local Claude settings, skills, hooks, slash commands, and sessions cannot add write side effects. Read-only Claude review also receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments; unsupported paths, refs, and operations are rejected before Git is invoked.
 
 ## Stop Review Gate
 

@@ -36,25 +36,45 @@ function nativeAgentModel(model) {
   return SUBAGENT_MODELS.has(model) ? model : "inherit";
 }
 
-function nativeAgentPrompt(role) {
+function structuredReviewContract() {
+  return [
+    "Return exactly one JSON object and no Markdown.",
+    "The JSON object must use this schema:",
+    "{",
+    '  "verdict": "approve | needs-attention",',
+    '  "summary": "short role-specific review judgment",',
+    '  "findings": [',
+    '    {"severity": "critical|high|medium|low", "title": "issue title", "body": "issue, evidence, and impact", "file": "path", "line_start": 1, "line_end": 1, "confidence": 0.8, "recommendation": "concrete action"}',
+    "  ],",
+    '  "next_steps": ["concrete next step"]',
+    "}",
+    "Use verdict approve only when there are no material findings.",
+    "Use an empty findings array when there are no findings."
+  ].join("\n");
+}
+
+function nativeAgentPrompt(role, { structuredJson = false } = {}) {
+  const outputInstruction = structuredJson
+    ? structuredReviewContract()
+    : "Return concise findings for your assigned role as JSON-compatible content.";
   return [
     "You are a read-only Claude for Codex review subagent.",
     "Inspect repository files and git context only. Do not edit files, run shell commands, spawn agents, or request write-capable tools.",
     "Use only Read, Grep, and Glob when tool access is needed.",
-    "Return concise findings for your assigned role as JSON-compatible content.",
+    outputInstruction,
     "",
     `Role: ${roleName(role)}`,
     `Focus: ${rolePrompt(role)}`
   ].join("\n");
 }
 
-export function buildNativeReviewAgents(roles, { model } = {}) {
+export function buildNativeReviewAgents(roles, { model, structuredJson = false } = {}) {
   const agents = {};
   for (const role of roles || []) {
     const name = nativeAgentName(role);
     const definition = {
       description: roleDescription(role),
-      prompt: nativeAgentPrompt(role),
+      prompt: nativeAgentPrompt(role, { structuredJson }),
       tools: [...READ_ONLY_TOOLS],
       disallowedTools: [...WRITE_DENY_TOOLS],
       model: nativeAgentModel(model),
@@ -65,16 +85,23 @@ export function buildNativeReviewAgents(roles, { model } = {}) {
   return agents;
 }
 
-export function nativeReviewTeamPrompt(roles, gitContext, focusText = "") {
+export function nativeReviewTeamPrompt(roles, gitContext, focusText = "", { structuredJson = false } = {}) {
   const roleLines = (roles || [])
     .map((role) => `- ${nativeAgentName(role)}: ${roleName(role)} - ${roleDescription(role)}`)
     .join("\n");
   const focus = focusText ? `\n\nFocus:\n${focusText}` : "";
+  const outputShape = structuredJson
+    ? "{\"role_results\":[{\"agent\":\"cfc_role\",\"role\":\"role name\",\"result\":{\"status\":\"ok\",\"review\":{\"verdict\":\"approve\",\"summary\":\"summary\",\"findings\":[],\"next_steps\":[]},\"error\":\"\"}},{\"agent\":\"cfc_role\",\"role\":\"role name\",\"result\":{\"status\":\"failed\",\"error\":\"reason\"}}]}"
+    : "{\"role_results\":[{\"agent\":\"cfc_role\",\"role\":\"role name\",\"result\":{\"status\":\"ok\",\"text\":\"summary\",\"error\":\"\"}}]}";
+  const structuredReminder = structuredJson
+    ? "Each result.review must be the exact JSON object returned by that role agent, not a prose summary string."
+    : "Each result.text may be a concise prose summary from that role agent.";
   return [
     "You are coordinating a Claude for Codex native SDK subagent review.",
     "Invoke every listed role agent exactly once. Do not skip, duplicate, rename, or replace any listed agent.",
     "After all role agents return, respond with only valid JSON using this shape:",
-    "{\"role_results\":[{\"agent\":\"cfc_role\",\"role\":\"role name\",\"result\":{\"status\":\"ok\",\"text\":\"summary\",\"error\":\"\"}}]}",
+    outputShape,
+    structuredReminder,
     "",
     "Role agents:",
     roleLines || "- cfc_reviewer: reviewer - reviewer",
