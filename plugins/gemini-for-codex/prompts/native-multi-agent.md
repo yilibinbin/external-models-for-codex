@@ -16,8 +16,4 @@
 - After subagent results, write one orchestration summary with roles requested, roles with findings, and residual risks.
 </rules>
 {{FOCUS}}
-<output_contract>
-# Gemini Native Subagent Review
-## Role: <role name>
-## Orchestration Summary
-</output_contract>
+{{OUTPUT_CONTRACT}}

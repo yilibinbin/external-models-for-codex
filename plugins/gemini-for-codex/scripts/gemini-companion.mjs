@@ -81,10 +81,11 @@ import {
 import { mailboxDirForCwd, leasesDirForCwd } from "./lib/state.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "real-smoke", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
+const VALID_AGENT_TEAMS = new Set(["plugin", "native-agents"]);
 const GEMINI_CLI_PATH_ENV = "GEMINI_CLI_PATH";
 const REVIEW_GATE_ENV = "GEMINI_FOR_CODEX_REVIEW_GATE";
 const REVIEW_GATE_TIMEOUT_MS = 15 * 60 * 1000;
@@ -270,7 +271,17 @@ function geminiCapabilitiesFromHelp(help) {
     sessionFile: text.includes("--session-file"),
     listSessions: text.includes("--list-sessions"),
     worktree: text.includes("--worktree"),
-    includeDirectories: text.includes("--include-directories")
+    includeDirectories: text.includes("--include-directories"),
+    streamJson: text.includes("stream-json"),
+    extensionsCommand: /\bextensions\b/.test(text),
+    mcpCommand: /\bmcp\b/.test(text),
+    skillsCommand: /\bskills\b/.test(text),
+    hooksCommand: /\bhooks\b/.test(text),
+    allowedMcpServerNames: text.includes("--allowed-mcp-server-names"),
+    policy: text.includes("--policy"),
+    adminPolicy: text.includes("--admin-policy"),
+    rawOutput: text.includes(["--raw", "output"].join("-")),
+    acceptRawOutputRisk: text.includes(["--accept", "raw", "output", "risk"].join("-"))
   };
 }
 
@@ -366,8 +377,24 @@ function parseArgs(argv) {
       parsed.jsonOutput = true;
     } else if (arg === "--structured" || arg === "--review-json") {
       parsed.structuredReview = true;
+    } else if (arg === "--agent-team") {
+      parsed.agentTeam = readOptionValue(tokens, index, arg).trim();
+      if (!parsed.agentTeam) {
+        throw new Error("Missing value for --agent-team.");
+      }
+      index += 1;
+    } else if (arg.startsWith("--agent-team=")) {
+      parsed.agentTeam = arg.slice("--agent-team=".length);
+      if (!parsed.agentTeam) {
+        throw new Error("Missing value for --agent-team.");
+      }
+    } else if (arg === "--native-structured") {
+      parsed.nativeStructured = true;
+    } else if (arg === "--stream-progress") {
+      parsed.streamProgress = true;
     } else if (arg === "--native-agents") {
       parsed.nativeAgents = true;
+      parsed.agentTeam = parsed.agentTeam ?? "native-agents";
     } else if (arg === "--use-mailbox") {
       parsed.useMailbox = true;
     } else if (arg === "--advisory-leases") {
@@ -467,6 +494,29 @@ function resolveAdversarialLenses(args) {
     name,
     ...ADVERSARIAL_LENSES[name]
   }));
+}
+
+function normalizeAgentTeam(args, command) {
+  if (args.nativeAgents && command !== "multi-review") {
+    throw new Error("--native-agents is only valid for multi-review.");
+  }
+  if (args.agentTeam !== undefined && command !== "multi-review") {
+    throw new Error("--agent-team is only valid for multi-review.");
+  }
+  if (args.agentTeam !== undefined && !VALID_AGENT_TEAMS.has(args.agentTeam)) {
+    throw new Error(`Invalid --agent-team "${args.agentTeam}". Valid values: plugin, native-agents.`);
+  }
+  if (args.nativeAgents && args.agentTeam && args.agentTeam !== "native-agents") {
+    throw new Error("--native-agents conflicts with --agent-team plugin.");
+  }
+  if (args.nativeStructured && (command !== "multi-review" || args.agentTeam !== "native-agents")) {
+    throw new Error("--native-structured is only valid for multi-review --agent-team native-agents.");
+  }
+  if (args.streamProgress && command !== "multi-review") {
+    throw new Error("--stream-progress is only valid for multi-review.");
+  }
+  args.agentTeam = args.agentTeam ?? "plugin";
+  args.nativeAgents = args.agentTeam === "native-agents";
 }
 
 function readOptionValue(tokens, index, optionName) {
@@ -935,6 +985,22 @@ function writeOperationReport(payload) {
   return safe;
 }
 
+function emitProgress(args, event, metadata = {}) {
+  if (!args.streamProgress) {
+    return;
+  }
+  const safeMetadata = Object.fromEntries(
+    Object.entries(metadata).filter(([, value]) => ["string", "number", "boolean"].includes(typeof value))
+  );
+  const payload = {
+    event,
+    mode: args.nativeAgents ? "native-agents" : "plugin-managed",
+    roles: Array.isArray(args.reviewRoles) ? args.reviewRoles.map((role) => role.name) : [],
+    ...safeMetadata
+  };
+  process.stderr.write(`[gemini-for-codex progress] ${JSON.stringify(payload)}\n`);
+}
+
 function printReport(rawArgs) {
   const tokens = normalizeArgv(rawArgs);
   if (tokens.length && !tokens.every((token) => token === "--latest" || token === "--json")) {
@@ -972,6 +1038,14 @@ function printCapabilities() {
       activeCount: leases.active.length,
       degraded: leases.degraded,
       primitive: leases.primitive
+    },
+    defaults: {
+      extensionExecution: "disabled",
+      mcpExecution: "disabled",
+      hooksExecution: "codex-hook-only",
+      reviewOutputFormat: "json",
+      rawOutputAllowed: false,
+      nativeAgentsDefault: false
     }
   }, null, 2)}\n`);
   process.exit(preflight.ok ? 0 : 1);
@@ -1018,6 +1092,62 @@ function scanFileForForbidden(filePath, forbidden) {
   return forbidden.filter((needle) => text.includes(needle)).map((needle) => `${filePath} contains forbidden string ${needle}`);
 }
 
+function realSmokeOptions(rawArgs = []) {
+  const tokens = normalizeArgv(rawArgs);
+  const options = { quick: false };
+  for (const token of tokens) {
+    if (token === "--quick") {
+      options.quick = true;
+    } else {
+      throw new Error(`Unknown real-smoke option "${token}".`);
+    }
+  }
+  return options;
+}
+
+async function runRealSmoke(rawArgs = []) {
+  if (process.env.GEMINI_FOR_CODEX_REAL_SMOKE !== "1") {
+    console.error("real-smoke is opt-in. Set GEMINI_FOR_CODEX_REAL_SMOKE=1 to run live Gemini CLI smoke checks.");
+    process.exit(2);
+  }
+  const options = realSmokeOptions(rawArgs);
+  const checks = {};
+  const failures = [];
+
+  function record(name, result) {
+    checks[name] = { status: result.status, ok: result.status === 0 };
+    if (result.status !== 0) failures.push(`${name} failed with status ${result.status}`);
+  }
+
+  record("capabilities", runGemini(["capabilities"]));
+  record("review-json", geminiPrint("", {
+    _: [],
+    paths: ["."],
+    scope: "working-tree",
+    jsonOutput: true
+  }));
+  record("multi-review-stream-progress", await geminiPrintAsync("", {
+    _: [],
+    paths: ["."],
+    scope: "working-tree",
+    reviewRoles: [{name: "correctness"}, {name: "tests"}],
+    streamProgress: true
+  }));
+  record("native-agent-structured", await geminiPrintAsync("", {
+    _: [],
+    paths: ["."],
+    scope: "working-tree",
+    agentTeam: "native-agents",
+    nativeAgents: true,
+    nativeStructured: true,
+    reviewRoles: [{name: "correctness"}, {name: "tests"}]
+  }));
+
+  const payload = { ok: failures.length === 0, quick: options.quick, checks, failures };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.exit(payload.ok ? 0 : 1);
+}
+
 function releaseCheckOptions(rawArgs = []) {
   const tokens = normalizeArgv(rawArgs);
   const options = { ciSimulate: false };
@@ -1044,7 +1174,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.8.0") failures.push(`manifest version is ${manifest.version}, expected 0.8.0`);
+    if (manifest.version !== "0.10.0") failures.push(`manifest version is ${manifest.version}, expected 0.10.0`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1068,8 +1198,14 @@ function runReleaseCheck(rawArgs = []) {
   failures.push(...rolePackChecks.failures);
   const coordinationChecks = checkCoordinationFixtures();
   failures.push(...coordinationChecks.failures);
+  const nativeChecks = checkNativeOrchestrationSafety();
+  failures.push(...nativeChecks.failures);
   const githubActionsChecks = options.ciSimulate ? checkGithubActionsCi() : { ok: true, failures: [] };
   failures.push(...githubActionsChecks.failures);
+  const rawOutputChecks = checkRawOutputSafety();
+  failures.push(...rawOutputChecks.failures);
+  const externalSurfaceChecks = checkExternalSurfaceSafety();
+  failures.push(...externalSurfaceChecks.failures);
   const payload = {
     ok: failures.length === 0,
     checks: {
@@ -1079,7 +1215,10 @@ function runReleaseCheck(rawArgs = []) {
       contextProviderFixtures: providerChecks.ok,
       rolePacks: rolePackChecks.ok,
       mailboxLeases: coordinationChecks.ok,
-      githubActionsCi: githubActionsChecks.ok
+      nativeOrchestrationSafety: nativeChecks.ok,
+      githubActionsCi: githubActionsChecks.ok,
+      rawOutputSafety: rawOutputChecks.ok,
+      externalSurfaceSafety: externalSurfaceChecks.ok
     },
     failures
   };
@@ -1101,10 +1240,72 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.8.0")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.10.0")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function checkRawOutputSafety() {
+  const failures = [];
+  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
+  const dangerous = [
+    ["--raw", "output"].join("-"),
+    ["--accept", "raw", "output", "risk"].join("-")
+  ];
+  for (const token of dangerous) {
+    if (companion.includes(token)) {
+      failures.push(`companion contains forbidden Gemini review flag ${token}`);
+    }
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function checkExternalSurfaceSafety() {
+  const failures = [];
+  const hooks = fs.readFileSync(path.join(ROOT_DIR, "hooks", "hooks.json"), "utf8");
+  const workflow = renderWorkflow(ROOT_DIR);
+  const forbidden = [
+    "gemini extensions",
+    "gemini mcp",
+    "--allowed-mcp-server-names",
+    "--mcp-config",
+    "--settings",
+    "--agent-team native-agents",
+    "--native-structured",
+    "--stream-progress"
+  ];
+  for (const token of forbidden) {
+    if (hooks.includes(token)) failures.push(`hooks unexpectedly contain ${token}`);
+    if (workflow.includes(token)) failures.push(`default GitHub Actions workflow unexpectedly contains ${token}`);
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function checkNativeOrchestrationSafety() {
+  const failures = [];
+  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
+  const readme = fs.readFileSync(path.join(ROOT_DIR, "README.md"), "utf8");
+  const multiSkill = fs.readFileSync(path.join(ROOT_DIR, "skills", "gemini-multi-review", "SKILL.md"), "utf8");
+  const rolePackSkill = fs.readFileSync(path.join(ROOT_DIR, "skills", "gemini-role-packs", "SKILL.md"), "utf8");
+  const hooks = fs.readFileSync(path.join(ROOT_DIR, "hooks", "hooks.json"), "utf8");
+  const workflow = renderWorkflow(ROOT_DIR);
+  for (const token of ["--agent-team", "native-agents", "--native-structured", "--stream-progress"]) {
+    if (!companion.includes(token)) failures.push(`companion missing ${token}`);
+  }
+  if (!readme.includes("--agent-team native-agents")) failures.push("README missing --agent-team native-agents docs");
+  if (!readme.includes("--native-structured")) failures.push("README missing --native-structured docs");
+  if (!readme.includes("--stream-progress")) failures.push("README missing --stream-progress docs");
+  if (!multiSkill.includes("--agent-team native-agents")) failures.push("gemini-multi-review skill missing --agent-team native-agents");
+  if (!rolePackSkill.includes("--agent-team native-agents")) failures.push("gemini-role-packs skill missing --agent-team native-agents");
+  for (const unsafe of ["--agent-team native-agents", "--native-structured", "--stream-progress"]) {
+    if (hooks.includes(unsafe)) failures.push(`hooks unexpectedly contain ${unsafe}`);
+    if (workflow.includes(unsafe)) failures.push(`default GitHub Actions workflow unexpectedly contains ${unsafe}`);
+  }
+  if (readme.includes("@anthropic-ai/claude-agent-sdk") || readme.includes("ultrareview")) {
+    failures.push("README contains Claude-native SDK or ultrareview residue");
   }
   return { ok: failures.length === 0, failures };
 }
@@ -1684,6 +1885,31 @@ function writeNativeAgentWorkspace(roles) {
   return tempDir;
 }
 
+function nativeMarkdownContract() {
+  return [
+    "<output_contract>",
+    "# Gemini Native Subagent Review",
+    "## Role: <role name>",
+    "## Orchestration Summary",
+    "</output_contract>"
+  ].join("\n");
+}
+
+function nativeStructuredContract() {
+  return [
+    "<output_contract>",
+    "Return exactly one JSON object and no Markdown.",
+    "Schema:",
+    "{",
+    '  "role_results": [{"agent":"gfc_role","role":"role name","status":"ok|error","text":"summary","error":""}],',
+    '  "summary": "short aggregate summary",',
+    '  "residual_risk": ["remaining risk"]',
+    "}",
+    "Include exactly one role_results entry for each requested role.",
+    "</output_contract>"
+  ].join("\n");
+}
+
 function nativeMultiAgentPrompt(args, gitContext, contextBlock = "") {
   const focus = args._.join(" ").trim();
   const agentCalls = args.reviewRoles.map((role) => `@${nativeAgentName(role.name)}`).join(", ");
@@ -1692,8 +1918,116 @@ function nativeMultiAgentPrompt(args, gitContext, contextBlock = "") {
     AGENT_CALLS: agentCalls,
     GIT_CONTEXT: gitContext,
     GEMINI_CONTEXT: contextBlock,
+    OUTPUT_CONTRACT: args.nativeStructured ? nativeStructuredContract() : nativeMarkdownContract(),
     FOCUS: focus ? `<focus>${focus}</focus>` : ""
   });
+}
+
+function validateNativeStructuredAggregate(value, expectedRoles) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("aggregate must be an object");
+  }
+  if (!Array.isArray(value.role_results)) {
+    throw new Error("role_results must be an array");
+  }
+  const expectedNames = expectedRoles.map((role) => role.name);
+  const expected = new Set(expectedNames);
+  const byRole = new Map();
+  for (const item of value.role_results) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) {
+      throw new Error("role result must be an object");
+    }
+    if (typeof item.agent !== "string" || !item.agent.startsWith("gfc_")) {
+      throw new Error("role result agent is invalid");
+    }
+    if (typeof item.role !== "string" || !expected.has(item.role)) {
+      throw new Error(`unexpected role ${item.role}`);
+    }
+    if (byRole.has(item.role)) {
+      throw new Error(`duplicate role ${item.role}`);
+    }
+    if (!["ok", "error"].includes(item.status)) {
+      throw new Error("role result status must be ok or error");
+    }
+    if (typeof item.text !== "string") {
+      throw new Error("role result text must be a string");
+    }
+    if (typeof item.error !== "string") {
+      throw new Error("role result error must be a string");
+    }
+    byRole.set(item.role, {
+      agent: item.agent,
+      role: item.role,
+      status: item.status,
+      text: item.text,
+      error: item.error
+    });
+  }
+  for (const name of expectedNames) {
+    if (!byRole.has(name)) {
+      throw new Error(`missing role ${name}`);
+    }
+  }
+  if (typeof value.summary !== "string") {
+    throw new Error("summary must be a string");
+  }
+  if (!Array.isArray(value.residual_risk)) {
+    throw new Error("residual_risk must be an array");
+  }
+  const residualRisk = value.residual_risk.map((item) => {
+    if (typeof item !== "string") {
+      throw new Error("residual_risk entries must be strings");
+    }
+    return item;
+  });
+  return {
+    mode: "native-agents",
+    role_results: expectedNames.map((name) => byRole.get(name)),
+    summary: value.summary,
+    residual_risk: residualRisk
+  };
+}
+
+function extractNativeStructuredObject(rawOutput) {
+  const text = String(rawOutput ?? "").trim();
+  if (!text) {
+    throw new Error("Gemini returned empty native structured output.");
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Continue with embedded JSON extraction.
+  }
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (const match of fences.reverse()) {
+    try {
+      return JSON.parse(match[1].trim());
+    } catch {
+      // Try earlier fenced blocks.
+    }
+  }
+  const starts = [];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "{") {
+      starts.push(index);
+    }
+  }
+  const ends = [];
+  for (let index = 0; index < text.length; index += 1) {
+    if (text[index] === "}") {
+      ends.push(index);
+    }
+  }
+  for (const start of starts.reverse()) {
+    for (const end of ends.filter((candidate) => candidate > start).reverse()) {
+      try {
+        return JSON.parse(text.slice(start, end + 1));
+      } catch {
+        // Try a smaller candidate.
+      }
+    }
+  }
+  throw new Error("Gemini output did not contain a native structured JSON object.");
 }
 
 function reviewGateRolePrompt(role, args, gitContext, contextBlock = "") {
@@ -1909,6 +2243,14 @@ function buildSetupReport(actionsTaken = []) {
         releaseCheck: true,
         contextProvider: true,
         rolePacks: true
+      },
+      defaults: {
+        extensionExecution: "disabled",
+        mcpExecution: "disabled",
+        hooksExecution: "codex-hook-only",
+        reviewOutputFormat: "json",
+        rawOutputAllowed: false,
+        nativeAgentsDefault: false
       }
     },
     rolePacks: {
@@ -2451,6 +2793,7 @@ async function runGeminiTask(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    normalizeAgentTeam(args, kind);
     if (kind !== "multi-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
     }
@@ -2564,6 +2907,7 @@ async function runGeminiMultiReview(rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    normalizeAgentTeam(args, "multi-review");
     if (args.write) {
       throw new Error("Gemini for Codex is read-only; --write is not supported.");
     }
@@ -2620,6 +2964,7 @@ async function runGeminiMultiReview(rawArgs) {
   }
   let results;
   let nativeWorkspace = "";
+  let nativeStructuredExit = null;
   const mailboxThreadId = args.useMailbox ? `thread-${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 8)}` : "";
   const leaseResults = [];
   let mailboxWriteFailures = 0;
@@ -2671,6 +3016,7 @@ async function runGeminiMultiReview(rawArgs) {
       }
     }
   }
+  emitProgress(args, "multi-review started");
   try {
     if (args.nativeAgents) {
       try {
@@ -2681,11 +3027,13 @@ async function runGeminiMultiReview(rawArgs) {
           summary: `Gemini native-agent review started for roles: ${args.reviewRoles.map((role) => role.name).join(", ")}.`
         });
         nativeWorkspace = writeNativeAgentWorkspace(args.reviewRoles);
+        emitProgress(args, "native-agents started");
         const result = geminiPrint(nativeMultiAgentPrompt(args, gitContext, context.block), {
           ...args,
           cwd: nativeWorkspace,
           includeDirectories: currentGeminiCapabilities().includeDirectories ? [process.cwd()] : []
         });
+        emitProgress(args, "native-agents finished", { status: result.status });
         results = [{ role: { name: "native-gemini-subagents" }, result }];
         writeMailbox({
           role: "native-gemini-subagents",
@@ -2693,6 +3041,70 @@ async function runGeminiMultiReview(rawArgs) {
           status: result.status === 0 ? "succeeded" : "failed",
           summary: `Gemini native-agent review ${result.status === 0 ? "succeeded" : "failed"} with exit status ${result.status}.`
         });
+        if (args.nativeStructured) {
+          const leaseMetadata = leaseSummary(leaseResults);
+          if (result.status !== 0) {
+            emitProgress(args, "multi-review finished", { status: result.status });
+            nativeStructuredExit = {
+              status: result.status || 1,
+              stdout: "",
+              stderr: result.stderr || result.error || "Gemini native structured review failed\n",
+              report: {
+                command: "multi-review",
+                cwd: process.cwd(),
+                status: result.status || 1,
+                geminiAvailable: hasGemini(),
+                contextMetadata: context.metadata,
+                rolePack: args.rolePackSummary,
+                mailbox: args.useMailbox ? mailboxSummary(process.cwd(), mailboxThreadId, process.env, { writeFailures: mailboxWriteFailures }) : undefined,
+                leases: args.advisoryLeases ? leaseMetadata : undefined
+              }
+            };
+          }
+          let aggregate;
+          if (!nativeStructuredExit) {
+            try {
+              aggregate = validateNativeStructuredAggregate(extractNativeStructuredObject(result.stdout), args.reviewRoles);
+            } catch (error) {
+              emitProgress(args, "multi-review finished", { status: 1 });
+              nativeStructuredExit = {
+                status: 1,
+                stdout: "",
+                stderr: `Invalid Gemini native structured output: ${error.message || String(error)}\n`,
+                report: {
+                  command: "multi-review",
+                  cwd: process.cwd(),
+                  status: 1,
+                  geminiAvailable: hasGemini(),
+                  contextMetadata: context.metadata,
+                  rolePack: args.rolePackSummary,
+                  mailbox: args.useMailbox ? mailboxSummary(process.cwd(), mailboxThreadId, process.env, { writeFailures: mailboxWriteFailures }) : undefined,
+                  leases: args.advisoryLeases ? leaseMetadata : undefined
+                }
+              };
+            }
+          }
+          if (!nativeStructuredExit) {
+            const failedNativeRoles = aggregate.role_results.filter((entry) => entry.status === "error");
+            const exitStatus = failedNativeRoles.length ? 1 : 0;
+            emitProgress(args, "multi-review finished", { status: exitStatus });
+            nativeStructuredExit = {
+              status: exitStatus,
+              stdout: `${JSON.stringify(aggregate, null, 2)}\n`,
+              stderr: "",
+              report: {
+                command: "multi-review",
+                cwd: process.cwd(),
+                status: exitStatus,
+                geminiAvailable: hasGemini(),
+                contextMetadata: context.metadata,
+                rolePack: args.rolePackSummary,
+                mailbox: args.useMailbox ? mailboxSummary(process.cwd(), mailboxThreadId, process.env, { writeFailures: mailboxWriteFailures }) : undefined,
+                leases: args.advisoryLeases ? leaseMetadata : undefined
+              }
+            };
+          }
+        }
       } finally {
         if (nativeWorkspace) {
           fs.rmSync(nativeWorkspace, { recursive: true, force: true });
@@ -2700,6 +3112,7 @@ async function runGeminiMultiReview(rawArgs) {
       }
     } else {
       results = await Promise.all(args.reviewRoles.map(async (role) => {
+        emitProgress(args, "role started", { role: role.name });
         writeMailbox({
           role: role.name,
           mode: "plugin-managed",
@@ -2708,6 +3121,7 @@ async function runGeminiMultiReview(rawArgs) {
         });
         const prompt = multiReviewRolePrompt(role, args, gitContext, context.block);
         const result = await geminiPrintAsync(prompt, args);
+        emitProgress(args, "role finished", { role: role.name, status: result.status });
         writeMailbox({
           role: role.name,
           mode: "plugin-managed",
@@ -2719,6 +3133,17 @@ async function runGeminiMultiReview(rawArgs) {
     }
   } finally {
     releaseClaimedLeases();
+  }
+
+  if (nativeStructuredExit) {
+    writeOperationReport(nativeStructuredExit.report);
+    if (nativeStructuredExit.stdout) {
+      process.stdout.write(nativeStructuredExit.stdout);
+    }
+    if (nativeStructuredExit.stderr) {
+      process.stderr.write(nativeStructuredExit.stderr);
+    }
+    process.exit(nativeStructuredExit.status);
   }
 
   const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
@@ -2751,6 +3176,7 @@ async function runGeminiMultiReview(rawArgs) {
       summary: `Multi-review completed. Succeeded: ${succeeded.length}; failed: ${failed.length}.`
     });
   }
+  emitProgress(args, "multi-review finished", { status: failed.length ? 1 : 0 });
   process.stdout.write(`${sections.join("\n\n")}\n`);
   writeOperationReport({
     command: "multi-review",
@@ -3006,6 +3432,9 @@ switch (command) {
     break;
   case "report":
     printReport(rawArgs);
+    break;
+  case "real-smoke":
+    await runRealSmoke(rawArgs);
     break;
   case "release-check":
     runReleaseCheck(rawArgs);

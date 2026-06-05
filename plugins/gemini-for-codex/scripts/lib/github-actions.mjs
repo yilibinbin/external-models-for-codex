@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const WORKFLOW_RELATIVE_PATH = path.join(".github", "workflows", "gemini-for-codex-review.yml");
-const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.8.0";
+const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.10.0";
 const DEFAULT_TIMEOUT_MINUTES = 30;
 const LOCAL_PATH_PATTERN = /\/Users\/[A-Za-z0-9._/-]+|\/private\/var\/folders\/[A-Za-z0-9._/-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._\\/-]+/;
 const MARKER = "<!-- gemini-for-codex-review -->";

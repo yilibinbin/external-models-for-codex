@@ -1,7 +1,7 @@
 {
   "name": "gemini-for-codex",
-  "version": "0.8.0",
-  "description": "Use Gemini CLI from Codex for read-only review, role-pack review teams, advisory mailbox/leases, adversarial review, planning, rescue, and tracked job workflows.",
+  "version": "0.10.0",
+  "description": "Use Gemini CLI from Codex for read-only review, explicit native-agent review teams, role-pack review teams, advisory mailbox/leases, adversarial review, planning, rescue, and tracked job workflows.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -23,7 +23,7 @@
   "interface": {
     "displayName": "Gemini for Codex",
     "shortDescription": "Gemini CLI reviews, planning, and stop-gate workflows for Codex.",
-    "longDescription": "Gemini for Codex connects Codex to the local Gemini CLI for independent read-only code review, schema-validated structured review, reviewer role packs, advisory mailbox and advisory leases, GitHub Actions PR review templates, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, Gemini native subagent review, background job tracking, session lifecycle hooks, unread-result reminders, noninteractive execution-mode recommendations, Gemini native session diagnostics, sanitized reports, release checks, optional bounded context-provider enrichment, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Gemini provides a separate reviewer or planner perspective. Gemini invocations use plan mode and bounded inline git context for review workflows, and the Stop gate fails open on Gemini runtime errors unless Gemini explicitly returns a blocking verdict.",
+    "longDescription": "Gemini for Codex connects Codex to the local Gemini CLI for independent read-only code review, schema-validated structured review, reviewer role packs, advisory mailbox and advisory leases, GitHub Actions PR review templates, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, explicit Gemini native subagent review teams, native aggregate JSON output, sanitized lifecycle progress events, background job tracking, session lifecycle hooks, unread-result reminders, noninteractive execution-mode recommendations, Gemini native session diagnostics, sanitized reports, release checks, optional bounded context-provider enrichment, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Gemini provides a separate reviewer or planner perspective. Gemini invocations use plan mode and bounded inline git context for review workflows, native-agent mode is explicit, and the Stop gate fails open on Gemini runtime errors unless Gemini explicitly returns a blocking verdict.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
@@ -37,7 +37,9 @@
       "Reviewer role packs",
       "Sanitized mailbox coordination",
       "Advisory leases",
-      "Gemini native subagent orchestration",
+      "Explicit Gemini native subagent review teams",
+      "Native aggregate JSON output",
+      "Sanitized native lifecycle progress",
       "Structured adversarial verdicts",
       "Tracked background job status/result/cancel commands",
       "Session lifecycle hooks and unread-result reminders",
@@ -46,7 +48,9 @@
       "Sanitized reports and release checks",
       "Optional bounded context-provider enrichment",
       "Opt-in Stop hook gate",
-      "Codex-Gemini collaboration"
+      "Codex-Gemini collaboration",
+      "Real Gemini smoke diagnostics",
+      "Gemini CLI extension and MCP capability diagnostics"
     ],
     "defaultPrompt": [
       "Use Gemini to review the current git changes.",
@@ -54,6 +58,7 @@
       "Generate a fork-safe GitHub Actions workflow for Gemini PR review.",
       "Ask Gemini to challenge this implementation plan.",
       "Run a multi-role Gemini review across correctness, security, tests, release, and adversarial perspectives.",
+      "Run an explicit Gemini native-agent review team with structured aggregate output and sanitized progress.",
       "Inspect Gemini reviewer role packs and run a built-in pack such as minimal or release.",
       "Ask whether a Gemini review should run in foreground or background.",
       "Check tracked Gemini jobs and retrieve a stored result by job id.",

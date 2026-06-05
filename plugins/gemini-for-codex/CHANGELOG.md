@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.10.0 - 2026-06-05
+
+- Add opt-in real Gemini smoke diagnostics for `review --json`, plugin-managed `multi-review --stream-progress`, native-agent structured review, and capability reporting.
+- Expand Gemini CLI capability diagnostics for stream JSON, sessions, extensions, MCP, skills, hooks, policy flags, and raw-output support without enabling those surfaces by default.
+- Add release-check guards that keep raw-output, extension/MCP execution, native-agent orchestration, native structured output, and stream progress out of Stop hooks and generated default CI.
+- Add an evaluation-only Gemini extension/MCP design note for future opt-in work.
+
+## 0.9.0 - 2026-06-05
+
+- Add explicit Gemini review-team selection with `multi-review --agent-team plugin|native-agents`; existing `--native-agents` remains a compatibility alias.
+- Add `multi-review --agent-team native-agents --native-structured` for validated native-agent aggregate JSON output.
+- Add `multi-review --stream-progress` lifecycle progress events on stderr without raw Gemini chunks, prompts, diffs, or provider output.
+- Add release-check guards to keep native-agent orchestration opt-in and out of hooks and default GitHub Actions workflows.
+
 ## 0.8.0 - 2026-06-04
 
 - Add sanitized mailbox coordination with `mailbox list`, `mailbox show`, and `mailbox post`.

@@ -27,6 +27,21 @@ FAKE_GEMINI_HELP_WITH_SESSIONS = (
     + "  --include-directories DIR\n"
 )
 
+FAKE_GEMINI_HELP_FULL = (
+    FAKE_GEMINI_HELP_WITH_SESSIONS
+    + "  --output-format text|json|stream-json\n"
+    + "  --allowed-mcp-server-names NAME\n"
+    + "  --policy FILE\n"
+    + "  --admin-policy FILE\n"
+    + "  --raw-output\n"
+    + "  --accept-raw-output-risk\n"
+    + "Commands:\n"
+    + "  mcp\n"
+    + "  extensions\n"
+    + "  skills\n"
+    + "  hooks\n"
+)
+
 
 def write_fake_gemini(script, response="GEMINI_OK", capture_argv=None, first_line=None, help_text=FAKE_GEMINI_HELP, exit_on=None):
     payload = json.dumps({"response": response, "stats": {}})
@@ -92,7 +107,7 @@ def fake_gemini_jsonl(tmp_path, log_file, delay_ms=0, help_text=FAKE_GEMINI_HELP
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.8.0"
+    assert manifest["version"] == "0.10.0"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -106,6 +121,8 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "advisory leases" in manifest["interface"]["longDescription"].lower()
     assert "session lifecycle hooks" in manifest["interface"]["longDescription"].lower()
     assert "Gemini native session and worktree capability gating" in manifest["interface"]["capabilities"]
+    assert "Real Gemini smoke diagnostics" in manifest["interface"]["capabilities"]
+    assert "Gemini CLI extension and MCP capability diagnostics" in manifest["interface"]["capabilities"]
 
 
 def test_marketplace_lists_gemini_for_codex():
@@ -170,6 +187,113 @@ def test_setup_reports_gemini_session_capabilities(tmp_path):
     assert payload["geminiCapabilities"]["resume"] is True
     assert payload["geminiCapabilities"]["sessionId"] is True
     assert payload["geminiCapabilities"]["worktree"] is True
+
+
+def test_real_smoke_requires_explicit_env(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path))
+    env.pop("GEMINI_FOR_CODEX_REAL_SMOKE", None)
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 2
+    assert "real-smoke is opt-in. Set GEMINI_FOR_CODEX_REAL_SMOKE=1 to run live Gemini CLI smoke checks." in result.stderr
+
+
+def test_real_smoke_runs_fake_cli_when_enabled(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("hello\\n", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="ALLOW: fake smoke ok"))
+    env["GEMINI_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "real-smoke", "--quick"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert "review-json" in payload["checks"]
+    assert "multi-review-stream-progress" in payload["checks"]
+    assert "native-agent-structured" in payload["checks"]
+    assert "capabilities" in payload["checks"]
+
+
+def test_capabilities_reports_gemini_cli_surface_without_enabling_it(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, help_text=FAKE_GEMINI_HELP_FULL))
+
+    result = subprocess.run([NODE, str(runtime), "capabilities"], env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    caps = payload["capabilities"]
+    assert caps["streamJson"] is True
+    assert caps["extensionsCommand"] is True
+    assert caps["mcpCommand"] is True
+    assert caps["skillsCommand"] is True
+    assert caps["hooksCommand"] is True
+    assert caps["allowedMcpServerNames"] is True
+    assert caps["policy"] is True
+    assert caps["adminPolicy"] is True
+    assert caps["rawOutput"] is True
+    assert payload["defaults"]["extensionExecution"] == "disabled"
+    assert payload["defaults"]["mcpExecution"] == "disabled"
+
+
+def test_release_check_rejects_raw_output_in_review_paths(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    
+    # Modify the copied companion.mjs to include the forbidden flag
+    companion_path = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    original_content = companion_path.read_text(encoding="utf8")
+    companion_path.write_text(original_content + "\nconst FORBIDDEN_FLAG = '--raw-output';\n", encoding="utf8")
+    
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False # The overall check should fail
+    assert payload["checks"]["rawOutputSafety"] is False # Expecting false, indicating rejection
+    assert "companion contains forbidden Gemini review flag --raw-output" in payload["failures"]
+    
+
+def test_release_check_keeps_extension_mcp_and_native_out_of_default_paths(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    
+    # Modify hooks.json to include a forbidden flag
+    hooks_path = fake_plugin_root / "hooks" / "hooks.json"
+    hooks_path.write_text('{"hooks":{"Stop":"gemini-companion.mjs review-gate --agent-team native-agents"}}', encoding="utf8")
+    
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    
+    result = subprocess.run([NODE, str(runtime), "release-check", "--ci-simulate"], capture_output=True, text=True, cwd=fake_plugin_root)
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False # The overall check should fail
+    assert payload["checks"]["externalSurfaceSafety"] is False # Expecting false, indicating rejection
+    assert "hooks unexpectedly contain --agent-team native-agents" in payload["failures"]
+    # assert "default GitHub Actions workflow unexpectedly contains" in payload["failures"] # This requires mocking renderWorkflow or creating a fake one
+    # For now, we only check the hooks part because mocking renderWorkflow would be too complex.
+
+
+def test_gemini_extension_mcp_evaluation_docs_are_present_and_conservative():
+    doc = (PLUGIN / "docs" / "gemini-extension-mcp-evaluation.md").read_text(encoding="utf8")
+    assert "Status: evaluation only" in doc
+    assert "Do not enable Gemini MCP or Gemini extensions in Stop hooks" in doc
+    assert "repo-external" in doc
+    assert "read-only" in doc
+    assert "mcp.allowed" in doc
+    assert "gemini-extension.json" in doc
+
+
+
+
 
 
 def test_setup_discovers_gemini_from_package_manager_prefix(tmp_path):
@@ -477,6 +601,35 @@ def test_gemini_rejects_structured_outside_review_and_resume_with_fresh(tmp_path
     assert "Choose either --resume or --fresh" in resume_fresh.stderr
 
 
+def test_multi_review_agent_team_flags_are_validated(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path))
+
+    invalid = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "banana"], cwd=repo, env=env, capture_output=True, text=True)
+    assert invalid.returncode == 2
+    assert "Invalid --agent-team" in invalid.stderr
+
+    conflict = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "plugin", "--native-agents"], cwd=repo, env=env, capture_output=True, text=True)
+    assert conflict.returncode == 2
+    assert "--native-agents conflicts with --agent-team plugin" in conflict.stderr
+
+    review_invalid = subprocess.run([NODE, str(runtime), "review", "--agent-team", "native-agents"], cwd=repo, env=env, capture_output=True, text=True)
+    assert review_invalid.returncode == 2
+    assert "--agent-team is only valid for multi-review" in review_invalid.stderr
+
+    legacy_invalid = subprocess.run([NODE, str(runtime), "review", "--native-agents"], cwd=repo, env=env, capture_output=True, text=True)
+    assert legacy_invalid.returncode == 2
+    assert "--native-agents is only valid for multi-review" in legacy_invalid.stderr
+
+    structured_invalid = subprocess.run([NODE, str(runtime), "review", "--native-structured"], cwd=repo, env=env, capture_output=True, text=True)
+    assert structured_invalid.returncode == 2
+    assert "--native-structured is only valid for multi-review --agent-team native-agents" in structured_invalid.stderr
+
+
 def test_review_prompt_includes_bounded_git_context(tmp_path):
     runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
     repo = tmp_path / "repo"
@@ -608,6 +761,126 @@ def test_multi_review_native_agents_omits_include_directories_when_unsupported(t
     assert result.returncode == 0, result.stderr
     call = json.loads(log_file.read_text(encoding="utf8").splitlines()[0])
     assert "--include-directories" not in call["argv"]
+
+
+def native_structured_response(status="ok"):
+    return (
+        "```json\n"
+        + json.dumps({
+            "role_results": [
+                {"agent": "gfc_correctness", "role": "correctness", "status": "ok", "text": "No correctness issues.", "error": ""},
+                {"agent": "gfc_security", "role": "security", "status": status, "text": "Security checked.", "error": "security failed" if status == "error" else ""}
+            ],
+            "summary": "No blocking findings." if status == "ok" else "One role failed.",
+            "residual_risk": ["Only changed files were reviewed."]
+        })
+        + "\n```"
+    )
+
+
+def test_multi_review_native_structured_validates_aggregate_json(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response=native_structured_response(), help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "native-agents", "--native-structured", "--roles", "correctness,security"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["mode"] == "native-agents"
+    assert [item["role"] for item in payload["role_results"]] == ["correctness", "security"]
+    assert payload["summary"] == "No blocking findings."
+    assert "# Gemini Native Subagent Review" not in result.stdout
+    report = json.loads((tmp_path / "data" / "reports" / "latest.json").read_text(encoding="utf8"))
+    assert "No correctness issues" not in json.dumps(report)
+
+
+def test_multi_review_native_structured_role_error_prints_json_and_exits_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response=native_structured_response(status="error"), help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "native-agents", "--native-structured", "--roles", "correctness,security"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["role_results"][1]["status"] == "error"
+    assert "# Gemini Native Subagent Review" not in result.stdout
+
+
+def test_multi_review_native_structured_handles_contract_echo_before_json(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    echoed = (
+        "Schema example: {\"role_results\": []}\n"
+        "Final answer:\n"
+        + native_structured_response()
+    )
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response=echoed, help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "native-agents", "--native-structured", "--roles", "correctness,security"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["summary"] == "No blocking findings."
+
+
+def test_multi_review_native_structured_invalid_output_fails(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="not json", help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "native-agents", "--native-structured", "--roles", "correctness"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "Invalid Gemini native structured output" in result.stderr
+
+
+def test_multi_review_stream_progress_emits_sanitized_events(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="RAW_SECRET_SHOULD_NOT_APPEAR", help_text=FAKE_GEMINI_HELP_WITH_SESSIONS))
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--agent-team", "native-agents", "--stream-progress", "--roles", "correctness"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert "[gemini-for-codex progress]" in result.stderr
+    assert '"event":"native-agents started"' in result.stderr
+    assert '"event":"native-agents finished"' in result.stderr
+    assert "RAW_SECRET_SHOULD_NOT_APPEAR" not in result.stderr
+
+
+def test_multi_review_plugin_managed_stream_progress_is_sanitized(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="PLUGIN_SECRET_SHOULD_NOT_APPEAR"))
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--stream-progress", "--roles", "correctness"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert '"mode":"plugin-managed"' in result.stderr
+    assert '"event":"role started"' in result.stderr
+    assert '"event":"role finished"' in result.stderr
+    assert "PLUGIN_SECRET_SHOULD_NOT_APPEAR" not in result.stderr
 
 
 def write_role_pack_file(tmp_path, payload, name="pack.json"):
@@ -1203,6 +1476,7 @@ def test_release_check_passes_with_provider_fixtures(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     assert payload["checks"]["contextProviderFixtures"] is True
+    assert payload["checks"]["nativeOrchestrationSafety"] is True
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
@@ -1219,7 +1493,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.8.0" in text
+    assert "--ref gemini-for-codex-v0.10.0" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text
@@ -1308,7 +1582,7 @@ def test_github_actions_comment_and_annotation_sanitization():
     module = PLUGIN / "scripts" / "lib" / "github-actions.mjs"
     review = {
         "verdict": "needs-attention",
-        "summary": "Summary <b>bad</b> /Users/fanghao/secret",
+        "summary": "Summary <b>bad</b> /Users/example/secret",
         "findings": [
             {
                 "severity": "high",
@@ -1564,6 +1838,19 @@ def test_gemini_prompt_templates_and_schema_are_packaged():
     schema = json.loads((PLUGIN / "schemas" / "review-output.schema.json").read_text(encoding="utf8"))
     assert schema["required"] == ["verdict", "summary", "findings", "next_steps"]
     assert schema["properties"]["verdict"]["enum"] == ["approve", "needs-attention"]
+
+
+def test_prompt_template_renderer_allows_inserted_template_syntax():
+    module = PLUGIN / "scripts" / "lib" / "prompt-template.mjs"
+    code = (
+        "const m = await import(process.argv[1]);"
+        "const rendered = m.renderPromptTemplate('A {{VALUE}}', {VALUE:'diff contains {{FOCUS}}'});"
+        "console.log(rendered);"
+    )
+    result = subprocess.run([NODE, "--input-type=module", "-e", code, str(module)], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "A diff contains {{FOCUS}}"
 
 
 def test_gemini_skills_have_frontmatter_and_runtime_calls():

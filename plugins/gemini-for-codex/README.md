@@ -1,6 +1,6 @@
 # Gemini for Codex
 
-Codex plugin that invokes the local Gemini CLI for independent read-only review, reviewer role packs, advisory mailbox/leases, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
+Codex plugin that invokes the local Gemini CLI for independent read-only review, explicit native-agent review teams, reviewer role packs, advisory mailbox/leases, GitHub Actions PR review templates, adversarial review, implementation planning, rescue diagnosis, tracked background jobs, optional bounded context-provider enrichment, and an opt-in Stop hook gate.
 
 ## Requirements
 
@@ -47,7 +47,7 @@ The plugin sends bounded inline git context and does not depend on Gemini MCP or
 - `mailbox`: list, show, and post sanitized coordination summaries.
 - `leases`: list, claim, and release advisory path-attention leases.
 - `adversarial-review`: skeptical multi-lens review.
-- `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--role-pack <pack>` to select a built-in reviewer team, or `--native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions.
+- `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--role-pack <pack>` to select a built-in reviewer team, or `--agent-team native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions. Existing `--native-agents` remains a compatibility alias.
 - `plan`: independent implementation plan for Codex to reconcile.
 - `rescue`: read-only diagnosis for stuck implementation work. Explicit `--resume`, `--session-id`, and `--worktree` are forwarded only when the installed Gemini CLI reports support.
 - `recommend-execution-mode`: return JSON guidance for foreground versus background review sizing.
@@ -63,14 +63,35 @@ Use `--background` on long reviews. The skill reserves a job and dispatches exac
 gemini-result <job-id>
 ```
 
+## Real Gemini Smoke
+
+Real smoke is opt-in because it invokes the user's authenticated Gemini CLI.
+
+```bash
+GEMINI_FOR_CODEX_REAL_SMOKE=1 node plugins/gemini-for-codex/scripts/gemini-companion.mjs real-smoke --quick
+```
+
+The smoke runner checks `review --json`, plugin-managed `multi-review --stream-progress`, native-agent `multi-review --agent-team native-agents --native-structured`, and capability diagnostics. It is not used by default tests, hooks, or generated GitHub Actions workflows.
+
+`capabilities` reports the Gemini CLI surface detected from `gemini --help`, including sessions, `stream-json`, extension/MCP/skills/hooks commands, policy flags, and raw-output support. Reporting a feature does not enable it; Gemini extension and MCP execution remain disabled by default.
+
 ## Multi-Agent Review
 
 `multi-review` has two modes:
 
 - Default mode runs one Gemini CLI process per selected role in parallel and aggregates the completed role outputs.
-- `--native-agents` creates temporary Gemini subagent definitions for the selected roles and asks Gemini CLI to dispatch `@gfc_<role>` native subagents. The temporary agent workspace is outside the repository and is removed after the run.
+- `--agent-team native-agents` creates temporary Gemini subagent definitions for the selected roles and asks Gemini CLI to dispatch `@gfc_<role>` native subagents. The temporary agent workspace is outside the repository and is removed after the run. `--native-agents` is kept as a compatibility alias.
 
 Both modes are read-only and use bounded git context. Native subagent mode passes the repository through `--include-directories` only when the installed Gemini CLI reports support for that flag.
+
+Native-agent mode has two optional diagnostics:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --agent-team native-agents --native-structured --roles correctness,security
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --agent-team native-agents --stream-progress --role-pack minimal
+```
+
+`--native-structured` asks Gemini for one aggregate JSON object, validates that every requested role is present exactly once, and prints JSON only on stdout. `--stream-progress` writes sanitized lifecycle events to stderr; it does not stream raw Gemini text, prompts, diffs, provider output, or source content.
 
 ## Reviewer Role Packs
 
@@ -80,7 +101,7 @@ Built-in role packs are plugin-managed Gemini reviewer presets:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs roles list
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs roles inspect release
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --role-pack release
-node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --native-agents --role-pack minimal
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs multi-review --agent-team native-agents --role-pack minimal
 ```
 
 Available built-in packs are `default`, `security`, `release`, `frontend`, `backend`, `testing`, `docs`, and `minimal`. `frontend` and `docs` are presets over existing Gemini roles in this release, not separate dedicated lenses.
@@ -105,7 +126,7 @@ node plugins/gemini-for-codex/scripts/gemini-companion.mjs leases list --json
 
 Mailbox messages are sanitized summaries, not transcripts. Reports store counts and hashes only, not mailbox text. Leases are advisory path-attention hints; they do not lock files, do not block review, and do not affect Stop gate verdicts.
 
-In plugin-managed `multi-review`, the mailbox records per-role start and finish summaries. In `--native-agents` mode, Gemini for Codex records aggregate native-agent orchestration start and finish summaries only; it does not claim visibility into individual Gemini subagent lifecycle events.
+In plugin-managed `multi-review`, the mailbox records per-role start and finish summaries. In `--agent-team native-agents` mode, Gemini for Codex records aggregate native-agent orchestration start and finish summaries only; it does not claim visibility into individual Gemini subagent lifecycle events.
 
 ## Optional Context Providers
 
@@ -150,7 +171,7 @@ Write the default workflow only when requested:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
 ```
 
-The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.8.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`.
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.10.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
 
 ## Stop Hook
 
@@ -170,6 +191,8 @@ Only explicit `BLOCK:` verdicts from Gemini emit Codex hook block JSON. Gemini C
 
 Gemini native session flags are capability-gated. Run `setup` to see whether the current CLI reports `--resume`, `--session-id`, `--session-file`, `--list-sessions`, and `--worktree`. Unsupported requested flags fail before Gemini invocation.
 
+Native-agent review flags are also explicit. `--agent-team native-agents`, `--native-structured`, and `--stream-progress` are accepted only by `multi-review`; ordinary `review`, `plan`, and `rescue` reject them before invoking Gemini.
+
 ## Verification
 
 ```bash
@@ -182,3 +205,5 @@ node plugins/gemini-for-codex/scripts/gemini-companion.mjs capabilities
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs release-check
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs release-check --ci-simulate
 ```
+
+Gemini extension and MCP support are tracked in `docs/gemini-extension-mcp-evaluation.md`. The current plugin only reports capability support; it does not enable Gemini extensions or MCP servers in review, Stop hooks, or default CI.
