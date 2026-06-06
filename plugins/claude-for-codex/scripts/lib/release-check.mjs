@@ -6,7 +6,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.0";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.1";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -44,6 +44,9 @@ function listFiles(root, dirs) {
         continue;
       }
       const full = path.join(current, entry.name);
+      if (full.includes(`${path.sep}docs${path.sep}superpowers${path.sep}`)) {
+        continue;
+      }
       if (entry.isDirectory()) {
         walk(full);
       } else {
@@ -84,8 +87,9 @@ function checkManifest(root) {
   const unreleased = changelog.match(/^## Unreleased\s*([\s\S]*?)(?=^##\s|\Z)/m);
   const unreleasedBody = unreleased ? unreleased[1].trim() : "";
   const checks = [
-    result(manifest.version === "0.14.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.14.0"), "changelog-version", "CHANGELOG contains 0.14.0"),
+    result(manifest.version === "0.14.1", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.14.1"), "changelog-version", "CHANGELOG contains 0.14.1"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.14.1`"), "readme-current-version", "README current version is 0.14.1"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -247,9 +251,10 @@ export function readOnlyIsolationChecksFromSource({ companion = "", backend = ""
     "--setting-sources",
     "READ_ONLY_BUILTIN_TOOLS.join(\",\")",
     "READ_ONLY_MCP_TOOLS.join(\",\")",
-    "--disallowedTools",
-    "Edit,Write,MultiEdit,Bash",
-    "--strict-mcp-config"
+    "--strict-mcp-config",
+    "configuredWriteDenyTools(process.env)",
+    "formatDenyToolsForCli(denyTools)",
+    "parseUnknownDenyToolFailure"
   ];
   const sdkMarkers = [
     "settingSources: []",
@@ -295,7 +300,17 @@ function checkReadOnlyIsolation(root) {
   const { pluginRoot } = resolveLayout(root);
   const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
-  return readOnlyIsolationChecksFromSource({ companion, backend });
+  const mcpGit = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "mcp-git.mjs"), "utf8");
+  return [
+    ...readOnlyIsolationChecksFromSource({ companion, backend }),
+    result(
+      mcpGit.includes("GIT_TIMEOUT_MS") &&
+        mcpGit.includes("timeout: GIT_TIMEOUT_MS") &&
+        mcpGit.includes('killSignal: "SIGKILL"'),
+      "read-only-git-mcp-timeout",
+      "Git MCP subprocess calls have a bounded timeout"
+    )
+  ];
 }
 
 function checkSecrets(root) {

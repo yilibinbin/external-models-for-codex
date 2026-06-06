@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.14.0`
+- Current version: `0.14.1`
 
 Published capabilities:
 
@@ -113,7 +113,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -203,7 +203,7 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
 
-`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies `Edit`, `Write`, `MultiEdit`, and `Bash`, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
+`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies configured write-tool candidates such as `Edit`, `Write`, `MultiEdit`, and `Bash` when the installed Claude runtime recognizes them, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
 
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is never used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because the command may use remote/cloud execution and usage-credit billing.
 
@@ -213,9 +213,9 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.14.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.14.0` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.14.1` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.14.1` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 
@@ -268,7 +268,7 @@ If the local Codex runtime does not expose one of these hook events, the plugin 
 
 ## Read-Only Git Boundary
 
-Claude review commands run with `Read,Grep,Glob` only and explicitly disallow `Edit,Write,MultiEdit,Bash`. Read-only Claude CLI review also passes `--disable-slash-commands`, `--no-session-persistence`, and an empty `--setting-sources` value so repository-local Claude settings, skills, hooks, slash commands, and sessions cannot add write side effects. Read-only Claude review also receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments; unsupported paths, refs, and operations are rejected before Git is invoked.
+Claude review commands expose `Read,Grep,Glob` only and pass a configured write-tool deny-list for recognized Claude runtime tools. Read-only Claude CLI review also passes `--disable-slash-commands`, `--no-session-persistence`, and an empty `--setting-sources` value so repository-local Claude settings, skills, hooks, slash commands, and sessions cannot add write side effects. Read-only Claude review also receives a strict MCP config for bounded Git inspection. The bundled read-only Git MCP server exposes status, diff, cached diff, log, show, blame, grep, and ls-files through validated Git arguments; unsupported paths, refs, and operations are rejected before Git is invoked.
 
 ## Stop Review Gate
 

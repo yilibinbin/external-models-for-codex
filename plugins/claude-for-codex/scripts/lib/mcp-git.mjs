@@ -6,6 +6,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 
 const MAX_BUFFER = 5 * 1024 * 1024;
+const GIT_TIMEOUT_MS = 30 * 1000;
 const SAFE_PATH = /^[A-Za-z0-9._/@:+-]+$/;
 const SAFE_REF = /^[A-Za-z0-9._/@:+~^-]+$/;
 
@@ -99,7 +100,13 @@ export function runGitTool(name, input = {}, cwd = process.cwd()) {
   if (tool.requiresOnePath && paths.length !== 1) throw new ValidationError(`${name} requires exactly one path`);
   if (paths.length) args.push("--", ...paths);
 
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", maxBuffer: MAX_BUFFER });
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: MAX_BUFFER,
+    timeout: GIT_TIMEOUT_MS,
+    killSignal: "SIGKILL"
+  });
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? "",

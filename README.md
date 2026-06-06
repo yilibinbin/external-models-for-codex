@@ -21,11 +21,11 @@ External Models for Codex 是一个面向 Codex 的外部模型插件市场，�
 Remote install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
-The immutable `claude-for-codex-v0.14.0` ref is intended for installing the Claude plugin slice from this multi-plugin marketplace. Install Gemini from its own release ref or from `main` during development.
+The immutable `claude-for-codex-v0.14.1` ref is intended for installing the Claude plugin slice from this multi-plugin marketplace. Install Gemini from its own release ref or from `main` during development.
 
 Upgrade an existing install:
 

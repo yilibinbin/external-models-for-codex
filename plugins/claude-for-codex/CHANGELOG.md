@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## 0.14.1 - 2026-06-06
+
+### Fixed
+
+- Add runtime-compatible Claude write deny-list handling so read-only review retries safely when a Claude Code version rejects a configured deny candidate such as `MultiEdit` as unknown.
+- Add `CLAUDE_FOR_CODEX_DENY_TOOLS` filtering for manual deny-list remediation without allowing unknown tool names to be passed through.
+- Keep release checks from scanning local `docs/superpowers` planning artifacts.
+
 ## 0.14.0 - 2026-06-04
 
 ### Added

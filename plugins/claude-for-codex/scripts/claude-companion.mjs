@@ -36,6 +36,12 @@ import {
 } from "./lib/github-actions.mjs";
 import {
   backendCapabilities,
+  buildDenyToolsAfterOmission,
+  configuredWriteDenyTools,
+  denyToolsDiagnosticEnv,
+  formatDenyToolsForCli,
+  nonModelStdoutDiagnostic,
+  parseUnknownDenyToolFailure,
   resolveBackend,
   runSdkNativeReview,
   runSdkPrompt
@@ -906,6 +912,13 @@ function buildClaudePrintInvocation(prompt, options) {
   let mcpConfig = null;
 
   if (!options.write) {
+    const denyTools = Array.isArray(options.denyTools)
+      ? options.denyTools
+      : configuredWriteDenyTools(process.env);
+    const formattedDenyTools = formatDenyToolsForCli(denyTools);
+    if (!formattedDenyTools) {
+      throw new Error("Claude read-only review requires at least one disallowed write tool.");
+    }
     mcpConfig = createGitMcpConfig(process.cwd(), process.env);
     args.push(
       "--disable-slash-commands",
@@ -915,9 +928,10 @@ function buildClaudePrintInvocation(prompt, options) {
       "--tools",
       READ_ONLY_BUILTIN_TOOLS.join(","),
       "--allowedTools",
-      READ_ONLY_MCP_TOOLS.join(","),
-      "--disallowedTools",
-      "Edit,Write,MultiEdit,Bash",
+      READ_ONLY_MCP_TOOLS.join(",")
+    );
+    args.push("--disallowedTools", formattedDenyTools);
+    args.push(
       "--mcp-config",
       mcpConfig.configPath,
       "--strict-mcp-config"
@@ -946,17 +960,47 @@ function buildClaudePrintInvocation(prompt, options) {
   return { args, mcpConfig };
 }
 
+function logUnknownDenyRetry(candidate, remainingTools) {
+  console.error(
+    '[claude-for-codex] Claude runtime rejected deny rule "' + candidate + '" before review; retrying without that deny candidate. For a persistent manual override, set ' + denyToolsDiagnosticEnv(remainingTools) + '.'
+  );
+}
+
+function claudeFailureDiagnostic(result) {
+  return result.stderr || result.error || nonModelStdoutDiagnostic(result.stdout) || "claude --print failed\n";
+}
+
 function claudePrint(prompt, options) {
-  const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
-  try {
-    return runClaude(args, {
-      timeout: options.timeout,
-      env: options.write ? undefined : { CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1" }
-    });
-  } finally {
-    if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
-      mcpConfig.cleanup();
+  let denyTools = configuredWriteDenyTools(process.env);
+  const omitted = new Set();
+  while (true) {
+    // Retry may narrow only the defense-in-depth deny-list; the read-only allow-list and strict MCP boundary must remain invariant.
+    const { args, mcpConfig } = buildClaudePrintInvocation(prompt, { ...options, denyTools });
+    let result;
+    try {
+      result = runClaude(args, {
+        timeout: options.timeout,
+        env: options.write ? undefined : { CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1" }
+      });
+    } finally {
+      if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
+        mcpConfig.cleanup();
+      }
     }
+    if (options.write || result.status === 0) {
+      return result;
+    }
+    const candidate = parseUnknownDenyToolFailure(result, denyTools);
+    if (!candidate || omitted.has(candidate)) {
+      return result;
+    }
+    const remainingTools = buildDenyToolsAfterOmission(denyTools, candidate);
+    if (remainingTools.length === denyTools.length || remainingTools.length === 0) {
+      return result;
+    }
+    omitted.add(candidate);
+    denyTools = remainingTools;
+    logUnknownDenyRetry(candidate, denyTools);
   }
 }
 
@@ -1021,16 +1065,36 @@ async function claudePrintAsync(prompt, options) {
   if (resolveBackend(options, process.env) === "sdk") {
     return runSdkPrompt(prompt, options, { cwd: process.cwd(), timeout: options.timeout });
   }
-  const { args, mcpConfig } = buildClaudePrintInvocation(prompt, options);
-  try {
-    return await runClaudeAsync(args, {
-      timeout: options.timeout,
-      env: options.write ? undefined : { CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1" }
-    });
-  } finally {
-    if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
-      mcpConfig.cleanup();
+  let denyTools = configuredWriteDenyTools(process.env);
+  const omitted = new Set();
+  while (true) {
+    // Retry may narrow only the defense-in-depth deny-list; the read-only allow-list and strict MCP boundary must remain invariant.
+    const { args, mcpConfig } = buildClaudePrintInvocation(prompt, { ...options, denyTools });
+    let result;
+    try {
+      result = await runClaudeAsync(args, {
+        timeout: options.timeout,
+        env: options.write ? undefined : { CLAUDE_FOR_CODEX_ISOLATED_REVIEW: "1" }
+      });
+    } finally {
+      if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
+        mcpConfig.cleanup();
+      }
     }
+    if (options.write || result.status === 0) {
+      return result;
+    }
+    const candidate = parseUnknownDenyToolFailure(result, denyTools);
+    if (!candidate || omitted.has(candidate)) {
+      return result;
+    }
+    const remainingTools = buildDenyToolsAfterOmission(denyTools, candidate);
+    if (remainingTools.length === denyTools.length || remainingTools.length === 0) {
+      return result;
+    }
+    omitted.add(candidate);
+    denyTools = remainingTools;
+    logUnknownDenyRetry(candidate, denyTools);
   }
 }
 
@@ -2077,7 +2141,7 @@ async function runReviewGate(rawArgs) {
       continue;
     }
     if (result.status !== 0) {
-      const detail = (result.stderr || result.error || result.stdout || "claude --print failed").trim();
+      const detail = claudeFailureDiagnostic(result).trim();
       warnGate(`role ${role.name} failed; allowing stop: ${detail}`);
       continue;
     }
@@ -2435,7 +2499,7 @@ async function runClaudeTask(kind, rawArgs) {
 
   if (result.status !== 0) {
     recordCommandReport(kind, args, result, startedAt);
-    process.stderr.write(result.stderr || result.error || "claude --print failed\n");
+    process.stderr.write(claudeFailureDiagnostic(result));
     process.exit(result.status);
   }
   if (kind === "adversarial-review" && args.jsonOutput) {

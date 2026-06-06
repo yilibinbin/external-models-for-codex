@@ -1,5 +1,7 @@
+import { configuredWriteDenyTools } from "./claude-backend.mjs";
+
 const READ_ONLY_TOOLS = Object.freeze(["Read", "Grep", "Glob"]);
-const WRITE_DENY_TOOLS = Object.freeze(["Edit", "Write", "MultiEdit", "Bash", "Agent"]);
+const NATIVE_PARENT_DENY_TOOLS = Object.freeze(["Agent"]);
 const SUBAGENT_MODELS = Object.freeze(new Set(["sonnet", "opus", "haiku", "inherit"]));
 
 function roleName(role) {
@@ -68,7 +70,8 @@ function nativeAgentPrompt(role, { structuredJson = false } = {}) {
   ].join("\n");
 }
 
-export function buildNativeReviewAgents(roles, { model, structuredJson = false } = {}) {
+export function buildNativeReviewAgents(roles, { model, structuredJson = false, disallowedTools } = {}) {
+  const writeDenyTools = disallowedTools ?? configuredWriteDenyTools(process.env);
   const agents = {};
   for (const role of roles || []) {
     const name = nativeAgentName(role);
@@ -76,7 +79,7 @@ export function buildNativeReviewAgents(roles, { model, structuredJson = false }
       description: roleDescription(role),
       prompt: nativeAgentPrompt(role, { structuredJson }),
       tools: [...READ_ONLY_TOOLS],
-      disallowedTools: [...WRITE_DENY_TOOLS],
+      disallowedTools: [...writeDenyTools, ...NATIVE_PARENT_DENY_TOOLS],
       model: nativeAgentModel(model),
       maxTurns: 4
     };
