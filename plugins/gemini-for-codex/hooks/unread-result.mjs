@@ -28,7 +28,8 @@ function git(cwd, args) {
     cwd,
     encoding: "utf8",
     maxBuffer: 10 * 1024 * 1024,
-    timeout: 10000
+    timeout: 10000,
+    killSignal: "SIGKILL"
   });
   return result.status === 0 ? result.stdout : "";
 }

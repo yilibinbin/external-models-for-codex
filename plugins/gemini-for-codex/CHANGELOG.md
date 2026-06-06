@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.1 - 2026-06-07
+
+- Harden all Gemini plugin Git subprocess probes with bounded timeouts and explicit `SIGKILL` timeout cleanup.
+- Improve real-smoke Git fixture cleanup and timeout diagnostics.
+- Expand `release-check` coverage for Git subprocess timeout constants, `killSignal` enforcement, and source-shape drift.
+
 ## 0.10.0 - 2026-06-05
 
 - Add opt-in real Gemini smoke diagnostics for `review --json`, plugin-managed `multi-review --stream-progress`, native-agent structured review, and capability reporting.

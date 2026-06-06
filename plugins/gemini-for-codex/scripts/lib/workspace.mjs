@@ -3,11 +3,15 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
+export const GIT_TIMEOUT_MS = 10 * 1000;
+
 function runGit(args, cwd) {
   const result = spawnSync("git", args, {
     cwd,
     encoding: "utf8",
-    maxBuffer: 1024 * 1024
+    maxBuffer: 1024 * 1024,
+    timeout: GIT_TIMEOUT_MS,
+    killSignal: "SIGKILL"
   });
   return {
     status: result.status ?? 1,

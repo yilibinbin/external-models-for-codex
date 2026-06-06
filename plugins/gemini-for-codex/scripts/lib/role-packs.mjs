@@ -349,7 +349,7 @@ function normalizePack(pack, { source = "user" } = {}) {
 }
 
 function git(args, cwd) {
-  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5000 });
+  const result = spawnSync("git", args, { cwd, encoding: "utf8", timeout: 5000, killSignal: "SIGKILL" });
   return result.status === 0 ? result.stdout.trim() : "";
 }
 

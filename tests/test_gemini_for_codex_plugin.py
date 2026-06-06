@@ -147,7 +147,7 @@ def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.10.0"
+    assert manifest["version"] == "0.10.1"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -1149,6 +1149,125 @@ def test_release_check_rejects_native_flags_in_default_workflow_template(tmp_pat
     assert payload["ok"] is False
     assert payload["checks"]["externalSurfaceSafety"] is False
     assert "default GitHub Actions workflow unexpectedly contains --native-structured" in payload["failures"]
+
+
+def test_release_check_rejects_unbounded_real_smoke_git_fixture(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    companion_path = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion_path.write_text(companion_path.read_text(encoding="utf8").replace("timeout: GIT_TIMEOUT_MS", "timeout: 0", 1), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["gitTimeoutSafety"] is False
+    assert any("git subprocesses must use a positive timeout" in failure for failure in payload["failures"])
+
+
+def test_release_check_rejects_unbounded_workspace_git_probe(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    workspace_path = fake_plugin_root / "scripts" / "lib" / "workspace.mjs"
+    workspace_path.write_text(workspace_path.read_text(encoding="utf8").replace("timeout: GIT_TIMEOUT_MS", "timeout: 0", 1), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["gitTimeoutSafety"] is False
+    assert any("git subprocesses must use a positive bounded timeout" in failure for failure in payload["failures"])
+
+
+def test_release_check_rejects_zero_git_timeout_constant(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    workspace_path = fake_plugin_root / "scripts" / "lib" / "workspace.mjs"
+    workspace_path.write_text(workspace_path.read_text(encoding="utf8").replace("export const GIT_TIMEOUT_MS = 10 * 1000;", "export const GIT_TIMEOUT_MS = 0 * 1000;"), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["gitTimeoutSafety"] is False
+    assert "GIT_TIMEOUT_MS must be a positive bounded timeout constant" in payload["failures"]
+
+
+def test_release_check_accepts_plain_git_timeout_constant(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    workspace_path = fake_plugin_root / "scripts" / "lib" / "workspace.mjs"
+    workspace_path.write_text(workspace_path.read_text(encoding="utf8").replace("export const GIT_TIMEOUT_MS = 10 * 1000;", "export const GIT_TIMEOUT_MS = 10000;"), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["gitTimeoutSafety"] is True
+
+
+def test_release_check_rejects_unbounded_review_git_wrapper(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    companion_path = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+    companion_path.write_text(companion_path.read_text(encoding="utf8").replace('killSignal: options.killSignal ?? (isGit ? "SIGKILL" : undefined)', 'killSignal: options.killSignal'), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["gitTimeoutSafety"] is False
+    assert "run() git wrapper must use a bounded timeout and killSignal SIGKILL" in payload["failures"]
+
+
+def test_release_check_rejects_missing_git_kill_signal(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    workspace_path = fake_plugin_root / "scripts" / "lib" / "workspace.mjs"
+    workspace_path.write_text(workspace_path.read_text(encoding="utf8").replace(',\n    killSignal: "SIGKILL"', "", 1), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["gitTimeoutSafety"] is False
+    assert any("git subprocesses must use killSignal SIGKILL" in failure for failure in payload["failures"])
+
+
+def test_release_check_allows_reordered_git_options(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    workspace_path = fake_plugin_root / "scripts" / "lib" / "workspace.mjs"
+    workspace_path.write_text(workspace_path.read_text(encoding="utf8").replace('timeout: GIT_TIMEOUT_MS,\n    killSignal: "SIGKILL"', 'killSignal: "SIGKILL",\n    timeout: GIT_TIMEOUT_MS', 1), encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["gitTimeoutSafety"] is True
+
+
+def test_release_check_rejects_new_unbounded_git_spawn_in_any_script(tmp_path):
+    fake_plugin_root = tmp_path / "plugins" / "gemini-for-codex"
+    shutil.copytree(PLUGIN, fake_plugin_root)
+    nested_path = fake_plugin_root / "scripts" / "lib" / "nested" / "git-helper.mjs"
+    nested_path.parent.mkdir(parents=True)
+    nested_path.write_text('import { spawnSync } from "node:child_process";\nspawnSync("git", ["status"], { encoding: "utf8" });\n', encoding="utf8")
+    runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], capture_output=True, text=True, cwd=fake_plugin_root)
+
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["checks"]["gitTimeoutSafety"] is False
+    assert any("git-helper.mjs" in failure and "git subprocesses must use a positive timeout" in failure for failure in payload["failures"])
 
 
 def test_gemini_extension_mcp_evaluation_docs_are_present_and_conservative():
@@ -2346,6 +2465,7 @@ def test_release_check_passes_with_provider_fixtures(tmp_path):
     assert payload["ok"] is True
     assert payload["checks"]["contextProviderFixtures"] is True
     assert payload["checks"]["nativeOrchestrationSafety"] is True
+    assert payload["checks"]["gitTimeoutSafety"] is True
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
@@ -2362,7 +2482,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.10.0" in text
+    assert "--ref gemini-for-codex-v0.10.1" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text

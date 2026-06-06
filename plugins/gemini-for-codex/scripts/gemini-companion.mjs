@@ -30,6 +30,7 @@ import {
   stateFileForCwd,
   turnBaselineFileForCwd
 } from "./lib/state.mjs";
+import { GIT_TIMEOUT_MS } from "./lib/workspace.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 import { loadPromptTemplate, renderPromptTemplate } from "./lib/prompt-template.mjs";
 import { renderStructuredReview, validateStructuredReview } from "./lib/render-review.mjs";
@@ -94,16 +95,19 @@ const REVIEW_GATE_ROLE_TIMEOUT_MS = 2 * 60 * 1000;
 const REPORT_VERSION = 1;
 const JSON_BLOCK_SCAN_LIMIT = 512 * 1024;
 const JSON_BLOCK_CANDIDATE_LIMIT = 32;
+const REVIEW_GIT_TIMEOUT_MS = 30 * 1000;
 let geminiHelpReportCache = null;
 
 function run(command, args, options = {}) {
+  const isGit = command === "git";
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? process.cwd(),
     env: options.env ?? process.env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: 20 * 1024 * 1024,
-    timeout: options.timeout ?? 15 * 60 * 1000
+    timeout: options.timeout ?? (isGit ? REVIEW_GIT_TIMEOUT_MS : 15 * 60 * 1000),
+    killSignal: options.killSignal ?? (isGit ? "SIGKILL" : undefined)
   });
 
   return {
@@ -1331,21 +1335,31 @@ function parseRealSmokeRoles(value) {
 function createRealSmokeWorkspace() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "gemini-for-codex-smoke-"));
   const target = path.join(dir, "review-target.txt");
-  fs.writeFileSync(target, "before\n", "utf8");
-  const init = spawnSync("git", ["init"], { cwd: dir, encoding: "utf8" });
-  if (init.status !== 0) {
-    throw new Error(`real-smoke workspace git init failed: ${init.stderr || init.stdout || "unknown error"}`);
+  try {
+    fs.writeFileSync(target, "before\n", "utf8");
+    const gitOptions = { cwd: dir, encoding: "utf8", timeout: GIT_TIMEOUT_MS, killSignal: "SIGKILL" };
+    const init = spawnSync("git", ["init"], gitOptions);
+    if (init.status !== 0) {
+      throw new Error(`real-smoke workspace git init failed: ${gitFailureDetail(init)}`);
+    }
+    const add = spawnSync("git", ["add", "review-target.txt"], gitOptions);
+    if (add.status !== 0) {
+      throw new Error(`real-smoke workspace git add failed: ${gitFailureDetail(add)}`);
+    }
+    const commit = spawnSync("git", ["-c", "user.name=Gemini for Codex Smoke", "-c", "user.email=gemini-for-codex-smoke@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Initial smoke fixture"], gitOptions);
+    if (commit.status !== 0) {
+      throw new Error(`real-smoke workspace git commit failed: ${gitFailureDetail(commit)}`);
+    }
+    fs.writeFileSync(target, "before\nafter\n", "utf8");
+    return dir;
+  } catch (error) {
+    fs.rmSync(dir, { recursive: true, force: true });
+    throw error;
   }
-  const add = spawnSync("git", ["add", "review-target.txt"], { cwd: dir, encoding: "utf8" });
-  if (add.status !== 0) {
-    throw new Error(`real-smoke workspace git add failed: ${add.stderr || add.stdout || "unknown error"}`);
-  }
-  const commit = spawnSync("git", ["-c", "user.name=Gemini for Codex Smoke", "-c", "user.email=gemini-for-codex-smoke@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Initial smoke fixture"], { cwd: dir, encoding: "utf8" });
-  if (commit.status !== 0) {
-    throw new Error(`real-smoke workspace git commit failed: ${commit.stderr || commit.stdout || "unknown error"}`);
-  }
-  fs.writeFileSync(target, "before\nafter\n", "utf8");
-  return dir;
+}
+
+function gitFailureDetail(result) {
+  return result.stderr || result.stdout || result.error?.message || result.error?.code || "unknown error";
 }
 
 async function runRealSmoke(rawArgs = []) {
@@ -1586,7 +1600,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.10.0") failures.push(`manifest version is ${manifest.version}, expected 0.10.0`);
+    if (manifest.version !== "0.10.1") failures.push(`manifest version is ${manifest.version}, expected 0.10.1`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1621,6 +1635,8 @@ function runReleaseCheck(rawArgs = []) {
   failures.push(...rawOutputChecks.failures);
   const externalSurfaceChecks = checkExternalSurfaceSafety();
   failures.push(...externalSurfaceChecks.failures);
+  const gitTimeoutChecks = checkGitTimeoutSafety();
+  failures.push(...gitTimeoutChecks.failures);
   const payload = {
     ok: failures.length === 0,
     checks: {
@@ -1633,7 +1649,8 @@ function runReleaseCheck(rawArgs = []) {
       nativeOrchestrationSafety: nativeChecks.ok,
       githubActionsCi: githubActionsChecks.ok,
       rawOutputSafety: rawOutputChecks.ok,
-      externalSurfaceSafety: externalSurfaceChecks.ok
+      externalSurfaceSafety: externalSurfaceChecks.ok,
+      gitTimeoutSafety: gitTimeoutChecks.ok
     },
     failures
   };
@@ -1655,7 +1672,7 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.10.0")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.10.1")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
@@ -1704,6 +1721,78 @@ function releaseTextFiles() {
     path.join(ROOT_DIR, "README.md"),
     ...scriptTextFiles()
   ];
+}
+
+function checkGitTimeoutSafety() {
+  const failures = [];
+  const workspacePath = path.join(ROOT_DIR, "scripts", "lib", "workspace.mjs");
+  const workspace = fs.readFileSync(workspacePath, "utf8");
+  const workspaceTimeoutMs = readTimeoutConstantMs(workspace, "GIT_TIMEOUT_MS");
+  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
+  const reviewTimeoutMs = readTimeoutConstantMs(companion, "REVIEW_GIT_TIMEOUT_MS");
+  if (!Number.isInteger(workspaceTimeoutMs) || workspaceTimeoutMs <= 0 || workspaceTimeoutMs > 300_000) {
+    failures.push("GIT_TIMEOUT_MS must be a positive bounded timeout constant");
+  }
+  if (!Number.isInteger(reviewTimeoutMs) || reviewTimeoutMs <= 0 || reviewTimeoutMs > 300_000) {
+    failures.push("REVIEW_GIT_TIMEOUT_MS must be a positive bounded timeout constant");
+  }
+  if (!/const\s+isGit\s*=\s*command\s*===\s*"git"/.test(companion)
+    || !/timeout:\s*options\.timeout\s*\?\?\s*\(isGit\s*\?\s*REVIEW_GIT_TIMEOUT_MS\s*:\s*15\s*\*\s*60\s*\*\s*1000\)/.test(companion)
+    || !/killSignal:\s*options\.killSignal\s*\?\?\s*\(isGit\s*\?\s*"SIGKILL"\s*:\s*undefined\)/.test(companion)) {
+    failures.push("run() git wrapper must use a bounded timeout and killSignal SIGKILL");
+  }
+  const gitFiles = [
+    ...scriptTextFiles(),
+    ...mjsFilesIn(path.join(ROOT_DIR, "hooks"))
+  ];
+  for (const file of gitFiles) {
+    failures.push(...checkGitSpawnSafety(file));
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function readTimeoutConstantMs(text, name) {
+  const match = String(text).match(new RegExp(`(?:export\\s+)?const\\s+${name}\\s*=\\s*([0-9_]+(?:\\s*\\*\\s*[0-9_]+)*)\\s*;`));
+  if (!match) {
+    return NaN;
+  }
+  return match[1]
+    .split("*")
+    .map((part) => Number(part.trim().replaceAll("_", "")))
+    .reduce((product, value) => Number.isFinite(value) ? product * value : NaN, 1);
+}
+
+function checkGitSpawnSafety(file) {
+  const text = fs.readFileSync(file, "utf8");
+  const failures = [];
+  const safeSharedOptions = /const\s+gitOptions\s*=\s*\{(?=[^}]*\btimeout\s*:\s*GIT_TIMEOUT_MS)(?=[^}]*\bkillSignal\s*:\s*"SIGKILL")[^}]*\}/s.test(text);
+  const pattern = /spawnSync\("git",[\s\S]*?\);/g;
+  const matches = [...text.matchAll(pattern)];
+  for (const match of matches) {
+    const snippet = match[0];
+    if (/,\s*gitOptions\s*\);/.test(snippet) && safeSharedOptions) {
+      continue;
+    }
+    const literalTimeout = snippet.match(/\btimeout\s*:\s*(\d+(?:\s*\*\s*\d+)?)/);
+    if (!/\btimeout\s*:\s*GIT_TIMEOUT_MS/.test(snippet) && !literalTimeout) {
+      failures.push(`${file} git subprocesses must use a positive timeout`);
+    } else if (literalTimeout) {
+      const value = readTimeoutConstantMs(`const TIMEOUT = ${literalTimeout[1]};`, "TIMEOUT");
+      if (!Number.isInteger(value) || value <= 0 || value > 300_000) {
+        failures.push(`${file} git subprocesses must use a positive bounded timeout`);
+      }
+    }
+    if (!/\bkillSignal\s*:\s*"SIGKILL"/.test(snippet)) {
+      failures.push(`${file} git subprocesses must use killSignal SIGKILL`);
+    }
+  }
+  return failures;
+}
+
+function mjsFilesIn(dir) {
+  const files = [];
+  collectMjsFiles(dir, files);
+  return files;
 }
 
 function checkExternalSurfaceSafety() {

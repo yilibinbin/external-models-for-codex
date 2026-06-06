@@ -3,7 +3,9 @@ import process from "node:process";
 
 function ps(pid) {
   const result = spawnSync("ps", ["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "command="], {
-    encoding: "utf8"
+    encoding: "utf8",
+    timeout: 5000,
+    killSignal: "SIGKILL"
   });
   if (result.status !== 0 || !result.stdout.trim()) {
     return null;
