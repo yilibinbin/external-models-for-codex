@@ -419,6 +419,86 @@ def test_structured_review_invalid_json_fails_without_stack_trace(tmp_path):
     assert "Error:" not in result.stderr
 
 
+def test_structured_review_rejects_top_level_extra_fields(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    response = json.dumps({
+        "verdict": "approve",
+        "summary": "ok",
+        "findings": [],
+        "next_steps": [],
+        "rawOutput": "not allowed"
+    })
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "Structured review output invalid" in result.stderr
+    assert "unsupported key" in result.stderr
+
+
+def test_structured_review_rejects_finding_extra_fields(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    response = json.dumps({
+        "verdict": "needs-attention",
+        "summary": "issue",
+        "findings": [{
+            "severity": "low",
+            "title": "Extra field",
+            "body": "The finding includes a schema-incompatible property.",
+            "file": "file.txt",
+            "line_start": 1,
+            "line_end": 1,
+            "confidence": 0.8,
+            "recommendation": "Remove it.",
+            "snippet": "not allowed"
+        }],
+        "next_steps": ["remove extra field"]
+    })
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "Structured review output invalid" in result.stderr
+    assert "unsupported key" in result.stderr
+
+
+def test_structured_review_rejects_reversed_line_ranges(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    response = json.dumps({
+        "verdict": "needs-attention",
+        "summary": "issue",
+        "findings": [{
+            "severity": "low",
+            "title": "Bad range",
+            "body": "The range is reversed.",
+            "file": "file.txt",
+            "line_start": 10,
+            "line_end": 9,
+            "confidence": 0.8,
+            "recommendation": "Fix the range."
+        }],
+        "next_steps": ["fix range"]
+    })
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "Structured review output invalid" in result.stderr
+    assert "line_end must be >= line_start" in result.stderr
+
+
 def test_review_invokes_agy_with_prompt_model_and_no_dangerous_permissions(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     repo = tmp_path / "repo"

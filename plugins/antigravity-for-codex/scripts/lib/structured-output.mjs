@@ -1,5 +1,16 @@
 const REVIEW_VERDICTS = new Set(["approve", "needs-attention"]);
 const FINDING_SEVERITIES = new Set(["critical", "high", "medium", "low"]);
+const REVIEW_KEYS = new Set(["verdict", "summary", "findings", "next_steps"]);
+const FINDING_KEYS = new Set([
+  "severity",
+  "title",
+  "body",
+  "file",
+  "line_start",
+  "line_end",
+  "confidence",
+  "recommendation"
+]);
 
 export function extractJsonObject(rawOutput) {
   const text = String(rawOutput ?? "").trim();
@@ -40,8 +51,17 @@ function assertArray(value, message) {
   }
 }
 
+function assertAllowedKeys(value, allowedKeys, messagePrefix) {
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`${messagePrefix} unsupported key: ${key}.`);
+    }
+  }
+}
+
 export function validateStructuredReview(value) {
   assertPlainObject(value, "Structured review output must be a JSON object.");
+  assertAllowedKeys(value, REVIEW_KEYS, "Structured review output");
   if (!REVIEW_VERDICTS.has(value.verdict)) {
     throw new Error("Structured review output verdict must be approve or needs-attention.");
   }
@@ -51,6 +71,7 @@ export function validateStructuredReview(value) {
 
   for (const [index, finding] of value.findings.entries()) {
     assertPlainObject(finding, `Structured review finding ${index} must be a JSON object.`);
+    assertAllowedKeys(finding, FINDING_KEYS, `Structured review finding ${index}`);
     if (!FINDING_SEVERITIES.has(finding.severity)) {
       throw new Error(`Structured review finding ${index} severity must be critical, high, medium, or low.`);
     }
@@ -62,6 +83,9 @@ export function validateStructuredReview(value) {
     }
     if (!Number.isInteger(finding.line_end) || finding.line_end < 1) {
       throw new Error(`Structured review finding ${index} line_end must be an integer >= 1.`);
+    }
+    if (finding.line_end < finding.line_start) {
+      throw new Error(`Structured review finding ${index} line_end must be >= line_start.`);
     }
     if (typeof finding.confidence !== "number" || finding.confidence < 0 || finding.confidence > 1) {
       throw new Error(`Structured review finding ${index} confidence must be a number between 0 and 1.`);
@@ -102,4 +126,3 @@ export function appendStructuredReviewInstructions(prompt) {
     "</structured_output_contract>"
   ].join("\n");
 }
-
