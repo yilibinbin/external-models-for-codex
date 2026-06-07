@@ -1,0 +1,35 @@
+name: Antigravity for Codex Review
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: {{TIMEOUT_MINUTES}}
+    env:
+      ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "{{MODEL_PROVIDER}}"
+      ANTIGRAVITY_FOR_CODEX_MODEL: "{{MODEL}}"
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install Codex and Antigravity for Codex
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install -g @openai/codex
+          codex plugin marketplace add yilibinbin/external-models-for-codex --ref {{RELEASE_REF}}
+          codex plugin add antigravity-for-codex@external-models-for-codex
+
+      - name: Run Antigravity review
+        shell: bash
+        run: |
+          set -euo pipefail
+          node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review --model-provider "$ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"{{MODEL_ARG_SUFFIX}} "Review this pull request."
