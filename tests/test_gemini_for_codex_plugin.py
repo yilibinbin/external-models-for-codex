@@ -147,7 +147,9 @@ def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.10.2"
+    assert manifest["version"] == "0.11.0"
+    assert "Antigravity" not in json.dumps(manifest)
+    assert "antigravity" not in json.dumps(manifest).lower()
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -163,6 +165,8 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "Gemini native session and worktree capability gating" in manifest["interface"]["capabilities"]
     assert "Real Gemini smoke diagnostics" in manifest["interface"]["capabilities"]
     assert "Gemini CLI extension and MCP capability diagnostics" in manifest["interface"]["capabilities"]
+    github_actions = (PLUGIN / "scripts" / "lib" / "github-actions.mjs").read_text(encoding="utf8")
+    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.11.0";' in github_actions
 
 
 def test_marketplace_lists_gemini_for_codex():
@@ -2499,7 +2503,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.10.2" in text
+    assert "--ref gemini-for-codex-v0.11.0" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text
@@ -2886,9 +2890,20 @@ def test_gemini_skills_have_frontmatter_and_runtime_calls():
             assert "workerCommand" in text
 
 
+def tracked_gemini_plugin_files():
+    result = subprocess.run(
+        ["git", "ls-files", "plugins/gemini-for-codex"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [ROOT / line for line in result.stdout.splitlines()]
+
+
 def test_gemini_plugin_files_do_not_ship_claude_residue():
     forbidden = ["CLAUDE_", "claude-companion", "claude-for-codex"]
-    for path in PLUGIN.rglob("*"):
+    for path in tracked_gemini_plugin_files():
         if not path.is_file() or path.suffix in {".svg"}:
             continue
         text = path.read_text(encoding="utf8")
@@ -2899,3 +2914,21 @@ def test_gemini_plugin_files_do_not_ship_claude_residue():
             text = text.replace("https://github.com/yilibinbin/external-models-for-codex", "")
         for token in forbidden:
             assert token not in text, f"{token} residue in {path}"
+
+
+def test_gemini_plugin_tracked_files_do_not_ship_antigravity_residue():
+    forbidden = [
+        "ANTIGRAVITY_",
+        "AGY_CLI_PATH",
+        "agy --",
+        "antigravity-for-codex",
+        "provider-runtime.mjs",
+        "Antigravity CLI",
+    ]
+    for path in tracked_gemini_plugin_files():
+        if not path.is_file() or path.suffix in {".svg"} or path.name == "CHANGELOG.md":
+            continue
+        text = path.read_text(encoding="utf8")
+        for token in forbidden:
+            assert token not in text, f"{token} residue in {path}"
+
