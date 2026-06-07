@@ -4759,7 +4759,52 @@ def test_subagent_command_validates_delegated_command_not_top_level_command(tmp_
     )
 
     assert result.returncode == 2
-    assert 'Command "status" cannot be delegated as a subagent command.' in result.stderr
+    assert 'Command "status" cannot be delegated to a Codex subagent.' in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("command_args", "stderr_marker"),
+    [
+        (
+            ["ultrareview", "--confirm-cost"],
+            'Command "ultrareview" cannot be delegated to a Codex subagent.',
+        ),
+        (
+            ["review", "--background", "--base", "main"],
+            "subagent-command is foreground-only; use reserve-job for --background delegation.",
+        ),
+        (
+            ["review", "--write", "--base", "main"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+        (
+            ["adversarial-review", "--write", "--base", "main"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+        (
+            ["multi-review", "--write", "--base", "main"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+        (
+            ["rescue", "--write", "fix flaky test"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+    ],
+)
+def test_subagent_command_rejects_unsafe_modes(tmp_path, command_args, stderr_marker):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", *command_args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert stderr_marker in result.stderr
 
 
 def test_subagent_command_materializes_backend_env_dependency(tmp_path):

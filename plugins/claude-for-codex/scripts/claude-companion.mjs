@@ -1247,16 +1247,16 @@ function handleSubagentCommand(rawArgs) {
     throw new Error("Missing command to delegate.");
   }
   if (!BACKGROUND_CAPABLE_COMMANDS.has(delegatedCommand)) {
-    throw new Error(`Command "${delegatedCommand}" cannot be delegated as a subagent command.`);
+    throw new Error(`Command "${delegatedCommand}" cannot be delegated to a Codex subagent.`);
   }
 
   const delegatedArgs = tokens.slice(1);
   const parsed = validateCommandNativeModeOptions(delegatedCommand, delegatedArgs);
   if (parsed.write) {
-    throw new Error("subagent-command does not support --write.");
+    throw new Error("--write cannot be delegated to a Codex subagent; run write-capable Claude commands only from the parent after reviewing the plan.");
   }
   if (parsed.background) {
-    throw new Error("subagent-command does not support --background.");
+    throw new Error("subagent-command is foreground-only; use reserve-job for --background delegation.");
   }
   validateBackendArgs(parsed);
   validateBackendCompatibleOptions(parsed);
