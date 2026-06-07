@@ -4744,6 +4744,74 @@ def test_subagent_command_prints_foreground_worker_command(tmp_path):
     assert "not replace it with raw claude or claude -p" in instructions
 
 
+def test_subagent_command_worker_command_executes_with_fake_claude(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    argv_file = tmp_path / "argv.json"
+    repo.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\nchanged\n", encoding="utf8")
+
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        "const argv = process.argv.slice(2);\n"
+        "if (argv.length === 1 && argv[0] === '--version') {\n"
+        "  process.stdout.write('claude fake\\n');\n"
+        "  process.exit(0);\n"
+        "}\n"
+        f"fs.writeFileSync({json.dumps(str(argv_file))}, JSON.stringify(argv));\n"
+        "process.stdout.write('SUBAGENT CLAUDE OK\\n');\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+
+    command_result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--scope", "working-tree", "delegated smoke"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert command_result.returncode == 0, command_result.stderr
+    payload = json.loads(command_result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["command"] == "review"
+    assert payload["cwd"] == str(repo)
+
+    worker_result = subprocess.run(
+        payload["workerCommand"],
+        cwd=payload["cwd"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert worker_result.returncode == 0, worker_result.stderr
+    assert "SUBAGENT CLAUDE OK" in worker_result.stdout
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--no-session-persistence" in argv
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
+    for tool in ["Edit", "Write", "MultiEdit", "Bash"]:
+        assert tool in disallowed_tools
+
+
 def test_subagent_command_normalizes_relative_parent_runtime_paths(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
