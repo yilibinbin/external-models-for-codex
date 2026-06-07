@@ -4124,6 +4124,39 @@ def test_release_check_knows_subagent_review_skill():
     assert checks["subagent-review-docs"]["ok"] is True
 
 
+def test_release_check_rejects_repo_root_subagent_example_late_in_section(tmp_path):
+    temp_root = tmp_path / "repo"
+    temp_plugin = temp_root / "plugins" / "claude-for-codex"
+    temp_root.mkdir()
+    shutil.copy2(ROOT / "README.md", temp_root / "README.md")
+    shutil.copytree(ROOT / "docs", temp_root / "docs")
+    temp_plugin.parent.mkdir(parents=True)
+    shutil.copytree(PLUGIN, temp_plugin)
+    readme = temp_plugin / "README.md"
+    text = readme.read_text(encoding="utf8")
+    marker = 'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue "$ARGUMENTS"'
+    assert marker in text
+    readme.write_text(
+        text.replace(
+            marker,
+            f"{marker}\nnode plugins/claude-for-codex/scripts/claude-companion.mjs subagent-command review \"$ARGUMENTS\"",
+        ),
+        encoding="utf8",
+    )
+
+    result = subprocess.run(
+        [NODE, str(temp_plugin / "scripts" / "claude-companion.mjs"), "release-check"],
+        cwd=temp_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["subagent-review-docs"]["ok"] is False
+
+
 def test_release_check_config_dir_negative_control_fails():
     release_check_uri = (PLUGIN / "scripts" / "lib" / "release-check.mjs").as_uri()
     result = subprocess.run(

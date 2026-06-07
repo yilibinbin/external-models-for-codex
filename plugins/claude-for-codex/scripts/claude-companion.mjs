@@ -93,6 +93,7 @@ import { extractJsonObject, validateAdversarialJson } from "./lib/structured-out
 
 const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
+const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
 const POSITIVE_DECIMAL_PATTERN = /^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)$/;
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
@@ -1246,7 +1247,7 @@ function handleSubagentCommand(rawArgs) {
   if (!delegatedCommand) {
     throw new Error("Missing command to delegate.");
   }
-  if (!BACKGROUND_CAPABLE_COMMANDS.has(delegatedCommand)) {
+  if (!SUBAGENT_DELEGATABLE_COMMANDS.has(delegatedCommand)) {
     throw new Error(`Command "${delegatedCommand}" cannot be delegated to a Codex subagent.`);
   }
 

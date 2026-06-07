@@ -229,6 +229,7 @@ For foreground read-only delegation, the parent Codex turn uses `subagent-comman
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command review "$ARGUMENTS"
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command adversarial-review "$ARGUMENTS"
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command multi-review "$ARGUMENTS"
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue "$ARGUMENTS"
 ```
 
 `subagent-command` prints JSON containing an absolute `workerCommand` argv array and the exact `cwd` to use. Dispatch exactly one Codex subagent to run that argv exactly once from the returned `cwd`. The child must not inspect or reinterpret the repository before execution, and must not replace the plugin call with raw `claude -p` or any other hand-built Claude CLI command.

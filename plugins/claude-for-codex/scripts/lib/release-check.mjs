@@ -65,6 +65,18 @@ function result(ok, name, detail = "") {
   return { ok, name, detail };
 }
 
+function markdownSection(text, heading) {
+  const lines = text.split(/\r?\n/);
+  const headingLine = `## ${heading}`;
+  const start = lines.findIndex((line) => line.trim() === headingLine);
+  if (start === -1) {
+    return "";
+  }
+  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line));
+  const sectionLines = lines.slice(start + 1, end === -1 ? undefined : end);
+  return sectionLines.join("\n");
+}
+
 function resolveLayout(root) {
   const repoPluginRoot = path.join(root, "plugins", "claude-for-codex");
   if (fs.existsSync(path.join(repoPluginRoot, ".codex-plugin", "plugin.json"))) {
@@ -85,8 +97,7 @@ function checkManifest(root) {
   const { pluginRoot } = resolveLayout(root);
   const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
-  const unreleased = changelog.match(/^## Unreleased\s*([\s\S]*?)(?=^##\s|\Z)/m);
-  const unreleasedBody = unreleased ? unreleased[1].trim() : "";
+  const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
     result(manifest.version === "0.14.1", "manifest-version", `version=${manifest.version}`),
     result(changelog.includes("## 0.14.1"), "changelog-version", "CHANGELOG contains 0.14.1"),
@@ -364,7 +375,7 @@ function checkSubagentReviewDocs(root) {
   const { pluginRoot } = resolveLayout(root);
   const skill = fs.readFileSync(path.join(pluginRoot, "skills", "claude-subagent-review", "SKILL.md"), "utf8");
   const readme = fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8");
-  const subagentSection = readme.match(/^## Codex subagent delegation\s*([\s\S]*?)(?=^##\s|\Z)/m)?.[1] ?? "";
+  const subagentSection = markdownSection(readme, "Codex subagent delegation");
   const skillMarkers = [
     "subagent-command",
     "workerCommand",
@@ -375,7 +386,8 @@ function checkSubagentReviewDocs(root) {
   const readmeMarkers = [
     "Codex subagent delegation",
     "subagent-command",
-    'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command'
+    'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command',
+    'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue "$ARGUMENTS"'
   ];
   return [
     result(
