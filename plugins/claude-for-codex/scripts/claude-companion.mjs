@@ -91,7 +91,7 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
 const POSITIVE_DECIMAL_PATTERN = /^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)$/;
@@ -408,6 +408,11 @@ function parseArgs(argv, options = {}) {
     } else if (arg === "--effort") {
       parsed.effort = readOptionValue(tokens, index, arg);
       index += 1;
+    } else if (arg.startsWith("--backend=")) {
+      parsed.backend = arg.slice("--backend=".length).trim();
+      if (!parsed.backend) {
+        throw new Error("Missing value for --backend.");
+      }
     } else if (arg === "--backend") {
       parsed.backend = readOptionValue(tokens, index, arg);
       index += 1;
@@ -565,6 +570,12 @@ function validateBackendCompatibleOptions(args) {
     if (args[property] !== undefined) {
       throw new Error(`Unsupported option ${option}: CLI-only and not supported for SDK backend.`);
     }
+  }
+}
+
+function validateSdkSubagentsBackend(args) {
+  if (args.agentTeam === "sdk-subagents" && args.backend !== "sdk") {
+    throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
   }
 }
 
@@ -1222,6 +1233,52 @@ function handleReserveJob(rawArgs) {
     },
     workerCommand,
     forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once, must not inspect or reinterpret the repository, and must return only the command result."
+  };
+}
+
+function hasExplicitBackendArg(args) {
+  return args.some((arg) => arg === "--backend" || arg.startsWith("--backend="));
+}
+
+function handleSubagentCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const delegatedCommand = tokens[0];
+  if (!delegatedCommand) {
+    throw new Error("Missing command to delegate.");
+  }
+  if (!BACKGROUND_CAPABLE_COMMANDS.has(delegatedCommand)) {
+    throw new Error(`Command "${delegatedCommand}" cannot be delegated as a subagent command.`);
+  }
+
+  const delegatedArgs = tokens.slice(1);
+  const parsed = validateCommandNativeModeOptions(delegatedCommand, delegatedArgs);
+  if (parsed.write) {
+    throw new Error("subagent-command does not support --write.");
+  }
+  if (parsed.background) {
+    throw new Error("subagent-command does not support --background.");
+  }
+  validateBackendArgs(parsed);
+  validateBackendCompatibleOptions(parsed);
+  validateSdkSubagentsBackend(parsed);
+
+  const materializedArgs = [...delegatedArgs];
+  if (!hasExplicitBackendArg(materializedArgs)) {
+    materializedArgs.push("--backend", parsed.backend);
+  }
+
+  return {
+    status: "ready",
+    mode: "foreground",
+    command: delegatedCommand,
+    cwd: process.cwd(),
+    workerCommand: [
+      process.execPath,
+      path.resolve(process.argv[1]),
+      delegatedCommand,
+      ...materializedArgs
+    ],
+    forwardingInstructions: "Dispatch exactly one Codex subagent. The subagent must run workerCommand exactly once as argv, must use the returned cwd, must preserve argv boundaries, must not inspect or reinterpret the repository first, and must not replace it with raw claude or claude -p."
   };
 }
 
@@ -2553,9 +2610,7 @@ async function runClaudeMultiReview(rawArgs) {
     args.nativeOrchestration = args.agentTeam === "sdk-subagents"
       ? { enabled: true, mode: "sdk-subagents", roleCount: args.reviewRoles.length }
       : { enabled: false };
-    if (args.agentTeam === "sdk-subagents" && args.backend !== "sdk") {
-      throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
-    }
+    validateSdkSubagentsBackend(args);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -2988,7 +3043,7 @@ if (maybePrintCommandHelp(command, rawArgs)) {
   process.exit(0);
 }
 
-if (command !== "reserve-job") {
+if (command !== "reserve-job" && command !== "subagent-command") {
   try {
     validateCommandNativeModeOptions(command, rawArgs);
   } catch (error) {
@@ -3061,6 +3116,14 @@ switch (command) {
   case "reserve-job":
     try {
       process.stdout.write(`${JSON.stringify(handleReserveJob(rawArgs), null, 2)}\n`);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(2);
+    }
+    break;
+  case "subagent-command":
+    try {
+      process.stdout.write(`${JSON.stringify(handleSubagentCommand(rawArgs), null, 2)}\n`);
     } catch (error) {
       console.error(error.message || String(error));
       process.exit(2);

@@ -1237,7 +1237,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job", "subagent-command"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -4675,6 +4675,168 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert str(runtime) in payload["workerCommand"]
     assert "run-reserved-job" in payload["workerCommand"]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+
+
+def node_exec_path():
+    result = subprocess.run(
+        [NODE, "-e", "process.stdout.write(process.execPath)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def test_subagent_command_prints_foreground_worker_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--base", "main", "--path", "file.txt"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["mode"] == "foreground"
+    assert payload["command"] == "review"
+    assert payload["cwd"] == str(repo)
+    assert payload["workerCommand"] == [
+        node_exec_path(),
+        str(runtime.resolve()),
+        "review",
+        "--base",
+        "main",
+        "--path",
+        "file.txt",
+        "--backend",
+        "cli",
+    ]
+    instructions = payload["forwardingInstructions"]
+    assert "exactly one Codex subagent" in instructions
+    assert "workerCommand exactly once as argv" in instructions
+    assert "returned cwd" in instructions
+    assert "preserve argv boundaries" in instructions
+    assert "not inspect or reinterpret the repository first" in instructions
+    assert "not replace it with raw claude or claude -p" in instructions
+
+
+def test_subagent_command_normalizes_relative_parent_runtime_paths(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, "claude-companion.mjs", "subagent-command", "rescue", "fix flaky test"],
+        cwd=runtime.parent,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "rescue"
+    assert payload["workerCommand"][1] == str(runtime.resolve())
+    assert payload["workerCommand"][2:] == ["rescue", "fix flaky test", "--backend", "cli"]
+
+
+def test_subagent_command_validates_delegated_command_not_top_level_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "status"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert 'Command "status" cannot be delegated as a subagent command.' in result.stderr
+
+
+def test_subagent_command_materializes_backend_env_dependency(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_BACKEND"] = "sdk"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["workerCommand"][-2:] == ["--backend", "sdk"]
+    assert payload["workerCommand"][2:] == [
+        "review",
+        "--scope",
+        "working-tree",
+        "--backend",
+        "sdk",
+    ]
+
+
+def test_subagent_command_rejects_sdk_subagents_without_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "multi-review", "--agent-team", "sdk-subagents"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk." in result.stderr
+
+
+def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "subagent-command",
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["command"] == "multi-review"
+    assert payload["workerCommand"][2:] == [
+        "multi-review",
+        "--backend",
+        "sdk",
+        "--agent-team",
+        "sdk-subagents",
+    ]
 
 
 @pytest.mark.parametrize(
