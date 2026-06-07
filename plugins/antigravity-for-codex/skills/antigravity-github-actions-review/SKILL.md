@@ -13,6 +13,18 @@ Run:
 node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" review "$ARGUMENTS"
 ```
 
+Install the fork-safe PR review workflow:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" github-actions init --model-provider gemini
+```
+
+Validate an existing workflow:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" github-actions validate
+```
+
 Recommended focus:
 
 ```bash
@@ -23,4 +35,5 @@ Rules:
 - This skill is read-only.
 - Do not use `pull_request_target` unless the user explicitly asks to analyze that risk.
 - Check workflow permissions, secret access, fork PR behavior, pinned refs, and install commands.
+- CI must provide an authenticated `agy` command; the generated workflow does not embed credentials.
 - Treat findings as review input for Codex to reconcile.

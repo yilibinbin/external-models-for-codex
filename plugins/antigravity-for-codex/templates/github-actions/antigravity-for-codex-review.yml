@@ -2,7 +2,6 @@ name: Antigravity for Codex Review
 
 on:
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,10 +14,29 @@ jobs:
       ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "{{MODEL_PROVIDER}}"
       ANTIGRAVITY_FOR_CODEX_MODEL: "{{MODEL}}"
     steps:
+      # This workflow intentionally uses pull_request with read-only contents
+      # permissions. Provide an authenticated agy installation in CI before
+      # enabling blocking automation.
       - name: Checkout pull request
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      - name: Prepare pull request diff
+        shell: bash
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Pull request diff base: $PR_BASE_SHA"
+            echo "Pull request diff head: $PR_HEAD_SHA"
+            echo
+            git diff --stat "$PR_BASE_SHA" "$PR_HEAD_SHA"
+            echo
+            git diff "$PR_BASE_SHA" "$PR_HEAD_SHA" -- .
+          } > /tmp/antigravity-pr-diff.txt
 
       - name: Install Codex and Antigravity for Codex
         shell: bash
@@ -32,4 +50,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review --model-provider "$ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"{{MODEL_ARG_SUFFIX}} "Review this pull request."
+          args=(review --model-provider "$ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER")
+          if [[ -n "$ANTIGRAVITY_FOR_CODEX_MODEL" ]]; then
+            args+=(--model "$ANTIGRAVITY_FOR_CODEX_MODEL")
+          fi
+          args+=("Review this pull request using the prepared PR diff below.
+
+$(cat /tmp/antigravity-pr-diff.txt)")
+          node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs "${args[@]}"

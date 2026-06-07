@@ -79,6 +79,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "mailbox.mjs",
         "prompt-template.mjs",
         "process.mjs",
+        "render-review.mjs",
         "reports.mjs",
         "role-packs.mjs",
         "state.mjs",
@@ -1270,6 +1271,211 @@ def test_role_packs_lists_builtin_packs():
     payload = json.loads(result.stdout)
     assert "default" in payload["packs"]
     assert payload["packs"]["release"]["roles"] == ["release", "tests", "correctness", "security"]
+
+
+def test_github_actions_init_validate_and_render(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--model-provider", "gemini", "--timeout-minutes", "15"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert rendered.returncode == 0, rendered.stderr
+    assert "pull_request:" in rendered.stdout
+    assert "pull_request_target" not in rendered.stdout
+    assert "workflow_dispatch" not in rendered.stdout
+    assert "timeout-minutes: 15" in rendered.stdout
+    assert "PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}" in rendered.stdout
+    assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in rendered.stdout
+    assert 'git diff --stat "$PR_BASE_SHA" "$PR_HEAD_SHA"' in rendered.stdout
+    assert 'git diff "$PR_BASE_SHA" "$PR_HEAD_SHA" -- .' in rendered.stdout
+    run_blocks = rendered.stdout.split("run: |")
+    assert all("${{ github." not in block.split("\n      - name:", 1)[0] for block in run_blocks[1:])
+
+    init = subprocess.run(
+        [NODE, str(runtime), "github-actions", "init", "--force", "--model-provider", "gemini"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert init.returncode == 0, init.stderr
+    payload = json.loads(init.stdout)
+    assert payload["status"] == "written"
+    workflow = repo / ".github" / "workflows" / "antigravity-for-codex-review.yml"
+    assert workflow.exists()
+    text = workflow.read_text(encoding="utf8")
+    assert "pull_request_target" not in text
+    assert "antigravity-for-codex-v" in text
+
+    validate = subprocess.run([NODE, str(runtime), "github-actions", "validate"], cwd=repo, capture_output=True, text=True)
+    assert validate.returncode == 0, validate.stderr
+    assert json.loads(validate.stdout)["ok"] is True
+
+
+def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    for ref in ["main", "refs/heads/main", "develop", "release/latest"]:
+        bad_ref = subprocess.run(
+            [NODE, str(runtime), "github-actions", "render", "--ref", ref],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+        )
+        assert bad_ref.returncode == 2
+        assert "immutable" in bad_ref.stderr or "release tag" in bad_ref.stderr
+
+    custom_ref = tmp_path / "custom-ref.yml"
+    custom_render = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--ref", "antigravity-for-codex-v0.2.0"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert custom_render.returncode == 0, custom_render.stderr
+    custom_ref.write_text(custom_render.stdout, encoding="utf8")
+    custom_validate = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(custom_ref)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert custom_validate.returncode == 0, custom_validate.stderr
+
+    invalid_timeout = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--timeout-minutes", "abc"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid_timeout.returncode == 2
+    assert "--timeout-minutes must be between" in invalid_timeout.stderr
+
+    workflow = tmp_path / "unsafe.yml"
+    workflow.write_text(
+        "name: bad\n"
+        "# contents: read\n"
+        "# npm install -g @openai/codex\n"
+        "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
+        "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
+        "# antigravity-for-codex-v0.1.0\n"
+        "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
+        "# antigravity-companion.mjs review\n"
+        "on:\n"
+        "  pull_request:\n"
+        "permissions:\n"
+        "  contents: write\n"
+        "jobs:\n"
+        "  review:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          echo contents: read\n",
+        encoding="utf8",
+    )
+    invalid = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(workflow)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert invalid.returncode == 1
+    assert json.loads(invalid.stdout)["ok"] is False
+
+    mutable_ref_workflow = tmp_path / "mutable-ref.yml"
+    mutable_ref_workflow.write_text(
+        "name: bad\n"
+        "on:\n"
+        "  pull_request:\n"
+        "permissions:\n"
+        "  contents: read\n"
+        "jobs:\n"
+        "  review:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          npm install -g @openai/codex\n"
+        "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
+        "          echo --ref antigravity-for-codex-v0.1.0\n"
+        "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
+        "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
+        encoding="utf8",
+    )
+    mutable_ref = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(mutable_ref_workflow)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert mutable_ref.returncode == 1
+    checks = {check["name"]: check["ok"] for check in json.loads(mutable_ref.stdout)["checks"]}
+    assert checks["immutable-release-ref"] is False
+
+    job_permissions_workflow = tmp_path / "job-permissions.yml"
+    job_permissions_workflow.write_text(custom_render.stdout.replace("runs-on: ubuntu-latest", "runs-on: ubuntu-latest\n    permissions:\n      contents: write"), encoding="utf8")
+    job_permissions = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(job_permissions_workflow)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert job_permissions.returncode == 1
+    job_checks = {check["name"]: check["ok"] for check in json.loads(job_permissions.stdout)["checks"]}
+    assert job_checks["minimal-contents-permission"] is False
+
+    extra_write_workflow = tmp_path / "extra-write.yml"
+    extra_write_workflow.write_text(custom_render.stdout.replace("  contents: read", "  contents: read\n  id-token: write # request oidc"), encoding="utf8")
+    extra_write = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(extra_write_workflow)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert extra_write.returncode == 1
+    extra_checks = {check["name"]: check["ok"] for check in json.loads(extra_write.stdout)["checks"]}
+    assert extra_checks["minimal-contents-permission"] is False
+
+
+def test_github_actions_model_is_not_interpolated_into_shell(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--model", "$(echo SHOULD_NOT_RUN)"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert rendered.returncode == 0, rendered.stderr
+    run_section = rendered.stdout.split("run: |", 1)[1]
+    assert "$(echo SHOULD_NOT_RUN)" not in run_section
+    assert 'args+=(--model "$ANTIGRAVITY_FOR_CODEX_MODEL")' in run_section
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: "$(echo SHOULD_NOT_RUN)"' in rendered.stdout
+
+
+def test_render_review_comment_and_annotations_helper():
+    source = (
+        "const rr = await import('./plugins/antigravity-for-codex/scripts/lib/render-review.mjs');"
+        "const comment = rr.renderPullRequestComment({command: 'multi-review', provider: 'gemini', model: 'gemini-pro', body: 'Body'});"
+        "const annotations = rr.renderGithubAnnotations(["
+        "{path: 'a.js', line: 3, severity: 'high', message: 'Fix it'},"
+        "{path: 'b.js', line: 'abc', end_line: -1, severity: 'critical', summary: 'Bad'}"
+        "]);"
+        "process.stdout.write(JSON.stringify({comment, annotations}));"
+    )
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "## Antigravity for Codex Review" in payload["comment"]
+    assert "- Command: multi-review" in payload["comment"]
+    assert payload["annotations"][0]["annotation_level"] == "failure"
+    assert payload["annotations"][0]["start_line"] == 3
+    assert payload["annotations"][1]["annotation_level"] == "failure"
+    assert payload["annotations"][1]["start_line"] == 1
+    assert payload["annotations"][1]["end_line"] == 1
 
 
 def test_multi_review_uses_role_pack(tmp_path):

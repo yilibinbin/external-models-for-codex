@@ -20,11 +20,15 @@ function escapeYamlString(value) {
 
 function validateReleaseRef(value) {
   const ref = String(value ?? DEFAULT_RELEASE_REF).trim();
-  if (!ref || ref === "main" || ref === "master" || ref === "HEAD") {
+  const lower = ref.toLowerCase();
+  if (!ref || lower === "main" || lower === "master" || lower === "head" || lower.startsWith("refs/heads/") || lower.startsWith("heads/")) {
     throw new Error("--ref must be an immutable tag or commit SHA, not a mutable branch.");
   }
   if (!/^[A-Za-z0-9._/-]+$/.test(ref)) {
     throw new Error("--ref contains unsupported characters.");
+  }
+  if (!/^antigravity-for-codex-v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?$/.test(ref) && !/^[a-fA-F0-9]{40}$/.test(ref)) {
+    throw new Error("--ref must be an Antigravity release tag or a full commit SHA.");
   }
   return ref;
 }
@@ -49,12 +53,10 @@ export function renderWorkflow(pluginRoot, options = {}) {
   const provider = validateProvider(options.modelProvider);
   const releaseRef = validateReleaseRef(options.releaseRef);
   const model = String(options.model ?? "").trim();
-  const modelArg = model ? ` --model "${escapeYamlString(model)}"` : "";
   return readTemplate(pluginRoot)
     .replaceAll("{{TIMEOUT_MINUTES}}", String(timeoutMinutes))
     .replaceAll("{{MODEL_PROVIDER}}", provider)
     .replaceAll("{{MODEL}}", escapeYamlString(model))
-    .replaceAll("{{MODEL_ARG_SUFFIX}}", modelArg)
     .replaceAll("{{RELEASE_REF}}", releaseRef);
 }
 
@@ -77,21 +79,64 @@ export function extractRunBlocks(text) {
   return blocks;
 }
 
+function uncommentedBody(text) {
+  return String(text ?? "")
+    .split(/\r?\n/)
+    .filter((line) => !line.trimStart().startsWith("#"))
+    .join("\n");
+}
+
+function hasExactContentsRead(text) {
+  const lines = text.split(/\r?\n/);
+  const permissionsIndex = lines.findIndex((line) => /^permissions:\s*$/.test(line));
+  if (permissionsIndex < 0) return false;
+  if (lines.some((line) => /^\s+permissions:\s*$/.test(line))) return false;
+  let foundContentsRead = false;
+  for (let index = permissionsIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index].replace(/\s+#.*$/, "");
+    if (line.trim() && !line.startsWith(" ")) {
+      break;
+    }
+    const permission = line.match(/^\s{2}([A-Za-z0-9_-]+):\s*(\S+)\s*$/);
+    if (!permission) continue;
+    const [, name, value] = permission;
+    if (value === "write") return false;
+    if (name === "contents") {
+      if (value !== "read") return false;
+      foundContentsRead = true;
+    }
+  }
+  return foundContentsRead;
+}
+
+function marketplaceInstallUsesImmutableRef(text) {
+  const lines = text.split(/\r?\n/);
+  return lines.some((line) => {
+    if (!line.includes("codex plugin marketplace add yilibinbin/external-models-for-codex")) {
+      return false;
+    }
+    const match = line.match(/\s--ref\s+([^\s]+)/);
+    if (!match) return false;
+    return /^(?:antigravity-for-codex-v\d+\.\d+\.\d+(?:[-+][A-Za-z0-9._-]+)?|[a-fA-F0-9]{40})$/.test(match[1]);
+  });
+}
+
 export function validateWorkflow(text) {
   const body = String(text ?? "");
+  const activeBody = uncommentedBody(body);
   const runBlocks = extractRunBlocks(body);
   const checks = [
-    result(body.includes("pull_request:"), "has-pull-request-trigger"),
-    result(!body.includes("pull_request_target"), "no-pull-request-target"),
-    result(body.includes("contents: read"), "minimal-contents-permission"),
-    result(body.includes("npm install -g @openai/codex"), "codex-cli-install"),
-    result(body.includes("codex plugin marketplace add yilibinbin/external-models-for-codex"), "marketplace-install"),
-    result(body.includes("codex plugin add antigravity-for-codex@external-models-for-codex"), "plugin-install"),
-    result(body.includes("antigravity-for-codex-v0.1.0"), "immutable-release-ref"),
-    result(body.includes("ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: \"{{MODEL_PROVIDER}}\"") || body.includes("ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:"), "provider-env"),
-    result(body.includes("antigravity-companion.mjs review"), "review-command"),
-    result(!body.includes("--dangerously-skip-permissions"), "no-dangerous-permission-flag"),
-    result(!LOCAL_PATH_PATTERN.test(body), "no-local-absolute-paths"),
+    result(activeBody.includes("pull_request:"), "has-pull-request-trigger"),
+    result(!activeBody.includes("pull_request_target"), "no-pull-request-target"),
+    result(hasExactContentsRead(activeBody), "minimal-contents-permission"),
+    result(activeBody.includes("npm install -g @openai/codex"), "codex-cli-install"),
+    result(activeBody.includes("codex plugin marketplace add yilibinbin/external-models-for-codex"), "marketplace-install"),
+    result(activeBody.includes("codex plugin add antigravity-for-codex@external-models-for-codex"), "plugin-install"),
+    result(marketplaceInstallUsesImmutableRef(activeBody), "immutable-release-ref"),
+    result(activeBody.includes("ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: \"{{MODEL_PROVIDER}}\"") || activeBody.includes("ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:"), "provider-env"),
+    result(activeBody.includes("antigravity-companion.mjs review") || (activeBody.includes("args=(review") && activeBody.includes("antigravity-companion.mjs")), "review-command"),
+    result(!activeBody.includes("--dangerously-skip-permissions"), "no-dangerous-permission-flag"),
+    result(!LOCAL_PATH_PATTERN.test(activeBody), "no-local-absolute-paths"),
     result(runBlocks.length > 0 && runBlocks.every((block) => !block.includes("${{ github.")), "no-github-context-in-run")
   ];
   return { ok: checks.every((check) => check.ok), checks };

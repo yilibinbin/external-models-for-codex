@@ -25,7 +25,8 @@ import {
 import { captureProcessIdentity } from "./lib/process.mjs";
 import {
   renderWorkflow,
-  validateWorkflow
+  validateWorkflow,
+  writeWorkflow
 } from "./lib/github-actions.mjs";
 import {
   claimLease,
@@ -73,6 +74,7 @@ const VALID_COMMANDS = new Set([
   "cancel",
   "mailbox",
   "leases",
+  "github-actions",
   "reserve-job",
   "run-reserved-job",
   "__run-job",
@@ -114,7 +116,10 @@ function usage(command = "") {
   if (command === "leases") {
     return "Usage: antigravity-companion.mjs leases <claim|list|release> [--role <role>] [--ttl-seconds <n>] [--id <lease-id>]\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
+  if (command === "github-actions") {
+    return "Usage: antigravity-companion.mjs github-actions <render|init|validate> [--force] [--model-provider gemini|claude] [--model <label>] [--ref <tag>] [--timeout-minutes <n>] [--path <workflow-path>]\n";
+  }
+  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|github-actions|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -145,7 +150,11 @@ function parseArgs(rawArgs) {
     ttlSeconds: undefined,
     thread: "",
     message: "",
-    id: ""
+    id: "",
+    force: false,
+    ref: "",
+    timeoutMinutes: 0,
+    workflowPath: ""
   };
   for (let index = 0; index < rawArgs.length; index += 1) {
     const token = rawArgs[index];
@@ -217,6 +226,23 @@ function parseArgs(rawArgs) {
       index += 1;
     } else if (token.startsWith("--id=")) {
       args.id = token.slice("--id=".length);
+    } else if (token === "--force") {
+      args.force = true;
+    } else if (token === "--ref") {
+      args.ref = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--ref=")) {
+      args.ref = token.slice("--ref=".length);
+    } else if (token === "--timeout-minutes") {
+      args.timeoutMinutes = Number(readOptionValue(rawArgs, index, token));
+      index += 1;
+    } else if (token.startsWith("--timeout-minutes=")) {
+      args.timeoutMinutes = Number(token.slice("--timeout-minutes=".length));
+    } else if (token === "--path") {
+      args.workflowPath = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--path=")) {
+      args.workflowPath = token.slice("--path=".length);
     } else if (token === "--timeout-seconds") {
       const value = Number(readOptionValue(rawArgs, index, token));
       if (!Number.isFinite(value) || value < 1 || value > 3600) {
@@ -729,6 +755,50 @@ function runLeases(rawArgs) {
   process.exit(2);
 }
 
+function githubActionOptions(args) {
+  return {
+    modelProvider: args.modelProvider || "gemini",
+    model: args.model || "",
+    releaseRef: args.ref || RELEASE_REF,
+    timeoutMinutes: args.timeoutMinutes === 0 ? undefined : args.timeoutMinutes
+  };
+}
+
+function runGithubActions(rawArgs) {
+  const [action = "", ...rest] = rawArgs;
+  const args = parseArgsOrExit(rest);
+  if (args.help || !action) {
+    process.stdout.write(usage("github-actions"));
+    process.exit(action ? 0 : 2);
+  }
+  try {
+    if (action === "render") {
+      process.stdout.write(renderWorkflow(ROOT_DIR, githubActionOptions(args)));
+      return;
+    }
+    if (action === "init") {
+      const workflow = renderWorkflow(ROOT_DIR, githubActionOptions(args));
+      const target = writeWorkflow(process.cwd(), workflow, { force: args.force });
+      return writeJson({ status: "written", path: target });
+    }
+    if (action === "validate") {
+      const target = args.workflowPath || path.join(process.cwd(), ".github", "workflows", "antigravity-for-codex-review.yml");
+      const text = fs.readFileSync(target, "utf8");
+      const validation = validateWorkflow(text);
+      writeJson(validation);
+      if (!validation.ok) {
+        process.exit(1);
+      }
+      return;
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  process.stderr.write(`Unknown github-actions action "${action}".\n`);
+  process.exit(2);
+}
+
 function runReserveJob(rawArgs) {
   if (rawArgs.includes("--help") || rawArgs.includes("-h") || rawArgs[0] === "help" || rawArgs.length < 1) {
     process.stdout.write("Usage: antigravity-companion.mjs reserve-job <review|adversarial-review|multi-review|plan|rescue> [args]\n");
@@ -1053,6 +1123,9 @@ async function main() {
   }
   if (command === "leases") {
     return runLeases(rest);
+  }
+  if (command === "github-actions") {
+    return runGithubActions(rest);
   }
   if (command === "reserve-job") {
     return runReserveJob(rest);
