@@ -57,7 +57,9 @@ function acquireJobLock(jobId, cwd = process.cwd(), env = process.env, waitMs = 
       try {
         const stat = fs.statSync(lockFile);
         if (Date.now() - stat.mtimeMs > lockStaleMs(env)) {
-          fs.unlinkSync(lockFile);
+          const staleFile = `${lockFile}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
+          fs.renameSync(lockFile, staleFile);
+          fs.unlinkSync(staleFile);
           continue;
         }
       } catch (statError) {
@@ -230,19 +232,14 @@ export function finishJob(jobId, result, cwd = process.cwd(), env = process.env)
 }
 
 export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
-  const job = readJob(jobId, cwd, env);
-  if (!job) return null;
-  if (TERMINAL_JOB_STATUSES.has(job.status)) {
-    return job;
-  }
-
-  const termination = terminateValidatedJobWorker(job.worker?.pid, job.worker?.identity);
   return withJobLock(jobId, cwd, env, () => {
-    const refreshed = readJob(jobId, cwd, env) || job;
+    const refreshed = readJob(jobId, cwd, env);
+    if (!refreshed) return null;
     if (TERMINAL_JOB_STATUSES.has(refreshed.status)) {
       return refreshed;
     }
 
+    const termination = terminateValidatedJobWorker(refreshed.worker?.pid, refreshed.worker?.identity);
     if (termination.status === "failed") {
       refreshed.status = "cancel_failed";
       refreshed.error = capText(termination.error || "Failed to cancel job.");

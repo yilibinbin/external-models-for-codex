@@ -932,6 +932,28 @@ def test_job_cancellation_confirms_sigterm_ignored_worker_exits(tmp_path):
                 subprocess.run(["kill", "-KILL", str(agy_pid)], capture_output=True, text=True)
 
 
+def test_immediate_job_cancellation_does_not_leave_worker_running(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    agy_pid_file = tmp_path / "agy-immediate.pid"
+    env = companion_env(tmp_path, fake_agy(tmp_path, capture_pid=agy_pid_file, never_exit=True))
+
+    queued = run_companion(["review", "--background", "cancel immediately"], repo, env)
+    job_id = json.loads(queued.stdout)["jobId"]
+    cancel = run_companion(["cancel", job_id], repo, env)
+
+    assert cancel.returncode == 0, cancel.stderr
+    payload = json.loads(cancel.stdout)
+    assert payload["status"] in {"cancelled", "cancel_failed"}
+    time.sleep(0.5)
+    latest = json.loads(run_companion(["status", job_id], repo, env).stdout)
+    assert latest["status"] in {"cancelled", "cancel_failed"}
+    if agy_pid_file.exists():
+        agy_pid = int(agy_pid_file.read_text(encoding="utf8"))
+        assert not process_is_running(agy_pid)
+
+
 def test_finish_job_preserves_all_terminal_statuses(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -991,6 +1013,7 @@ def test_job_viewed_and_finish_updates_do_not_regress_state(tmp_path):
 
 def test_process_identity_validation_checks_pid_ppid_command_before_group_kill():
     text = (PLUGIN / "scripts" / "lib" / "process.mjs").read_text(encoding="utf8")
+    jobs_text = (PLUGIN / "scripts" / "lib" / "jobs.mjs").read_text(encoding="utf8")
 
     assert "current.pid !== expectedIdentity.pid" in text
     assert "current.command !== expectedIdentity.command" in text
@@ -999,6 +1022,7 @@ def test_process_identity_validation_checks_pid_ppid_command_before_group_kill()
     assert 'process.kill(-numericPid, "SIGTERM")' in text
     assert 'process.platform === "win32"' in text
     assert '"taskkill.exe"' in text
+    assert "fs.renameSync(lockFile, staleFile)" in jobs_text
 
 
 def test_setup_does_not_emit_command_inventory(tmp_path):
