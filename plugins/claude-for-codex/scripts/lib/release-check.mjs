@@ -72,7 +72,7 @@ function markdownSection(text, heading) {
   if (start === -1) {
     return "";
   }
-  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line));
+  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line.trim()));
   const sectionLines = lines.slice(start + 1, end === -1 ? undefined : end);
   return sectionLines.join("\n");
 }
