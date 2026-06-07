@@ -245,6 +245,40 @@ export function antigravityPreflight(env = process.env, options = {}) {
   };
 }
 
+export function antigravityModelCatalog(env = process.env) {
+  const command = agyCommand(env);
+  const result = runCommand(command, ["models"], { env, timeout: 30 * 1000 });
+  const models = result.status === 0
+    ? result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    : [];
+  return {
+    available: result.status === 0,
+    models,
+    error: result.status === 0 ? "" : (result.stderr || result.error || "").trim()
+  };
+}
+
+export function antigravityModelDiagnostics(env = process.env, options = {}) {
+  const preflight = antigravityPreflight(env, options);
+  const capabilities = preflight.capabilities || {};
+  const catalog = capabilities.modelsCommand
+    ? antigravityModelCatalog(env)
+    : { available: false, models: [], error: "agy models command not reported" };
+  return {
+    ok: true,
+    provider: {
+      modelProvider: preflight.modelProvider || "",
+      model: preflight.model || ""
+    },
+    modelCatalog: {
+      available: catalog.available,
+      selectedModelListed: catalog.models.includes(preflight.model),
+      count: catalog.models.length,
+      error: catalog.error
+    }
+  };
+}
+
 function timeoutMsToAgyDuration(timeoutMs) {
   const seconds = Math.max(1, Math.ceil((timeoutMs || DEFAULT_TIMEOUT_MS) / 1000));
   return `${seconds}s`;

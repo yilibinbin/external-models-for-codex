@@ -7,3 +7,4 @@
 - Add explicit Gemini/Claude model-provider switching, including Claude-through-Antigravity model selection.
 - Reject GPT/OpenAI model labels as unsupported for this plugin.
 - Cover the initial command surface: `setup`, `capabilities`, `review`, `adversarial-review`, `multi-review`, `plan`, `rescue`, `review-gate`, `real-smoke`, and `release-check`.
+- Harden the maturity command surface while staying on `0.1.0`: reports, role packs, jobs, mailbox, leases, GitHub Actions helpers, model diagnostics, and release checks.

@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
+import { RELEASE_REF } from "./version.mjs";
 
 const WORKFLOW_RELATIVE_PATH = path.join(".github", "workflows", "antigravity-for-codex-review.yml");
-const DEFAULT_RELEASE_REF = "antigravity-for-codex-v0.1.0";
+const DEFAULT_RELEASE_REF = RELEASE_REF;
 const DEFAULT_TIMEOUT_MINUTES = 30;
 const LOCAL_PATH_PATTERN = /\/Users\/[A-Za-z0-9._/-]+|\/private\/var\/folders\/[A-Za-z0-9._/-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._\\/-]+/;
 

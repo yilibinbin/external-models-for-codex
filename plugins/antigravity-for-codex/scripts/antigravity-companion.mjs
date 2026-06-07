@@ -7,6 +7,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
   antigravityPreflight,
+  antigravityModelDiagnostics,
   antigravityPrint,
   antigravityPrintAsync
 } from "./lib/antigravity-runtime.mjs";
@@ -57,6 +58,10 @@ import {
   extractJsonObject,
   validateStructuredReview
 } from "./lib/structured-output.mjs";
+import {
+  PLUGIN_VERSION,
+  RELEASE_REF
+} from "./lib/version.mjs";
 
 const VALID_COMMANDS = new Set([
   "setup",
@@ -87,8 +92,6 @@ const REVIEW_COMMANDS = new Set(["review", "adversarial-review", "plan", "rescue
 const VALID_MODEL_PROVIDERS = new Set(["gemini", "claude"]);
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const COMPANION_PATH = fileURLToPath(import.meta.url);
-const PLUGIN_VERSION = "0.1.0";
-const RELEASE_REF = `antigravity-for-codex-v${PLUGIN_VERSION}`;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_INNER_TIMEOUT_MS = 14 * 60 * 1000;
 const GIT_TIMEOUT_MS = 30 * 1000;
@@ -140,6 +143,7 @@ function parseArgs(rawArgs) {
     help: false,
     timeout: DEFAULT_TIMEOUT_MS,
     quick: false,
+    full: false,
     structured: false,
     json: false,
     latest: false,
@@ -188,6 +192,8 @@ function parseArgs(rawArgs) {
       args.help = true;
     } else if (token === "--quick") {
       args.quick = true;
+    } else if (token === "--full") {
+      args.full = true;
     } else if (token === "--structured") {
       args.structured = true;
     } else if (token === "--json") {
@@ -566,7 +572,8 @@ function runSetupOrCapabilities(command, rawArgs) {
     return;
   }
   const preflight = antigravityPreflight(process.env, args);
-  const payload = { ok: preflight.ok, provider: preflight };
+  const diagnostics = antigravityModelDiagnostics(process.env, args);
+  const payload = { ok: preflight.ok, provider: preflight, modelCatalog: diagnostics.modelCatalog };
   if (command === "capabilities") {
     payload.commands = USER_VISIBLE_COMMANDS;
   }
@@ -1008,6 +1015,30 @@ function expectedSkills() {
   ];
 }
 
+function expectedPublicCommands() {
+  return [
+    "review",
+    "adversarial-review",
+    "multi-review",
+    "plan",
+    "rescue",
+    "review-gate",
+    "real-smoke",
+    "release-check",
+    "report",
+    "roles",
+    "jobs",
+    "status",
+    "result",
+    "cancel",
+    "reserve-job",
+    "run-reserved-job",
+    "mailbox",
+    "leases",
+    "github-actions"
+  ];
+}
+
 function runReleaseCheck(rawArgs) {
   const args = parseArgsOrExit(rawArgs);
   if (args.help) {
@@ -1025,22 +1056,44 @@ function runReleaseCheck(rawArgs) {
 
   const companion = readText("scripts/antigravity-companion.mjs");
   const runtime = readText("scripts/lib/antigravity-runtime.mjs");
+  const versionHelper = readText("scripts/lib/version.mjs");
+  const githubActions = readText("scripts/lib/github-actions.mjs");
+  const jobs = readText("scripts/lib/jobs.mjs");
+  const reports = readText("scripts/lib/reports.mjs");
+  const mailbox = readText("scripts/lib/mailbox.mjs");
+  const leases = readText("scripts/lib/leases.mjs");
+  const readme = readText("README.md");
+  const changelog = readText("CHANGELOG.md");
   const hooks = exists("hooks/hooks.json") ? readText("hooks/hooks.json") : "";
   const renderedWorkflow = renderWorkflow(ROOT_DIR, { releaseRef: RELEASE_REF });
   const workflowValidation = validateWorkflow(renderedWorkflow);
+  const matureCommands = expectedPublicCommands();
+  const printHotPath = runtime.match(/export function antigravityPrintArgs[\s\S]*?export function antigravityPrint\(/)?.[0] || "";
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
     releaseCheckResult(manifest.version === PLUGIN_VERSION, "manifest-version"),
+    releaseCheckResult(versionHelper.includes(`PLUGIN_VERSION = "${manifest.version}"`), "version-helper"),
+    releaseCheckResult(readme.includes(`Version: ${PLUGIN_VERSION}`) && changelog.includes(`## ${PLUGIN_VERSION} `), "docs-version-aligned"),
+    releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
     releaseCheckResult(JSON.stringify(manifest).includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
     releaseCheckResult(companion.includes('"real-smoke"') && companion.includes('"release-check"'), "valid-commands"),
+    releaseCheckResult(matureCommands.every((commandName) => USER_VISIBLE_COMMANDS.includes(commandName)), "all-mature-commands"),
+    releaseCheckResult(!USER_VISIBLE_COMMANDS.includes("__run-job"), "capabilities-hide-internal"),
+    releaseCheckResult(runtime.includes("GPT/OpenAI") && runtime.includes("/\\b(gpt|openai)\\b/i"), "model-policy-rejects-openai"),
     releaseCheckResult(runtime.includes("--prompt") && runtime.includes("--print-timeout"), "agy-prompt-timeout-argv"),
     releaseCheckResult(!/args\.push\(\s*["']--print["']/.test(runtime), "no-print-argv"),
     releaseCheckResult(!runtime.includes("--dangerously-skip-permissions") || runtime.includes("forbidden"), "dangerous-permission-guard"),
     releaseCheckResult(hooks.includes("ANTIGRAVITY_PLUGIN_ROOT") && hooks.includes("antigravity-review-gate.mjs"), "hooks-discovery"),
     releaseCheckResult(exists("hooks/antigravity-review-gate.mjs"), "hook-wrapper"),
+    releaseCheckResult(exists("hooks/session-lifecycle.mjs") && exists("hooks/unread-result.mjs"), "lifecycle-hooks"),
     releaseCheckResult(exists("templates/github-actions/antigravity-for-codex-review.yml"), "github-actions-template"),
     releaseCheckResult(renderedWorkflow.includes(RELEASE_REF), "github-actions-release-ref"),
+    releaseCheckResult(renderWorkflow(ROOT_DIR).includes(`--ref ${RELEASE_REF}`), "github-actions-default-ref-derived"),
+    releaseCheckResult(!printHotPath.includes("antigravityModelCatalog") && !printHotPath.includes("antigravityModelDiagnostics"), "model-catalog-not-in-hot-path"),
+    releaseCheckResult(companion.includes("antigravityModelDiagnostics") && companion.includes("modelCatalog"), "model-catalog-diagnostics"),
+    releaseCheckResult(jobs.includes("stateDirForCwd") && mailbox.includes("stateDirForCwd") && leases.includes("stateDirForCwd"), "repo-external-state"),
+    releaseCheckResult(reports.includes("stdoutBytes") && !reports.includes("stdout:"), "reports-omit-raw-output"),
     ...expectedSkills().map((skill) => releaseCheckResult(exists(path.join("skills", skill, "SKILL.md")), `skill-${skill}`)),
     ...workflowValidation.checks.map((check) => releaseCheckResult(check.ok, `workflow-${check.name}`, check.detail))
   ];
@@ -1062,24 +1115,88 @@ async function runRealSmoke(rawArgs) {
   }
   const args = parseArgsOrExit(rawArgs);
   if (args.help) {
-    process.stdout.write("Usage: antigravity-companion.mjs real-smoke [--quick] [--model-provider gemini|claude] [--model <label>] [--timeout-seconds <n>]\n");
+    process.stdout.write("Usage: antigravity-companion.mjs real-smoke [--quick|--full] [--model-provider gemini|claude] [--model <label>] [--timeout-seconds <n>]\n");
     return;
   }
 
   const providers = args.modelProvider ? [args.modelProvider] : ["gemini", "claude"];
   const results = [];
+  const modelArgs = args.model ? ["--model", args.model] : [];
+  const runCommandSmoke = (provider, label, commandArgs, extraEnv = {}) => {
+    const result = spawnSync(process.execPath, [COMPANION_PATH, ...commandArgs], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...extraEnv,
+        ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: provider
+      },
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: args.timeout || DEFAULT_TIMEOUT_MS,
+      killSignal: "SIGKILL"
+    });
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    const ok = label === "review-gate"
+      ? (result.status ?? 1) === 0 && !result.stderr
+      : (result.status ?? 1) === 0 && output.includes("ANTIGRAVITY_FOR_CODEX_SMOKE_OK");
+    return {
+      provider,
+      label,
+      ok,
+      result: {
+        status: result.status ?? 1,
+        stdout: result.stdout || "",
+        stderr: result.stderr || "",
+        error: result.error ? String(result.error.message || result.error) : ""
+      }
+    };
+  };
   for (const provider of providers) {
+    const diagnostics = antigravityModelDiagnostics(process.env, { ...args, modelProvider: provider });
+    process.stdout.write(`INFO real-smoke ${provider} modelCatalog ${JSON.stringify(diagnostics.modelCatalog)}\n`);
     const smokeArgs = {
       ...args,
       modelProvider: provider,
       timeout: args.timeout || (args.quick ? 60 * 1000 : DEFAULT_TIMEOUT_MS)
     };
-    const result = await antigravityPrintAsync("Return exactly ANTIGRAVITY_FOR_CODEX_SMOKE_OK.", smokeArgs, process.env);
-    const ok = result.status === 0 && result.stdout.includes("ANTIGRAVITY_FOR_CODEX_SMOKE_OK");
-    results.push({ provider, ok, result });
-    process.stdout.write(`${ok ? "PASS" : "FAIL"} real-smoke ${provider}\n`);
-    if (!ok) {
-      process.stdout.write(`${result.stdout || result.stderr || result.error || "no output"}\n`);
+    if (args.full) {
+      const commandChecks = [
+        ["direct", ["review", "--model-provider", provider, ...modelArgs, "Return exactly ANTIGRAVITY_FOR_CODEX_SMOKE_OK."]],
+        ["structured", ["review", "--model-provider", provider, ...modelArgs, "--structured", "Return a valid structured review JSON and include ANTIGRAVITY_FOR_CODEX_SMOKE_OK."], {}],
+        ["multi-review", ["multi-review", "--model-provider", provider, ...modelArgs, "--roles", "correctness,security", "Include ANTIGRAVITY_FOR_CODEX_SMOKE_OK."], {}],
+        ["review-gate", ["review-gate", "--model-provider", provider, ...modelArgs], { ANTIGRAVITY_FOR_CODEX_REVIEW_GATE: "on" }]
+      ];
+      for (const [label, commandArgs, extraEnv] of commandChecks) {
+        const item = runCommandSmoke(provider, label, commandArgs, extraEnv);
+        results.push({ ...item, diagnostics });
+        process.stdout.write(`${item.ok ? "PASS" : "FAIL"} real-smoke ${provider} ${label}\n`);
+        if (!item.ok) {
+          process.stdout.write(`${item.result.stdout || item.result.stderr || item.result.error || "no output"}\n`);
+        }
+      }
+      const startedAt = new Date().toISOString();
+      const reportResult = results.find((item) => item.provider === provider && item.label === "direct")?.result || { status: 1, stdout: "", stderr: "", error: "missing direct smoke result" };
+      try {
+        writeOperationReport(process.cwd(), operationReport({
+          command: "real-smoke",
+          args: { ...smokeArgs, modelProvider: provider },
+          result: reportResult,
+          startedAt,
+          endedAt: new Date().toISOString()
+        }), process.env);
+        process.stdout.write(`PASS real-smoke ${provider} report\n`);
+      } catch (error) {
+        results.push({ provider, label: "report", ok: false, result: { status: 1, stdout: "", stderr: "", error: error.message || String(error) }, diagnostics });
+        process.stdout.write(`FAIL real-smoke ${provider} report\n${error.message || String(error)}\n`);
+      }
+    } else {
+      const result = await antigravityPrintAsync("Return exactly ANTIGRAVITY_FOR_CODEX_SMOKE_OK.", smokeArgs, process.env);
+      const ok = result.status === 0 && result.stdout.includes("ANTIGRAVITY_FOR_CODEX_SMOKE_OK");
+      results.push({ provider, label: provider, ok, result, diagnostics });
+      process.stdout.write(`${ok ? "PASS" : "FAIL"} real-smoke ${provider}\n`);
+      if (!ok) {
+        process.stdout.write(`${result.stdout || result.stderr || result.error || "no output"}\n`);
+      }
     }
   }
   if (results.some((item) => !item.ok)) {

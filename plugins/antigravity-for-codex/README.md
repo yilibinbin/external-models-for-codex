@@ -1,5 +1,7 @@
 # Antigravity for Codex
 
+Version: 0.1.0
+
 Codex plugin that invokes the local Antigravity CLI (`agy`) for independent read-only review, planning, adversarial critique, rescue diagnosis, multi-role review, and an opt-in Stop hook gate.
 
 ## Requirements
@@ -39,3 +41,14 @@ The plugin rejects GPT/OpenAI model labels and never passes `--dangerously-skip-
 - `review-gate`
 - `real-smoke`
 - `release-check`
+- `report`
+- `roles`
+- `jobs`
+- `status`
+- `result`
+- `cancel`
+- `reserve-job`
+- `run-reserved-job`
+- `mailbox`
+- `leases`
+- `github-actions`

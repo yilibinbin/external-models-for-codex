@@ -84,6 +84,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "role-packs.mjs",
         "state.mjs",
         "structured-output.mjs",
+        "version.mjs",
     }
     actual_libs = {path.name for path in (PLUGIN / "scripts" / "lib").glob("*.mjs")}
     assert actual_libs == expected_libs
@@ -175,9 +176,15 @@ def write_fake_agy(
     delay_ms=0,
     ignore_sigterm=False,
     never_exit=False,
+    smart_smoke=False,
 ):
     capture = (
-        f"fs.writeFileSync({json.dumps(str(capture_argv))}, JSON.stringify({{argv: process.argv.slice(2), cwd: process.cwd()}}));\n"
+        f"const capturePath = {json.dumps(str(capture_argv))};\n"
+        "let previous = null;\n"
+        "try { previous = JSON.parse(fs.readFileSync(capturePath, 'utf8')); } catch {}\n"
+        "let captures = Array.isArray(previous?.calls) ? previous.calls : (previous?.argv ? [previous] : []);\n"
+        "captures.push({argv: process.argv.slice(2), cwd: process.cwd()});\n"
+        "fs.writeFileSync(capturePath, JSON.stringify({...captures[captures.length - 1], calls: captures}));\n"
         if capture_argv else ""
     )
     pid_capture = (
@@ -186,11 +193,18 @@ def write_fake_agy(
     )
     sigterm_handler = 'process.on("SIGTERM", () => {});\n' if ignore_sigterm else ""
     keep_alive = "setInterval(() => {}, 1000);\n" if never_exit else ""
-    completion = (
-        ""
-        if never_exit
-        else f"setTimeout(() => {{ fs.writeSync(1, {json.dumps(response)}); process.exit({int(exit_code)}); }}, {int(delay_ms)});\n"
-    )
+    if never_exit:
+        completion = ""
+    elif smart_smoke:
+        completion = (
+            "const prompt = argv[argv.indexOf('--prompt') + 1] || '';\n"
+            "let output = 'ANTIGRAVITY_FOR_CODEX_SMOKE_OK';\n"
+            "if (prompt.includes('ALLOW:') || prompt.includes('stop-gate')) output = 'ALLOW: ANTIGRAVITY_FOR_CODEX_SMOKE_OK';\n"
+            "else if (prompt.includes('structured review') || prompt.includes('JSON')) output = '{\"verdict\":\"approve\",\"summary\":\"ANTIGRAVITY_FOR_CODEX_SMOKE_OK\",\"findings\":[],\"next_steps\":[]}';\n"
+            f"setTimeout(() => {{ fs.writeSync(1, output); process.exit({int(exit_code)}); }}, {int(delay_ms)});\n"
+        )
+    else:
+        completion = f"setTimeout(() => {{ fs.writeSync(1, {json.dumps(response)}); process.exit({int(exit_code)}); }}, {int(delay_ms)});\n"
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
         "#!/usr/bin/env node\n"
@@ -775,6 +789,26 @@ def test_internal_worker_command_is_not_user_facing(tmp_path):
     assert "jobs" in payload["commands"]
     assert "result" in payload["commands"]
     assert "cancel" in payload["commands"]
+    assert "github-actions" in payload["commands"]
+    assert "modelCatalog" in payload
+
+
+def test_preflight_warns_when_selected_model_not_listed(tmp_path):
+    agy = fake_agy(tmp_path, models_text="Gemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n")
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    env["ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL"] = "Gemini 3.1 Pro (High)"
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "process.stdout.write(JSON.stringify(r.antigravityModelDiagnostics(process.env)));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["modelCatalog"]["available"] is True
+    assert payload["modelCatalog"]["selectedModelListed"] is False
+    assert payload["modelCatalog"]["count"] == 2
 
 
 def test_reserved_job_lifecycle_is_explicit(tmp_path):
@@ -1563,6 +1597,22 @@ def test_release_check_passes():
     assert "PASS skill-antigravity-result" in result.stdout
     assert "PASS skill-antigravity-cancel" in result.stdout
     assert "PASS workflow-plugin-install" in result.stdout
+    assert "PASS version-helper" in result.stdout
+    assert "PASS release-ref-derived" in result.stdout
+    assert "PASS model-catalog-not-in-hot-path" in result.stdout
+    assert "PASS all-mature-commands" in result.stdout
+
+
+def test_version_helper_matches_manifest():
+    source = (
+        "const version = await import('./plugins/antigravity-for-codex/scripts/lib/version.mjs');"
+        "process.stdout.write(JSON.stringify(version));"
+    )
+    result = run_node_eval(source)
+    manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
+    payload = json.loads(result.stdout)
+    assert payload["PLUGIN_VERSION"] == manifest["version"]
+    assert payload["RELEASE_REF"] == f"antigravity-for-codex-v{manifest['version']}"
 
 
 def test_real_smoke_is_opt_in(tmp_path):
@@ -1594,3 +1644,31 @@ def test_real_smoke_runs_fake_agy_for_gemini_and_claude(tmp_path):
     assert "--print" not in argv
     assert "--print-timeout" in argv
     assert "--dangerously-skip-permissions" not in argv
+
+
+def test_real_smoke_full_runs_review_shapes(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    argv_file = tmp_path / "agy-full-argv.json"
+    env = companion_env(tmp_path, fake_agy(tmp_path, smart_smoke=True, capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_REAL_SMOKE"] = "1"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "real-smoke", "--full", "--model-provider", "gemini", "--model", "Gemini Custom (High)", "--timeout-seconds", "5"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "PASS real-smoke gemini direct" in result.stdout
+    assert "PASS real-smoke gemini structured" in result.stdout
+    assert "PASS real-smoke gemini multi-review" in result.stdout
+    assert "PASS real-smoke gemini review-gate" in result.stdout
+    assert "PASS real-smoke gemini report" in result.stdout
+    assert "modelCatalog" in result.stdout
+    assert list((tmp_path / "state").rglob("reports/*.json"))
+    calls = json.loads(argv_file.read_text(encoding="utf8"))["calls"]
+    model_values = [call["argv"][call["argv"].index("--model") + 1] for call in calls if "--prompt" in call["argv"]]
+    assert model_values
+    assert all(value == "Gemini Custom (High)" for value in model_values)
