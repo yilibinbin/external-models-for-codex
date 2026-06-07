@@ -91,6 +91,7 @@ const USER_VISIBLE_COMMANDS = [...VALID_COMMANDS].filter((command) => command !=
 const REVIEW_COMMANDS = new Set(["review", "adversarial-review", "plan", "rescue"]);
 const VALID_MODEL_PROVIDERS = new Set(["gemini", "claude"]);
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const REPO_ROOT_DIR = path.resolve(ROOT_DIR, "..", "..");
 const COMPANION_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_INNER_TIMEOUT_MS = 14 * 60 * 1000;
@@ -278,6 +279,10 @@ function parseArgs(rawArgs) {
 
 function readText(relativePath) {
   return fs.readFileSync(path.join(ROOT_DIR, relativePath), "utf8");
+}
+
+function readRepoText(relativePath) {
+  return fs.readFileSync(path.join(REPO_ROOT_DIR, relativePath), "utf8");
 }
 
 function exists(relativePath) {
@@ -1064,19 +1069,32 @@ function runReleaseCheck(rawArgs) {
   const leases = readText("scripts/lib/leases.mjs");
   const readme = readText("README.md");
   const changelog = readText("CHANGELOG.md");
+  const antigravityDocs = `${readme}\n${changelog}`;
+  const marketplaceInstallDocs = [
+    readRepoText("README.md"),
+    readRepoText(path.join("docs", "README.en.md")),
+    readRepoText(path.join("docs", "README.zh-CN.md"))
+  ];
   const hooks = exists("hooks/hooks.json") ? readText("hooks/hooks.json") : "";
   const renderedWorkflow = renderWorkflow(ROOT_DIR, { releaseRef: RELEASE_REF });
   const workflowValidation = validateWorkflow(renderedWorkflow);
   const matureCommands = expectedPublicCommands();
+  const manifestCapabilities = Array.isArray(manifest.interface?.capabilities) ? manifest.interface.capabilities : [];
   const printHotPath = runtime.match(/export function antigravityPrintArgs[\s\S]*?export function antigravityPrint\(/)?.[0] || "";
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
     releaseCheckResult(manifest.version === PLUGIN_VERSION, "manifest-version"),
     releaseCheckResult(versionHelper.includes(`PLUGIN_VERSION = "${manifest.version}"`), "version-helper"),
     releaseCheckResult(readme.includes(`Version: ${PLUGIN_VERSION}`) && changelog.includes(`## ${PLUGIN_VERSION} `), "docs-version-aligned"),
+    releaseCheckResult(marketplaceInstallDocs.every((doc) => doc.includes(`--ref ${RELEASE_REF}`)), "marketplace-docs-release-ref"),
     releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
-    releaseCheckResult(JSON.stringify(manifest).includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(manifestCapabilities.includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(antigravityDocs.includes("operational maturity for plugin-managed workflows"), "docs-maturity-boundary"),
+    releaseCheckResult(antigravityDocs.includes("does not claim Claude SDK, Gemini native-agent, or ultrareview parity"), "docs-no-unsupported-parity"),
+    releaseCheckResult(antigravityDocs.includes("Claude-through-Antigravity is an explicit Antigravity model-provider choice"), "docs-claude-through-antigravity-boundary"),
+    releaseCheckResult(antigravityDocs.includes("real smoke remains opt-in") || antigravityDocs.includes("real-smoke` is opt-in"), "docs-real-smoke-opt-in"),
+    releaseCheckResult(antigravityDocs.includes("CI runs require an authenticated `agy`"), "docs-ci-authenticated-agy"),
     releaseCheckResult(companion.includes('"real-smoke"') && companion.includes('"release-check"'), "valid-commands"),
     releaseCheckResult(matureCommands.every((commandName) => USER_VISIBLE_COMMANDS.includes(commandName)), "all-mature-commands"),
     releaseCheckResult(!USER_VISIBLE_COMMANDS.includes("__run-job"), "capabilities-hide-internal"),

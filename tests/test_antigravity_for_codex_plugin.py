@@ -14,14 +14,34 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.1.0"
+    assert manifest["version"] == "0.5.0"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
     assert "claude" in manifest["keywords"]
+    assert manifest["interface"]["capabilities"] == [
+        "Read-only Antigravity CLI review",
+        "Explicit Gemini or Claude model selection",
+        "Adversarial review",
+        "Implementation planning",
+        "Read-only rescue diagnosis",
+        "Multi-role review orchestration",
+        "Structured review output and sanitized reports",
+        "Background jobs, status, result, and cancel",
+        "Role packs for focused review teams",
+        "Advisory mailbox and leases",
+        "Session lifecycle and unread-result hooks",
+        "GitHub Actions workflow rendering and validation",
+        "Release checks and opt-in real smoke",
+        "Opt-in Stop hook gate",
+        "Codex-Antigravity collaboration",
+    ]
     text = json.dumps(manifest)
     assert "Gemini CLI" not in text
     assert "Claude Code CLI" not in text
+    assert "Claude Code SDK" not in text
+    assert "Gemini native-agent" not in text
+    assert "ultrareview" not in text
 
 
 def test_marketplace_lists_antigravity_plugin():
@@ -1396,7 +1416,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.1.0\n"
+        "# antigravity-for-codex-v0.5.0\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -1434,7 +1454,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.1.0\n"
+        "          echo --ref antigravity-for-codex-v0.5.0\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
@@ -1588,6 +1608,10 @@ def test_release_check_passes():
 
     assert result.returncode == 0, result.stderr
     assert "PASS manifest-name" in result.stdout
+    assert "PASS manifest-version" in result.stdout
+    assert "PASS docs-version-aligned" in result.stdout
+    assert "PASS marketplace-docs-release-ref" in result.stdout
+    assert "PASS manifest-model-policy" in result.stdout
     assert "PASS agy-prompt-timeout-argv" in result.stdout
     assert "PASS no-print-argv" in result.stdout
     assert "PASS github-actions-template" in result.stdout
@@ -1599,6 +1623,11 @@ def test_release_check_passes():
     assert "PASS workflow-plugin-install" in result.stdout
     assert "PASS version-helper" in result.stdout
     assert "PASS release-ref-derived" in result.stdout
+    assert "PASS docs-maturity-boundary" in result.stdout
+    assert "PASS docs-no-unsupported-parity" in result.stdout
+    assert "PASS docs-claude-through-antigravity-boundary" in result.stdout
+    assert "PASS docs-real-smoke-opt-in" in result.stdout
+    assert "PASS docs-ci-authenticated-agy" in result.stdout
     assert "PASS model-catalog-not-in-hot-path" in result.stdout
     assert "PASS all-mature-commands" in result.stdout
 

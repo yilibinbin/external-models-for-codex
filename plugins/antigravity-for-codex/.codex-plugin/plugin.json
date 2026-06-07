@@ -1,7 +1,7 @@
 {
   "name": "antigravity-for-codex",
-  "version": "0.1.0",
-  "description": "Use Antigravity CLI from Codex for read-only review, adversarial review, planning, rescue, multi-role review, and opt-in Stop gates with explicit Gemini or Claude model selection.",
+  "version": "0.5.0",
+  "description": "Use Antigravity CLI from Codex for mature plugin-managed review, planning, reports, jobs, GitHub Actions, release checks, and opt-in Stop gates with explicit Gemini or Claude model selection.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -26,7 +26,7 @@
   "interface": {
     "displayName": "Antigravity for Codex",
     "shortDescription": "Antigravity CLI reviews, planning, and stop-gate workflows for Codex.",
-    "longDescription": "Antigravity for Codex connects Codex to the local Antigravity CLI (`agy`) for independent read-only review, adversarial critique, implementation planning, read-only rescue diagnosis, multi-role review fan-out, lifecycle hooks, release checks, and an opt-in Stop hook review gate. It supports explicit model-provider switching between Gemini and Claude models exposed by Antigravity. Codex remains the implementation authority; Antigravity provides a separate reviewer or planner perspective.",
+    "longDescription": "Antigravity for Codex connects Codex to the local Antigravity CLI (`agy`) for mature plugin-managed workflows: independent read-only review, adversarial critique, implementation planning, read-only rescue diagnosis, multi-role review fan-out, structured reports, role packs, background jobs, advisory mailbox and leases, lifecycle hooks, GitHub Actions workflow rendering and validation, release checks, opt-in real smoke, and an opt-in Stop hook review gate. It supports explicit model-provider switching between Gemini and Claude models exposed by Antigravity. Claude-through-Antigravity remains separate from claude-for-codex, and this plugin stays within the `agy` command surface. Codex remains the implementation authority; Antigravity provides a separate reviewer or planner perspective.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
@@ -36,8 +36,13 @@
       "Implementation planning",
       "Read-only rescue diagnosis",
       "Multi-role review orchestration",
-      "Sanitized review progress",
-      "Release checks",
+      "Structured review output and sanitized reports",
+      "Background jobs, status, result, and cancel",
+      "Role packs for focused review teams",
+      "Advisory mailbox and leases",
+      "Session lifecycle and unread-result hooks",
+      "GitHub Actions workflow rendering and validation",
+      "Release checks and opt-in real smoke",
       "Opt-in Stop hook gate",
       "Codex-Antigravity collaboration"
     ],

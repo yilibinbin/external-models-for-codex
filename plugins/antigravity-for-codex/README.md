@@ -1,8 +1,10 @@
 # Antigravity for Codex
 
-Version: 0.1.0
+Version: 0.5.0
 
-Codex plugin that invokes the local Antigravity CLI (`agy`) for independent read-only review, planning, adversarial critique, rescue diagnosis, multi-role review, and an opt-in Stop hook gate.
+Codex plugin that invokes the local Antigravity CLI (`agy`) for independent read-only review, planning, adversarial critique, rescue diagnosis, multi-role review, structured reports, background jobs, advisory coordination, GitHub Actions workflow rendering, release checks, and an opt-in Stop hook gate.
+
+Antigravity for Codex has operational maturity for plugin-managed workflows: bounded CLI invocation, explicit model selection, repo-external state, sanitized reports, lifecycle hooks, release checks, and `real-smoke` is opt-in. It does not claim Claude SDK, Gemini native-agent, or ultrareview parity. Claude-through-Antigravity is an explicit Antigravity model-provider choice and remains separate from `claude-for-codex`.
 
 ## Requirements
 
@@ -52,3 +54,13 @@ The plugin rejects GPT/OpenAI model labels and never passes `--dangerously-skip-
 - `mailbox`
 - `leases`
 - `github-actions`
+
+## Smoke And CI
+
+`real-smoke` is opt-in:
+
+```bash
+ANTIGRAVITY_FOR_CODEX_REAL_SMOKE=1 node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs real-smoke --quick
+```
+
+GitHub Actions rendering and validation are available through `github-actions render|init|validate`. CI runs require an authenticated `agy` command in the runner environment; release checks validate the generated workflow offline but do not authenticate Antigravity.
