@@ -5544,6 +5544,25 @@ def test_background_skills_require_forwarding_subagent_contract():
         assert re.search(r"waiting requires .*claude-result <job-id>", normalized)
 
 
+def test_claude_subagent_review_skill_documents_safe_plugin_delegation():
+    text = (PLUGIN / "skills" / "claude-subagent-review" / "SKILL.md").read_text(encoding="utf8")
+
+    required_phrases = [
+        "subagent-command",
+        "workerCommand",
+        "returned `cwd`",
+        "run `workerCommand` exactly once",
+        "must not inspect or reinterpret the repository",
+        "must not replace it with raw claude",
+        "claude -p",
+        "reserve-job",
+        "--background",
+        "--write",
+    ]
+    for phrase in required_phrases:
+        assert phrase in text
+
+
 def test_review_skills_preserve_result_handling_discipline():
     for skill_name in ["claude-review", "claude-multi-review", "claude-adversarial-review", "claude-rescue"]:
         text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(encoding="utf8")
@@ -6303,6 +6322,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-review-gate": "review-gate",
         "claude-review": "review",
         "claude-status": "jobs",
+        "claude-subagent-review": "subagent-command",
         "claude-ultrareview": "ultrareview",
     }
     assert {p.parent.name for p in skills} == {
@@ -6320,6 +6340,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-review-gate",
         "claude-review",
         "claude-status",
+        "claude-subagent-review",
         "claude-ultrareview",
     }
     for skill in skills:
