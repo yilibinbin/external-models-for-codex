@@ -25,6 +25,13 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job adversarial
 - The child runs `run-reserved-job` once through `workerCommand`; it must not inspect or reinterpret the repository.
 - The parent returns the job id immediately and tells the user to use `claude-result <job-id>`.
 
+Codex subagent delegation:
+- Use `claude-subagent-review` when a Codex parent wants a general-purpose Codex subagent to run the review/rescue.
+- Parent calls concrete `subagent-command adversarial-review "$ARGUMENTS"` before starting the child.
+- Pass the returned `workerCommand` JSON argv to exactly one child.
+- Pass the returned `cwd`; the child runs from that exact working directory.
+- Do not replace Claude for Codex with raw `claude -p`; it bypasses plugin read-only isolation, Git MCP, reports, and compatibility handling.
+
 Rules:
 - This is read-only.
 - Claude must first infer and state the author's intent.

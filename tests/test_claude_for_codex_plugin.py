@@ -5563,6 +5563,21 @@ def test_claude_subagent_review_skill_documents_safe_plugin_delegation():
         assert phrase in text
 
 
+def test_review_skills_cross_link_subagent_delegation_without_raw_claude():
+    skill_commands = {
+        "claude-review": "review",
+        "claude-adversarial-review": "adversarial-review",
+        "claude-multi-review": "multi-review",
+        "claude-rescue": "rescue",
+    }
+
+    for skill_name, command in skill_commands.items():
+        text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(encoding="utf8")
+        assert "claude-subagent-review" in text
+        assert f'subagent-command {command} "$ARGUMENTS"' in text
+        assert "raw `claude -p`" in text
+
+
 def test_review_skills_preserve_result_handling_discipline():
     for skill_name in ["claude-review", "claude-multi-review", "claude-adversarial-review", "claude-rescue"]:
         text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(encoding="utf8")
