@@ -22,6 +22,7 @@ const EXPECTED_SKILLS = [
   "claude-review-gate",
   "claude-role-packs",
   "claude-status",
+  "claude-subagent-review",
   "claude-ultrareview"
 ];
 
@@ -358,6 +359,35 @@ function checkSkills(root) {
     })
   ];
 }
+
+function checkSubagentReviewDocs(root) {
+  const { pluginRoot } = resolveLayout(root);
+  const skill = fs.readFileSync(path.join(pluginRoot, "skills", "claude-subagent-review", "SKILL.md"), "utf8");
+  const readme = fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8");
+  const subagentSection = readme.match(/^## Codex subagent delegation\s*([\s\S]*?)(?=^##\s|\Z)/m)?.[1] ?? "";
+  const skillMarkers = [
+    "subagent-command",
+    "workerCommand",
+    "must not replace it with raw claude",
+    "claude -p",
+    "reserve-job"
+  ];
+  const readmeMarkers = [
+    "Codex subagent delegation",
+    "subagent-command",
+    'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command'
+  ];
+  return [
+    result(
+      skillMarkers.every((marker) => skill.includes(marker)) &&
+        readmeMarkers.every((marker) => readme.includes(marker)) &&
+        !subagentSection.includes("node plugins/claude-for-codex/scripts/claude-companion.mjs"),
+      "subagent-review-docs",
+      "claude-subagent-review and README document safe subagent-command delegation"
+    )
+  ];
+}
+
 function checkGithubActionsCi(root) {
   const { pluginRoot } = resolveLayout(root);
   const defaultWorkflow = renderWorkflow(pluginRoot);
@@ -447,6 +477,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkReadOnlyIsolation(root),
     ...checkSecrets(root),
     ...checkSkills(root),
+    ...checkSubagentReviewDocs(root),
     ...checkRolePacks(),
     ...checkMailboxLeaseSupport(root),
     ...checkPrompts(root),

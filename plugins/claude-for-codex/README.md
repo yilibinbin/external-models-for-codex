@@ -221,6 +221,20 @@ The generated GitHub Actions workflow is a template. It uses `pull_request`, pin
 
 `--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
 
+## Codex subagent delegation
+
+For foreground read-only delegation, the parent Codex turn uses `subagent-command` for review commands instead of hand-building Claude invocations:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command review "$ARGUMENTS"
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command adversarial-review "$ARGUMENTS"
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command multi-review "$ARGUMENTS"
+```
+
+`subagent-command` prints JSON containing an absolute `workerCommand` argv array and the exact `cwd` to use. Dispatch exactly one Codex subagent to run that argv exactly once from the returned `cwd`. The child must not inspect or reinterpret the repository before execution, and must not replace the plugin call with raw `claude -p` or any other hand-built Claude CLI command.
+
+Use `reserve-job` for `--background` delegation so the plugin runtime tracks the job. `ultrareview` and every `--write` command are intentionally not delegatable.
+
 `rescue --write` requires a git repository and runs Claude Code with write permissions. The runtime writes a before/after working-tree fingerprint to stderr; Codex must inspect the resulting diff before reporting success.
 
 Default roles:
