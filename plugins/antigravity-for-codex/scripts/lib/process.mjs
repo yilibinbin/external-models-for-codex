@@ -4,11 +4,37 @@ import process from "node:process";
 const PS_TIMEOUT_MS = 2000;
 const SIGTERM_GRACE_MS = 250;
 const SIGKILL_GRACE_MS = 750;
+const WINDOWS_KILL_GRACE_MS = 1000;
 
 export function captureProcessIdentity(pid) {
   const numericPid = Number(pid);
   if (!Number.isInteger(numericPid) || numericPid <= 0) {
     return { pid: 0, ppid: 0, command: "" };
+  }
+  if (process.platform === "win32") {
+    const script = [
+      `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${numericPid}"`,
+      "if ($null -eq $p) { exit 1 }",
+      "$p | Select-Object ProcessId,ParentProcessId,CommandLine | ConvertTo-Json -Compress"
+    ].join("; ");
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-Command", script], {
+      encoding: "utf8",
+      timeout: PS_TIMEOUT_MS,
+      killSignal: "SIGKILL"
+    });
+    if (result.error || result.status !== 0) {
+      return { pid: numericPid, ppid: 0, command: "" };
+    }
+    try {
+      const payload = JSON.parse(String(result.stdout || "").trim());
+      return {
+        pid: Number(payload.ProcessId || numericPid),
+        ppid: Number(payload.ParentProcessId || 0),
+        command: String(payload.CommandLine || "")
+      };
+    } catch {
+      return { pid: numericPid, ppid: 0, command: "" };
+    }
   }
   const result = spawnSync("ps", ["-p", String(numericPid), "-o", "pid=,ppid=,command="], {
     encoding: "utf8",
@@ -46,6 +72,18 @@ function processGroupExists(pid) {
   }
 }
 
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") {
+      return false;
+    }
+    return true;
+  }
+}
+
 function waitForProcessGroupExit(pid, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -55,6 +93,50 @@ function waitForProcessGroupExit(pid, timeoutMs) {
     sleepMs(25);
   }
   return !processGroupExists(pid);
+}
+
+function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!processExists(pid)) {
+      return true;
+    }
+    sleepMs(25);
+  }
+  return !processExists(pid);
+}
+
+function validateWorkerIdentity(current, expectedIdentity = {}, suffix = "") {
+  if (!current.command) {
+    return { ok: false, status: "not_running" };
+  }
+  if (!current.command.includes("antigravity-companion.mjs")) {
+    return {
+      ok: false,
+      status: "failed",
+      error: `process identity mismatch${suffix}: pid is not an Antigravity companion worker`,
+      current
+    };
+  }
+  if (expectedIdentity?.pid && current.pid !== expectedIdentity.pid) {
+    return {
+      ok: false,
+      status: "failed",
+      error: `process identity mismatch${suffix}: pid changed`,
+      current,
+      expected: expectedIdentity
+    };
+  }
+  if (expectedIdentity?.command && current.command !== expectedIdentity.command) {
+    return {
+      ok: false,
+      status: "failed",
+      error: `process identity mismatch${suffix}: command changed`,
+      current,
+      expected: expectedIdentity
+    };
+  }
+  return { ok: true };
 }
 
 export function terminateValidatedJobWorker(pid, expectedIdentity = {}) {
@@ -73,36 +155,32 @@ export function terminateValidatedJobWorker(pid, expectedIdentity = {}) {
     return { status: "failed", error: error.message || String(error) };
   }
 
-  if (!current.command) {
-    return { status: "not_running" };
+  const initialValidation = validateWorkerIdentity(current, expectedIdentity);
+  if (!initialValidation.ok) {
+    return initialValidation.status === "not_running"
+      ? { status: "not_running" }
+      : initialValidation;
   }
-  if (!current.command.includes("antigravity-companion.mjs")) {
+
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill.exe", ["/PID", String(numericPid), "/T", "/F"], {
+      encoding: "utf8",
+      timeout: PS_TIMEOUT_MS,
+      killSignal: "SIGKILL"
+    });
+    if (result.error || result.status !== 0) {
+      return {
+        status: "failed",
+        error: result.error ? String(result.error.message || result.error) : String(result.stderr || "taskkill failed").trim(),
+        current
+      };
+    }
+    if (waitForProcessExit(numericPid, WINDOWS_KILL_GRACE_MS)) {
+      return { status: "terminated", signal: "TASKKILL", current };
+    }
     return {
       status: "failed",
-      error: "process identity mismatch: pid is not an Antigravity companion worker",
-      current
-    };
-  }
-  if (expectedIdentity?.pid && current.pid !== expectedIdentity.pid) {
-    return {
-      status: "failed",
-      error: "process identity mismatch: pid changed",
-      current,
-      expected: expectedIdentity
-    };
-  }
-  if (expectedIdentity?.ppid && current.ppid !== expectedIdentity.ppid) {
-    return {
-      status: "failed",
-      error: "process identity mismatch: ppid changed",
-      current,
-      expected: expectedIdentity
-    };
-  }
-  if (expectedIdentity?.command && current.command !== expectedIdentity.command) {
-    return {
-      status: "failed",
-      error: "process identity mismatch: command changed",
+      error: "process remained running after taskkill",
       current,
       expected: expectedIdentity
     };
@@ -123,37 +201,9 @@ export function terminateValidatedJobWorker(pid, expectedIdentity = {}) {
 
   const afterSigterm = captureProcessIdentity(numericPid);
   if (afterSigterm.command) {
-    if (!afterSigterm.command.includes("antigravity-companion.mjs")) {
-      return {
-        status: "failed",
-        error: "process identity mismatch after SIGTERM",
-        current: afterSigterm,
-        expected: expectedIdentity
-      };
-    }
-    if (expectedIdentity?.pid && afterSigterm.pid !== expectedIdentity.pid) {
-      return {
-        status: "failed",
-        error: "process identity mismatch after SIGTERM: pid changed",
-        current: afterSigterm,
-        expected: expectedIdentity
-      };
-    }
-    if (expectedIdentity?.ppid && afterSigterm.ppid !== expectedIdentity.ppid) {
-      return {
-        status: "failed",
-        error: "process identity mismatch after SIGTERM: ppid changed",
-        current: afterSigterm,
-        expected: expectedIdentity
-      };
-    }
-    if (expectedIdentity?.command && afterSigterm.command !== expectedIdentity.command) {
-      return {
-        status: "failed",
-        error: "process identity mismatch after SIGTERM: command changed",
-        current: afterSigterm,
-        expected: expectedIdentity
-      };
+    const sigtermValidation = validateWorkerIdentity(afterSigterm, expectedIdentity, " after SIGTERM");
+    if (!sigtermValidation.ok && sigtermValidation.status !== "not_running") {
+      return sigtermValidation;
     }
   }
 

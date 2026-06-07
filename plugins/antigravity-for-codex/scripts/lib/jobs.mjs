@@ -10,6 +10,8 @@ export const RESERVABLE_COMMANDS = new Set(["review", "adversarial-review", "mul
 
 const OUTPUT_CAP_BYTES = 256 * 1024;
 const TRUNCATION_MARKER = `\n[output truncated to ${OUTPUT_CAP_BYTES} bytes]`;
+const JOB_LOCK_WAIT_MS = 1000;
+const JOB_LOCK_STALE_MS = 30_000;
 
 function jobsDir(cwd = process.cwd(), env = process.env) {
   return path.join(stateDirForCwd(cwd, env), "jobs");
@@ -31,6 +33,64 @@ function jobPath(jobId, cwd = process.cwd(), env = process.env) {
 
 function jobLockPath(jobId, cwd = process.cwd(), env = process.env) {
   return `${jobPath(jobId, cwd, env)}.lock`;
+}
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function lockStaleMs(env = process.env) {
+  const value = Number(env.ANTIGRAVITY_FOR_CODEX_JOB_LOCK_STALE_MS);
+  return Number.isFinite(value) && value >= 0 ? value : JOB_LOCK_STALE_MS;
+}
+
+function acquireJobLock(jobId, cwd = process.cwd(), env = process.env, waitMs = JOB_LOCK_WAIT_MS) {
+  const lockFile = jobLockPath(jobId, cwd, env);
+  const deadline = Date.now() + waitMs;
+  while (Date.now() <= deadline) {
+    try {
+      const handle = fs.openSync(lockFile, "wx");
+      fs.writeFileSync(handle, JSON.stringify({ pid: process.pid, createdAt: now() }));
+      return { handle, lockFile };
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      try {
+        const stat = fs.statSync(lockFile);
+        if (Date.now() - stat.mtimeMs > lockStaleMs(env)) {
+          fs.unlinkSync(lockFile);
+          continue;
+        }
+      } catch (statError) {
+        if (statError.code !== "ENOENT") throw statError;
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        return null;
+      }
+      sleepMs(25);
+    }
+  }
+  return null;
+}
+
+function releaseJobLock(lock) {
+  if (!lock) return;
+  fs.closeSync(lock.handle);
+  try {
+    fs.unlinkSync(lock.lockFile);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+function withJobLock(jobId, cwd = process.cwd(), env = process.env, callback) {
+  const lock = acquireJobLock(jobId, cwd, env);
+  if (!lock) return null;
+  try {
+    return callback();
+  } finally {
+    releaseJobLock(lock);
+  }
 }
 
 function now() {
@@ -91,16 +151,7 @@ export function reserveJob({ command, args = [], cwd = process.cwd() }, env = pr
 }
 
 export function claimReservedJob(cwd = process.cwd(), jobId, env = process.env) {
-  const lockFile = jobLockPath(jobId, cwd, env);
-  let lockHandle;
-  try {
-    lockHandle = fs.openSync(lockFile, "wx");
-  } catch (error) {
-    if (error.code === "EEXIST") return null;
-    throw error;
-  }
-
-  try {
+  return withJobLock(jobId, cwd, env, () => {
     const job = readJob(jobId, cwd, env);
     if (!job || job.status !== "reserved") {
       return null;
@@ -108,16 +159,7 @@ export function claimReservedJob(cwd = process.cwd(), jobId, env = process.env) 
     job.status = "queued";
     job.updatedAt = now();
     return writeJob(job, cwd, env);
-  } finally {
-    if (lockHandle !== undefined) {
-      fs.closeSync(lockHandle);
-    }
-    try {
-      fs.unlinkSync(lockFile);
-    } catch (error) {
-      if (error.code !== "ENOENT") throw error;
-    }
-  }
+  });
 }
 
 export function listJobs(cwd = process.cwd(), env = process.env) {
@@ -146,39 +188,45 @@ export function readJob(jobId, cwd = process.cwd(), env = process.env) {
 }
 
 export function markJobViewed(jobId, cwd = process.cwd(), env = process.env) {
-  const job = readJob(jobId, cwd, env);
-  if (!job) return null;
-  job.viewed = true;
-  job.updatedAt = now();
-  return writeJob(job, cwd, env);
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    job.viewed = true;
+    job.updatedAt = now();
+    return writeJob(job, cwd, env);
+  });
 }
 
 export function markJobRunning(jobId, worker, cwd = process.cwd(), env = process.env) {
-  const job = readJob(jobId, cwd, env);
-  if (!job) return null;
-  if (TERMINAL_JOB_STATUSES.has(job.status)) {
-    return job;
-  }
-  job.status = "running";
-  job.worker = worker;
-  job.startedAt = job.startedAt || now();
-  job.updatedAt = now();
-  return writeJob(job, cwd, env);
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      return job;
+    }
+    job.status = "running";
+    job.worker = worker;
+    job.startedAt = job.startedAt || now();
+    job.updatedAt = now();
+    return writeJob(job, cwd, env);
+  });
 }
 
 export function finishJob(jobId, result, cwd = process.cwd(), env = process.env) {
-  const job = readJob(jobId, cwd, env);
-  if (!job) return null;
-  if (TERMINAL_JOB_STATUSES.has(job.status)) {
-    return job;
-  }
-  job.status = result.status === 0 ? "succeeded" : "failed";
-  job.stdout = capText(result.stdout);
-  job.stderr = capText(result.stderr);
-  job.error = capText(result.error);
-  job.endedAt = now();
-  job.updatedAt = job.endedAt;
-  return writeJob(job, cwd, env);
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    if (TERMINAL_JOB_STATUSES.has(job.status)) {
+      return job;
+    }
+    job.status = result.status === 0 ? "succeeded" : "failed";
+    job.stdout = capText(result.stdout);
+    job.stderr = capText(result.stderr);
+    job.error = capText(result.error);
+    job.endedAt = now();
+    job.updatedAt = job.endedAt;
+    return writeJob(job, cwd, env);
+  });
 }
 
 export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
@@ -189,19 +237,21 @@ export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
   }
 
   const termination = terminateValidatedJobWorker(job.worker?.pid, job.worker?.identity);
-  const refreshed = readJob(jobId, cwd, env) || job;
-  if (TERMINAL_JOB_STATUSES.has(refreshed.status)) {
-    return refreshed;
-  }
+  return withJobLock(jobId, cwd, env, () => {
+    const refreshed = readJob(jobId, cwd, env) || job;
+    if (TERMINAL_JOB_STATUSES.has(refreshed.status)) {
+      return refreshed;
+    }
 
-  if (termination.status === "failed") {
-    refreshed.status = "cancel_failed";
-    refreshed.error = capText(termination.error || "Failed to cancel job.");
-  } else {
-    refreshed.status = "cancelled";
-  }
-  refreshed.cancel = termination;
-  refreshed.endedAt = now();
-  refreshed.updatedAt = refreshed.endedAt;
-  return writeJob(refreshed, cwd, env);
+    if (termination.status === "failed") {
+      refreshed.status = "cancel_failed";
+      refreshed.error = capText(termination.error || "Failed to cancel job.");
+    } else {
+      refreshed.status = "cancelled";
+    }
+    refreshed.cancel = termination;
+    refreshed.endedAt = now();
+    refreshed.updatedAt = refreshed.endedAt;
+    return writeJob(refreshed, cwd, env);
+  });
 }

@@ -850,6 +850,29 @@ def test_reserved_job_concurrent_start_claims_once(tmp_path):
     assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
 
 
+def test_reserved_job_stale_lock_is_recovered(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="STALE_LOCK_RECOVERED", delay_ms=100))
+    env["ANTIGRAVITY_FOR_CODEX_JOB_LOCK_STALE_MS"] = "0"
+
+    reserved = run_companion(["reserve-job", "review", "stale lock"], repo, env)
+    job_id = json.loads(reserved.stdout)["jobId"]
+    job_file = next((tmp_path / "state").rglob(f"{job_id}.json"))
+    lock_file = pathlib.Path(f"{job_file}.lock")
+    lock_file.write_text("stale", encoding="utf8")
+    old = time.time() - 60
+    os.utime(lock_file, (old, old))
+
+    started = run_companion(["run-reserved-job", job_id], repo, env)
+
+    assert started.returncode == 0, started.stderr
+    assert json.loads(started.stdout)["status"] == "queued"
+    assert not lock_file.exists()
+    assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
+
+
 def test_job_cancellation_uses_process_group_and_preserves_finished_jobs(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -936,14 +959,46 @@ def test_finish_job_preserves_all_terminal_statuses(tmp_path):
     assert payload["preservedFailed"]["stdout"] == "initial failure"
 
 
+def test_job_viewed_and_finish_updates_do_not_regress_state(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    source = (
+        "const jobs = await import('./plugins/antigravity-for-codex/scripts/lib/jobs.mjs');"
+        f"const cwd = {json.dumps(str(repo))};"
+        f"const env = {{ ANTIGRAVITY_FOR_CODEX_STATE_HOME: {json.dumps(str(state))} }};"
+        "const viewedFirst = jobs.createJob({command: 'review', cwd}, env);"
+        "jobs.markJobRunning(viewedFirst.id, {pid: 123, identity: {pid: 123, command: 'antigravity-companion.mjs'}}, cwd, env);"
+        "jobs.markJobViewed(viewedFirst.id, cwd, env);"
+        "const finishedAfterView = jobs.finishJob(viewedFirst.id, {status: 0, stdout: 'done after view'}, cwd, env);"
+        "const finishedFirst = jobs.createJob({command: 'review', cwd}, env);"
+        "jobs.finishJob(finishedFirst.id, {status: 0, stdout: 'done before view'}, cwd, env);"
+        "const viewedAfterFinish = jobs.markJobViewed(finishedFirst.id, cwd, env);"
+        "process.stdout.write(JSON.stringify({finishedAfterView, viewedAfterFinish}));"
+    )
+
+    result = run_node_eval(source)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["finishedAfterView"]["status"] == "succeeded"
+    assert payload["finishedAfterView"]["stdout"] == "done after view"
+    assert payload["finishedAfterView"]["viewed"] is True
+    assert payload["viewedAfterFinish"]["status"] == "succeeded"
+    assert payload["viewedAfterFinish"]["stdout"] == "done before view"
+    assert payload["viewedAfterFinish"]["viewed"] is True
+
+
 def test_process_identity_validation_checks_pid_ppid_command_before_group_kill():
     text = (PLUGIN / "scripts" / "lib" / "process.mjs").read_text(encoding="utf8")
 
     assert "current.pid !== expectedIdentity.pid" in text
-    assert "current.ppid !== expectedIdentity.ppid" in text
     assert "current.command !== expectedIdentity.command" in text
     assert 'current.command.includes("antigravity-companion.mjs")' in text
+    assert "ppid changed" not in text
     assert 'process.kill(-numericPid, "SIGTERM")' in text
+    assert 'process.platform === "win32"' in text
+    assert '"taskkill.exe"' in text
 
 
 def test_setup_does_not_emit_command_inventory(tmp_path):
