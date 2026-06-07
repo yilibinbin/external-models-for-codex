@@ -59,6 +59,8 @@ def test_antigravity_package_does_not_ship_copied_gemini_plugin_residue():
         PLUGIN / "README.md",
         PLUGIN / "CHANGELOG.md",
         *sorted((PLUGIN / "assets").glob("*.svg")),
+        *sorted((PLUGIN / "prompts").glob("*.md")),
+        *sorted((PLUGIN / "schemas").glob("*.json")),
         *sorted((PLUGIN / "scripts" / "lib").glob("*.mjs")),
     ]
     for path in paths:
@@ -71,11 +73,24 @@ def test_antigravity_package_only_ships_wired_runtime_files():
     expected_libs = {
         "antigravity-runtime.mjs",
         "github-actions.mjs",
+        "prompt-template.mjs",
+        "reports.mjs",
+        "state.mjs",
+        "structured-output.mjs",
     }
     actual_libs = {path.name for path in (PLUGIN / "scripts" / "lib").glob("*.mjs")}
     assert actual_libs == expected_libs
-    assert not (PLUGIN / "prompts").exists()
-    assert not (PLUGIN / "schemas").exists()
+    expected_prompts = {
+        "adversarial-review.md",
+        "multi-review-role.md",
+        "plan.md",
+        "rescue.md",
+        "review-gate-role.md",
+        "review.md",
+    }
+    actual_prompts = {path.name for path in (PLUGIN / "prompts").glob("*.md")}
+    assert actual_prompts == expected_prompts
+    assert {path.name for path in (PLUGIN / "schemas").glob("*.json")} == {"review-output.schema.json"}
 
 
 def test_antigravity_skills_exist_and_use_antigravity_commands():
@@ -337,6 +352,71 @@ def init_git_repo(repo):
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def test_structured_review_outputs_valid_json_and_report(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    response = json.dumps({
+        "verdict": "approve",
+        "summary": "ok",
+        "findings": [],
+        "next_steps": ["ship"]
+    })
+    argv_file = tmp_path / "agy-argv.json"
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response, capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+
+    result = subprocess.run([NODE, str(runtime), "review", "--structured", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "approve"
+    report = subprocess.run([NODE, str(runtime), "report", "--latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert report.returncode == 0, report.stderr
+    report_payload = json.loads(report.stdout)
+    assert report_payload["command"] == "review"
+    assert report_payload["status"] == 0
+    assert "rawOutput" not in report_payload
+
+    argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
+    prompt = argv[argv.index("--prompt") + 1]
+    assert "Return only one JSON object" in prompt
+    assert '"verdict"' in prompt
+    assert "approve" in prompt
+    assert "Git context:" in prompt
+    assert "Do not edit files" in prompt
+
+
+def test_review_json_implies_structured_output(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    response = json.dumps({"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []})
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["verdict"] == "approve"
+
+
+def test_structured_review_invalid_json_fails_without_stack_trace(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="not json"))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    result = subprocess.run([NODE, str(runtime), "review", "--structured"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "Structured review output invalid" in result.stderr
+    assert "Error:" not in result.stderr
 
 
 def test_review_invokes_agy_with_prompt_model_and_no_dangerous_permissions(tmp_path):

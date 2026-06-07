@@ -14,6 +14,20 @@ import {
   renderWorkflow,
   validateWorkflow
 } from "./lib/github-actions.mjs";
+import {
+  readPromptTemplate,
+  renderTemplate
+} from "./lib/prompt-template.mjs";
+import {
+  latestReport,
+  operationReport,
+  writeOperationReport
+} from "./lib/reports.mjs";
+import {
+  appendStructuredReviewInstructions,
+  extractJsonObject,
+  validateStructuredReview
+} from "./lib/structured-output.mjs";
 
 const VALID_COMMANDS = new Set([
   "setup",
@@ -23,6 +37,7 @@ const VALID_COMMANDS = new Set([
   "multi-review",
   "plan",
   "rescue",
+  "report",
   "review-gate",
   "real-smoke",
   "release-check"
@@ -42,12 +57,15 @@ const UNTRACKED_BYTES_PER_FILE = 16 * 1024;
 
 function usage(command = "") {
   if (command === "review") {
-    return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [focus]\n";
+    return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [--structured] [--json] [focus]\n";
   }
   if (command === "multi-review") {
     return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [focus]\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|plan|rescue|review-gate|real-smoke|release-check> [args]\n";
+  if (command === "report") {
+    return "Usage: antigravity-companion.mjs report --latest\n";
+  }
+  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|plan|rescue|report|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -66,7 +84,10 @@ function parseArgs(rawArgs) {
     roles: undefined,
     help: false,
     timeout: DEFAULT_TIMEOUT_MS,
-    quick: false
+    quick: false,
+    structured: false,
+    json: false,
+    latest: false
   };
   for (let index = 0; index < rawArgs.length; index += 1) {
     const token = rawArgs[index];
@@ -95,6 +116,13 @@ function parseArgs(rawArgs) {
       args.help = true;
     } else if (token === "--quick") {
       args.quick = true;
+    } else if (token === "--structured") {
+      args.structured = true;
+    } else if (token === "--json") {
+      args.json = true;
+      args.structured = true;
+    } else if (token === "--latest") {
+      args.latest = true;
     } else if (token === "--timeout-seconds") {
       const value = Number(readOptionValue(rawArgs, index, token));
       if (!Number.isFinite(value) || value < 1 || value > 3600) {
@@ -270,15 +298,29 @@ function gitContext() {
   ].filter(Boolean).join("\n\n");
 }
 
-function promptFor(kind, args) {
+function focusBlock(args) {
   const focus = args.positional.join(" ").trim();
+  return focus ? `<focus>${focus}</focus>` : "";
+}
+
+function promptFor(kind, args) {
   return [
     `<task>${kind}</task>`,
     `Model provider: ${args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini"}.`,
     `<git_context>${gitContext()}</git_context>`,
-    focus ? `<focus>${focus}</focus>` : "",
+    focusBlock(args),
     "Return concise findings first. Do not edit files."
   ].filter(Boolean).join("\n");
+}
+
+function templatePromptFor(kind, args, preflight) {
+  const template = readPromptTemplate(ROOT_DIR, kind);
+  return renderTemplate(template, {
+    MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
+    MODEL: preflight?.model || args.model || "",
+    GIT_CONTEXT: gitContext(),
+    FOCUS_BLOCK: focusBlock(args)
+  });
 }
 
 function reviewGateEnabled() {
@@ -343,15 +385,61 @@ function runReview(kind, rawArgs) {
     process.stdout.write(usage(kind));
     return;
   }
-  const result = antigravityPrint(promptFor(kind, args), args, process.env);
+  const preflight = antigravityPreflight(process.env, args);
+  if (!preflight.ok) {
+    process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
+    process.exit(2);
+  }
+  const startedAt = new Date().toISOString();
+  let prompt = templatePromptFor(kind, args, preflight);
+  if (args.structured || args.json) {
+    prompt = appendStructuredReviewInstructions(prompt);
+  }
+  const result = antigravityPrint(prompt, { ...args, preflight }, process.env);
+  const endedAt = new Date().toISOString();
   if (result.status !== 0) {
     process.stderr.write(`${result.stderr || result.error || "Antigravity review failed."}\n`);
     process.exit(result.status);
+  }
+  let parsed;
+  if (args.structured || args.json) {
+    try {
+      parsed = validateStructuredReview(extractJsonObject(result.stdout));
+    } catch (error) {
+      process.stderr.write(`Structured review output invalid: ${error.message || String(error)}\n`);
+      process.exit(1);
+    }
+  }
+  try {
+    writeOperationReport(process.cwd(), operationReport({ command: kind, args, result, startedAt, endedAt, parsed }), process.env);
+  } catch {
+    // Report writes are best-effort and must not mask successful CLI output.
+  }
+  if (args.json) {
+    process.stdout.write(`${JSON.stringify(parsed)}\n`);
+    return;
+  }
+  if (args.structured) {
+    process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+    return;
   }
   process.stdout.write(result.stdout);
   if (!result.stdout.endsWith("\n")) {
     process.stdout.write("\n");
   }
+}
+
+function runReport(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write(usage("report"));
+    return;
+  }
+  if (!args.latest) {
+    process.stderr.write("report requires --latest.\n");
+    process.exit(2);
+  }
+  process.stdout.write(`${JSON.stringify(latestReport(process.cwd(), process.env))}\n`);
 }
 
 function runReviewGate(rawArgs) {
@@ -526,6 +614,9 @@ async function main() {
   }
   if (command === "setup" || command === "capabilities") {
     return runSetupOrCapabilities(command, rest);
+  }
+  if (command === "report") {
+    return runReport(rest);
   }
   if (command === "multi-review") {
     return runMultiReview(rest);
