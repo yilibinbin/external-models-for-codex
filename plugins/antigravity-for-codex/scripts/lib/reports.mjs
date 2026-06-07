@@ -6,7 +6,6 @@ import { canonicalWorkspaceRoot, stateDirForCwd } from "./state.mjs";
 function reportsDirForCwd(cwd = process.cwd(), env = process.env) {
   return path.join(stateDirForCwd(cwd, env), "reports");
 }
-
 function workspaceId(cwd = process.cwd()) {
   return createHash("sha256").update(canonicalWorkspaceRoot(cwd)).digest("hex").slice(0, 16);
 }
@@ -88,4 +87,3 @@ export function latestReport(cwd = process.cwd(), env = process.env) {
     .sort((left, right) => String(right.report?.startedAt ?? right.file).localeCompare(String(left.report?.startedAt ?? left.file)));
   return reports[0]?.report ?? null;
 }
-

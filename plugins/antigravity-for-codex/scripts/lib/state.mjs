@@ -45,4 +45,3 @@ export function workspaceSlug(cwd = process.cwd()) {
 export function stateDirForCwd(cwd = process.cwd(), env = process.env) {
   return path.join(stateRoot(env), workspaceSlug(cwd));
 }
-

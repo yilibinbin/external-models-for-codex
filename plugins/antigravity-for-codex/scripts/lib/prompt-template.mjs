@@ -12,7 +12,6 @@ export function readPromptTemplate(pluginRoot, name) {
     throw new Error(message);
   }
 }
-
 export function renderTemplate(template, values) {
   return String(template).replace(/\{\{([A-Z0-9_]+)\}\}/g, (_match, key) => {
     if (!Object.prototype.hasOwnProperty.call(values, key)) {
@@ -21,4 +20,3 @@ export function renderTemplate(template, values) {
     return String(values[key] ?? "");
   }).replace(/\n{3,}/g, "\n\n").trim();
 }
-
