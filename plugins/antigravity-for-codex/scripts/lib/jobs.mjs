@@ -29,6 +29,10 @@ function jobPath(jobId, cwd = process.cwd(), env = process.env) {
   return path.join(ensureJobsDir(cwd, env), `${id}.json`);
 }
 
+function jobLockPath(jobId, cwd = process.cwd(), env = process.env) {
+  return `${jobPath(jobId, cwd, env)}.lock`;
+}
+
 function now() {
   return new Date().toISOString();
 }
@@ -87,13 +91,33 @@ export function reserveJob({ command, args = [], cwd = process.cwd() }, env = pr
 }
 
 export function claimReservedJob(cwd = process.cwd(), jobId, env = process.env) {
-  const job = readJob(jobId, cwd, env);
-  if (!job || job.status !== "reserved") {
-    return null;
+  const lockFile = jobLockPath(jobId, cwd, env);
+  let lockHandle;
+  try {
+    lockHandle = fs.openSync(lockFile, "wx");
+  } catch (error) {
+    if (error.code === "EEXIST") return null;
+    throw error;
   }
-  job.status = "queued";
-  job.updatedAt = now();
-  return writeJob(job, cwd, env);
+
+  try {
+    const job = readJob(jobId, cwd, env);
+    if (!job || job.status !== "reserved") {
+      return null;
+    }
+    job.status = "queued";
+    job.updatedAt = now();
+    return writeJob(job, cwd, env);
+  } finally {
+    if (lockHandle !== undefined) {
+      fs.closeSync(lockHandle);
+    }
+    try {
+      fs.unlinkSync(lockFile);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
 }
 
 export function listJobs(cwd = process.cwd(), env = process.env) {

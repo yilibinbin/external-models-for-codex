@@ -818,6 +818,38 @@ def test_reserved_job_duplicate_start_is_rejected(tmp_path):
     assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
 
 
+def test_reserved_job_concurrent_start_claims_once(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="RESERVED_CONCURRENT", delay_ms=300))
+
+    reserved = run_companion(["reserve-job", "review", "reserved concurrent"], repo, env)
+    job_id = json.loads(reserved.stdout)["jobId"]
+
+    starters = [
+        subprocess.Popen(
+            [NODE, str(runtime), "run-reserved-job", job_id],
+            cwd=repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [starter.communicate(timeout=5) + (starter.returncode,) for starter in starters]
+
+    successes = [result for result in results if result[2] == 0]
+    failures = [result for result in results if result[2] != 0]
+    assert len(successes) == 1, results
+    assert json.loads(successes[0][0])["status"] == "queued"
+    assert len(failures) == 1, results
+    assert "is not reserved" in failures[0][1]
+    assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
+
+
 def test_job_cancellation_uses_process_group_and_preserves_finished_jobs(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
