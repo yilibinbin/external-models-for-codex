@@ -147,7 +147,7 @@ def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.10.1"
+    assert manifest["version"] == "0.10.2"
     assert manifest["skills"] == "./skills/"
     assert "gemini" in manifest["keywords"]
     assert "review" in manifest["keywords"]
@@ -1572,6 +1572,23 @@ def test_gemini_rejects_role_pack_outside_multi_review_and_gate(tmp_path):
         assert "--role-pack is only valid for multi-review and manual review-gate" in result.stderr
 
 
+def test_command_help_does_not_invoke_gemini(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, capture_argv=argv_file))
+
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--help"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "Usage: gemini-companion.mjs multi-review [args]" in result.stdout
+    assert "Run Gemini role-based read-only review" in result.stdout
+    assert not argv_file.exists()
+
+
 def test_gemini_rejects_structured_outside_review_and_resume_with_fresh(tmp_path):
     runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
     repo = tmp_path / "repo"
@@ -2482,7 +2499,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.10.1" in text
+    assert "--ref gemini-for-codex-v0.10.2" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text

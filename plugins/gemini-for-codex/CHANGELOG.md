@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.10.2 - 2026-06-07
+
+- Fix command help handling so `multi-review --help` and other command help requests return usage without invoking Gemini.
+- Add regression coverage that help output does not start external Gemini review calls.
+
 ## 0.10.1 - 2026-06-07
 
 - Harden all Gemini plugin Git subprocess probes with bounded timeouts and explicit `SIGKILL` timeout cleanup.

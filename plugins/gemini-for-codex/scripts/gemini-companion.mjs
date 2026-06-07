@@ -541,6 +541,49 @@ function normalizeArgv(argv) {
   return splitArgumentString(argv[0]);
 }
 
+function isHelpArg(value) {
+  return value === "--help" || value === "-h" || value === "help";
+}
+
+function publicCommands() {
+  return Array.from(VALID_COMMANDS).filter((name) => !name.startsWith("__"));
+}
+
+function printUsage(commandName = "") {
+  const command = commandName ? ` ${commandName}` : "";
+  process.stdout.write(`Usage: gemini-companion.mjs${command} [args]\n`);
+  if (!commandName) {
+    process.stdout.write(`Commands: ${publicCommands().join(", ")}\n`);
+    process.stdout.write("Run `gemini-companion.mjs <command> --help` for command-specific usage.\n");
+    return;
+  }
+  switch (commandName) {
+    case "review":
+      process.stdout.write("Review current git context with Gemini in read-only mode.\n");
+      process.stdout.write("Options: [--scope auto|working-tree|branch] [--base <ref>] [--path <path>] [--json|--structured] [focus]\n");
+      break;
+    case "adversarial-review":
+      process.stdout.write("Run an adversarial read-only Gemini review.\n");
+      process.stdout.write("Options: [--scope auto|working-tree|branch] [--base <ref>] [--path <path>] [--json] [focus]\n");
+      break;
+    case "multi-review":
+      process.stdout.write("Run Gemini role-based read-only review without editing files.\n");
+      process.stdout.write("Options: [--roles <list>|--role-pack <pack>] [--agent-team plugin|native-agents] [--scope auto|working-tree|branch] [--base <ref>] [--path <path>] [focus]\n");
+      break;
+    case "review-gate":
+      process.stdout.write("Run the opt-in Stop hook review gate for current git changes.\n");
+      process.stdout.write("Options: [--enable|--disable|--status] [--role-pack <pack>] [--roles <list>]\n");
+      break;
+    case "real-smoke":
+      process.stdout.write("Run opt-in live Gemini CLI smoke checks when enabled by environment.\n");
+      process.stdout.write("Options: [--quick|--full] [--model <name>] [--roles <list>] [--timeout-seconds <n>] [--include-native]\n");
+      break;
+    default:
+      process.stdout.write("Use this command with its documented options. This help path does not invoke Gemini.\n");
+      break;
+  }
+}
+
 function splitArgumentString(value) {
   const tokens = [];
   let current = "";
@@ -1600,7 +1643,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.10.1") failures.push(`manifest version is ${manifest.version}, expected 0.10.1`);
+    if (manifest.version !== "0.10.2") failures.push(`manifest version is ${manifest.version}, expected 0.10.2`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1672,7 +1715,7 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.10.1")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.10.2")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
@@ -3950,9 +3993,19 @@ async function runReservedJob(rawArgs) {
 
 const [command, ...rawArgs] = process.argv.slice(2);
 
+if (command === undefined || isHelpArg(command)) {
+  printUsage();
+  process.exit(command === undefined ? 2 : 0);
+}
+
 if (!VALID_COMMANDS.has(command)) {
   console.error(`Usage: gemini-companion.mjs ${Array.from(VALID_COMMANDS).join("|")} [args]`);
   process.exit(2);
+}
+
+if (rawArgs.length === 1 && isHelpArg(rawArgs[0])) {
+  printUsage(command);
+  process.exit(0);
 }
 
 switch (command) {

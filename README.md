@@ -23,9 +23,12 @@ Remote install from GitHub:
 ```bash
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
 codex plugin add claude-for-codex@external-models-for-codex
+
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.10.2
+codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
-The immutable `claude-for-codex-v0.14.1` ref is intended for installing the Claude plugin slice from this multi-plugin marketplace. Install Gemini from its own release ref or from `main` during development.
+Use the provider-specific immutable release ref for the plugin you want to install. Use `main` only for development snapshots.
 
 Upgrade an existing install:
 
