@@ -4777,7 +4777,14 @@ def test_subagent_command_prints_foreground_worker_command(tmp_path):
     assert "not replace it with raw claude or claude -p" in instructions
 
 
-def test_subagent_command_worker_command_executes_with_fake_claude(tmp_path):
+@pytest.mark.parametrize(
+    ("delegated_args", "expected_command"),
+    [
+        (["review", "--scope", "working-tree", "delegated smoke"], "review"),
+        (["rescue", "delegated rescue smoke"], "rescue"),
+    ],
+)
+def test_subagent_command_worker_command_executes_with_fake_claude(tmp_path, delegated_args, expected_command):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     bin_dir = tmp_path / "bin"
@@ -4811,7 +4818,7 @@ def test_subagent_command_worker_command_executes_with_fake_claude(tmp_path):
     env["CLAUDE_CODE_PATH"] = str(fake_claude)
 
     command_result = subprocess.run(
-        [NODE, str(runtime), "subagent-command", "review", "--scope", "working-tree", "delegated smoke"],
+        [NODE, str(runtime), "subagent-command", *delegated_args],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -4821,7 +4828,7 @@ def test_subagent_command_worker_command_executes_with_fake_claude(tmp_path):
     assert command_result.returncode == 0, command_result.stderr
     payload = json.loads(command_result.stdout)
     assert payload["status"] == "ready"
-    assert payload["command"] == "review"
+    assert payload["command"] == expected_command
     assert payload["cwd"] == str(repo)
 
     worker_result = subprocess.run(
