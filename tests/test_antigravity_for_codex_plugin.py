@@ -814,6 +814,43 @@ def test_job_cancellation_uses_process_group_and_preserves_finished_jobs(tmp_pat
     assert json.loads(cancel_finished.stdout)["status"] == "succeeded"
 
 
+def test_finish_job_preserves_all_terminal_statuses(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    state = tmp_path / "state"
+    source = (
+        "const jobs = await import('./plugins/antigravity-for-codex/scripts/lib/jobs.mjs');"
+        f"const cwd = {json.dumps(str(repo))};"
+        f"const env = {{ ANTIGRAVITY_FOR_CODEX_STATE_HOME: {json.dumps(str(state))} }};"
+        "const succeeded = jobs.createJob({command: 'review', cwd}, env);"
+        "jobs.finishJob(succeeded.id, {status: 0, stdout: 'initial success'}, cwd, env);"
+        "const preservedSucceeded = jobs.finishJob(succeeded.id, {status: 1, stdout: 'overwritten'}, cwd, env);"
+        "const failed = jobs.createJob({command: 'review', cwd}, env);"
+        "jobs.finishJob(failed.id, {status: 1, stdout: 'initial failure'}, cwd, env);"
+        "const preservedFailed = jobs.finishJob(failed.id, {status: 0, stdout: 'overwritten'}, cwd, env);"
+        "process.stdout.write(JSON.stringify({preservedSucceeded, preservedFailed}));"
+    )
+
+    result = run_node_eval(source)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["preservedSucceeded"]["status"] == "succeeded"
+    assert payload["preservedSucceeded"]["stdout"] == "initial success"
+    assert payload["preservedFailed"]["status"] == "failed"
+    assert payload["preservedFailed"]["stdout"] == "initial failure"
+
+
+def test_process_identity_validation_checks_pid_ppid_command_before_group_kill():
+    text = (PLUGIN / "scripts" / "lib" / "process.mjs").read_text(encoding="utf8")
+
+    assert "current.pid !== expectedIdentity.pid" in text
+    assert "current.ppid !== expectedIdentity.ppid" in text
+    assert "current.command !== expectedIdentity.command" in text
+    assert 'current.command.includes("antigravity-companion.mjs")' in text
+    assert 'process.kill(-numericPid, "SIGTERM")' in text
+
+
 def test_setup_does_not_emit_command_inventory(tmp_path):
     env = companion_env(tmp_path, fake_agy(tmp_path))
 

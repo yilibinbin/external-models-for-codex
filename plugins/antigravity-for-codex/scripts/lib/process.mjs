@@ -54,6 +54,22 @@ export function terminateValidatedJobWorker(pid, expectedIdentity = {}) {
       current
     };
   }
+  if (expectedIdentity?.pid && current.pid !== expectedIdentity.pid) {
+    return {
+      status: "failed",
+      error: "process identity mismatch: pid changed",
+      current,
+      expected: expectedIdentity
+    };
+  }
+  if (expectedIdentity?.ppid && current.ppid !== expectedIdentity.ppid) {
+    return {
+      status: "failed",
+      error: "process identity mismatch: ppid changed",
+      current,
+      expected: expectedIdentity
+    };
+  }
   if (expectedIdentity?.command && current.command !== expectedIdentity.command) {
     return {
       status: "failed",

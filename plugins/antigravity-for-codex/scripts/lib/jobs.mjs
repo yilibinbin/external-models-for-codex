@@ -135,7 +135,7 @@ export function markJobRunning(jobId, worker, cwd = process.cwd(), env = process
 export function finishJob(jobId, result, cwd = process.cwd(), env = process.env) {
   const job = readJob(jobId, cwd, env);
   if (!job) return null;
-  if (job.status === "cancelled" || job.status === "cancel_failed") {
+  if (TERMINAL_JOB_STATUSES.has(job.status)) {
     return job;
   }
   job.status = result.status === 0 ? "succeeded" : "failed";
