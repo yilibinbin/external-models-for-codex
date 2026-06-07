@@ -75,6 +75,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "github-actions.mjs",
         "prompt-template.mjs",
         "reports.mjs",
+        "role-packs.mjs",
         "state.mjs",
         "structured-output.mjs",
     }
@@ -102,6 +103,7 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         "antigravity-rescue",
         "antigravity-review-gate",
         "antigravity-github-actions-review",
+        "antigravity-role-packs",
     ]
     for skill in expected:
         path = PLUGIN / "skills" / skill / "SKILL.md"
@@ -115,7 +117,6 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         "antigravity-status",
         "antigravity-result",
         "antigravity-cancel",
-        "antigravity-role-packs",
         "antigravity-collaboration-loop",
     ]
     for skill in unexpected:
@@ -684,6 +685,27 @@ def test_multi_review_help_does_not_call_agy(tmp_path):
     assert not argv_file.exists()
 
 
+def test_role_packs_lists_builtin_packs():
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    result = subprocess.run([NODE, str(runtime), "roles", "--json"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "default" in payload["packs"]
+    assert payload["packs"]["release"]["roles"] == ["release", "tests", "correctness", "security"]
+
+
+def test_multi_review_uses_role_pack(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    argv_file = tmp_path / "agy-argv.json"
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="PACK_OK", capture_argv=argv_file))
+    result = subprocess.run([NODE, str(runtime), "multi-review", "--role-pack", "security"], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert "## security" in result.stdout
+    assert "## correctness" in result.stdout
+    assert "## adversarial" in result.stdout
+
+
 def test_review_gate_blocks_only_on_explicit_block(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     env = os.environ.copy()
@@ -749,6 +771,7 @@ def test_release_check_passes():
     assert "PASS no-print-argv" in result.stdout
     assert "PASS github-actions-template" in result.stdout
     assert "PASS github-actions-release-ref" in result.stdout
+    assert "PASS skill-antigravity-role-packs" in result.stdout
     assert "PASS workflow-plugin-install" in result.stdout
 
 

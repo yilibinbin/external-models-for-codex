@@ -9,3 +9,4 @@ Antigravity for Codex ships focused skills for:
 - `antigravity-rescue`
 - `antigravity-review-gate`
 - `antigravity-github-actions-review`
+- `antigravity-role-packs`

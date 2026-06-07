@@ -24,6 +24,11 @@ import {
   writeOperationReport
 } from "./lib/reports.mjs";
 import {
+  BUILT_IN_ROLE_PACKS,
+  REVIEW_ROLES,
+  resolveRoles
+} from "./lib/role-packs.mjs";
+import {
   appendStructuredReviewInstructions,
   extractJsonObject,
   validateStructuredReview
@@ -35,6 +40,7 @@ const VALID_COMMANDS = new Set([
   "review",
   "adversarial-review",
   "multi-review",
+  "roles",
   "plan",
   "rescue",
   "report",
@@ -60,12 +66,15 @@ function usage(command = "") {
     return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [--structured] [--json] [focus]\n";
   }
   if (command === "multi-review") {
-    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [focus]\n";
+    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [--role-pack default|security|release] [focus]\n";
+  }
+  if (command === "roles") {
+    return "Usage: antigravity-companion.mjs roles --json\n";
   }
   if (command === "report") {
     return "Usage: antigravity-companion.mjs report --latest\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|plan|rescue|report|review-gate|real-smoke|release-check> [args]\n";
+  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -82,6 +91,7 @@ function parseArgs(rawArgs) {
     modelProvider: undefined,
     model: undefined,
     roles: undefined,
+    rolePack: undefined,
     help: false,
     timeout: DEFAULT_TIMEOUT_MS,
     quick: false,
@@ -112,6 +122,11 @@ function parseArgs(rawArgs) {
         .split(",")
         .map((role) => role.trim())
         .filter(Boolean);
+    } else if (token === "--role-pack") {
+      args.rolePack = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--role-pack=")) {
+      args.rolePack = token.slice("--role-pack=".length);
     } else if (token === "--help" || token === "-h" || token === "help") {
       args.help = true;
     } else if (token === "--quick") {
@@ -323,6 +338,19 @@ function templatePromptFor(kind, args, preflight) {
   });
 }
 
+function renderCommandPrompt(command, values) {
+  const templateName = command === "multi-review" ? "multi-review-role" : command;
+  const template = readPromptTemplate(ROOT_DIR, templateName);
+  return renderTemplate(template, {
+    ROLE_NAME: values.ROLE ?? "",
+    ROLE_DIRECTIVE: values.ROLE_BRIEF ?? "",
+    MODEL_PROVIDER: values.MODEL_PROVIDER ?? "",
+    MODEL: values.MODEL ?? "",
+    GIT_CONTEXT: values.GIT_CONTEXT ?? "",
+    FOCUS_BLOCK: values.TASK ?? ""
+  });
+}
+
 function reviewGateEnabled() {
   const value = String(process.env.ANTIGRAVITY_FOR_CODEX_REVIEW_GATE ?? "").trim().toLowerCase();
   return value !== "" && value !== "off" && value !== "false" && value !== "0";
@@ -442,6 +470,15 @@ function runReport(rawArgs) {
   process.stdout.write(`${JSON.stringify(latestReport(process.cwd(), process.env))}\n`);
 }
 
+function runRoles(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write(usage("roles"));
+    return;
+  }
+  process.stdout.write(`${JSON.stringify({ roles: REVIEW_ROLES, packs: BUILT_IN_ROLE_PACKS })}\n`);
+}
+
 function runReviewGate(rawArgs) {
   if (!reviewGateEnabled()) {
     return;
@@ -488,11 +525,26 @@ async function runMultiReview(rawArgs) {
     process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
     process.exit(2);
   }
-  const roles = args.roles?.length ? args.roles : ["correctness", "security", "tests", "release", "adversarial"];
+  let roles;
+  try {
+    roles = resolveRoles({ roles: args.roles, rolePack: args.rolePack });
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  const sharedGitContext = gitContext();
+  const task = focusBlock(args);
   const results = await Promise.all(roles.map(async (role) => {
-    const roleArgs = { ...args, positional: [`Role: ${role}`, ...args.positional] };
-    const result = await antigravityPrintAsync(promptFor("multi-review", roleArgs), { ...roleArgs, preflight }, process.env);
-    return { role, result };
+    const prompt = renderCommandPrompt("multi-review", {
+      ROLE: role.name,
+      ROLE_BRIEF: role.brief,
+      TASK: task,
+      GIT_CONTEXT: sharedGitContext,
+      MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
+      MODEL: preflight?.model || args.model || ""
+    });
+    const result = await antigravityPrintAsync(prompt, { ...args, preflight }, process.env);
+    return { role: role.name, result };
   }));
 
   let failed = false;
@@ -519,7 +571,8 @@ function expectedSkills() {
     "antigravity-plan",
     "antigravity-rescue",
     "antigravity-review-gate",
-    "antigravity-github-actions-review"
+    "antigravity-github-actions-review",
+    "antigravity-role-packs"
   ];
 }
 
@@ -617,6 +670,9 @@ async function main() {
   }
   if (command === "report") {
     return runReport(rest);
+  }
+  if (command === "roles") {
+    return runRoles(rest);
   }
   if (command === "multi-review") {
     return runMultiReview(rest);
