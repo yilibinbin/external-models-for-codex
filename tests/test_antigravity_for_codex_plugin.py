@@ -3,6 +3,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import time
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -73,7 +74,9 @@ def test_antigravity_package_only_ships_wired_runtime_files():
     expected_libs = {
         "antigravity-runtime.mjs",
         "github-actions.mjs",
+        "jobs.mjs",
         "prompt-template.mjs",
+        "process.mjs",
         "reports.mjs",
         "role-packs.mjs",
         "state.mjs",
@@ -104,6 +107,9 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         "antigravity-review-gate",
         "antigravity-github-actions-review",
         "antigravity-role-packs",
+        "antigravity-status",
+        "antigravity-result",
+        "antigravity-cancel",
     ]
     for skill in expected:
         path = PLUGIN / "skills" / skill / "SKILL.md"
@@ -114,9 +120,6 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         assert "gemini-companion.mjs" not in text
         assert "claude-companion.mjs" not in text
     unexpected = [
-        "antigravity-status",
-        "antigravity-result",
-        "antigravity-cancel",
         "antigravity-collaboration-loop",
     ]
     for skill in unexpected:
@@ -176,7 +179,7 @@ def write_fake_agy(
     completion = (
         ""
         if never_exit
-        else f"setTimeout(() => {{ process.stdout.write({json.dumps(response)}); process.exit({int(exit_code)}); }}, {int(delay_ms)});\n"
+        else f"setTimeout(() => {{ fs.writeSync(1, {json.dumps(response)}); process.exit({int(exit_code)}); }}, {int(delay_ms)});\n"
     )
     script.parent.mkdir(parents=True, exist_ok=True)
     script.write_text(
@@ -211,6 +214,34 @@ def run_node_eval(source, env=None):
         capture_output=True,
         text=True,
     )
+
+
+def companion_env(tmp_path, agy=None):
+    env = os.environ.copy()
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    if agy is not None:
+        env["AGY_CLI_PATH"] = str(agy)
+    return env
+
+
+def run_companion(command, cwd, env):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    return subprocess.run([NODE, str(runtime), *command], cwd=cwd, env=env, capture_output=True, text=True)
+
+
+def wait_for_job(repo, env, job_id, terminal=True, timeout=5):
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        result = run_companion(["status", job_id], repo, env)
+        assert result.returncode == 0, result.stderr
+        last = json.loads(result.stdout)
+        if terminal and last["status"] in {"succeeded", "failed", "cancelled", "cancel_failed"}:
+            return last
+        if not terminal and last["status"] == "running":
+            return last
+        time.sleep(0.05)
+    raise AssertionError(f"job {job_id} did not reach expected state: {last}")
 
 
 def test_runtime_defaults_to_gemini_model(tmp_path):
@@ -657,6 +688,142 @@ def test_invalid_model_provider_exits_2(tmp_path):
     assert "Invalid --model-provider" in result.stderr
 
 
+def test_background_job_lifecycle_with_fake_agy(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="BACKGROUND_OK", delay_ms=100))
+
+    queued = run_companion(["review", "--background", "focus"], repo, env)
+
+    assert queued.returncode == 0, queued.stderr
+    payload = json.loads(queued.stdout)
+    assert payload["status"] == "queued"
+    job_id = payload["jobId"]
+
+    listing = run_companion(["jobs"], repo, env)
+    assert listing.returncode == 0, listing.stderr
+    assert job_id in [job["id"] for job in json.loads(listing.stdout)["jobs"]]
+
+    final_status = wait_for_job(repo, env, job_id)
+    assert final_status["status"] == "succeeded"
+
+    result = run_companion(["result", job_id], repo, env)
+    assert result.returncode == 0, result.stderr
+    result_payload = json.loads(result.stdout)
+    assert result_payload["id"] == job_id
+    assert result_payload["status"] == "succeeded"
+    assert result_payload["stdout"] == "BACKGROUND_OK"
+
+    viewed = run_companion(["status", job_id], repo, env)
+    assert json.loads(viewed.stdout)["viewed"] is True
+
+
+def test_internal_run_job_rejects_external_invocation(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+
+    result = run_companion(["__run-job", "job-external"], repo, env)
+
+    assert result.returncode == 2
+    assert "internal dispatch" in result.stderr
+
+
+def test_job_result_output_is_capped(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    huge_output = "A" * (300 * 1024)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response=huge_output))
+
+    queued = run_companion(["review", "--background", "large output"], repo, env)
+    job_id = json.loads(queued.stdout)["jobId"]
+    wait_for_job(repo, env, job_id)
+    result = run_companion(["result", job_id], repo, env)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert len(payload["stdout"].encode("utf8")) < 270 * 1024
+    assert "truncated" in payload["stdout"].lower()
+
+
+def test_internal_worker_command_is_not_user_facing(tmp_path):
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+
+    capabilities = run_companion(["capabilities"], tmp_path, env)
+
+    assert capabilities.returncode == 0, capabilities.stderr
+    payload = json.loads(capabilities.stdout)
+    assert "__run-job" not in payload["commands"]
+    assert "jobs" in payload["commands"]
+    assert "result" in payload["commands"]
+    assert "cancel" in payload["commands"]
+
+
+def test_reserved_job_lifecycle_is_explicit(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="RESERVED_OK", delay_ms=100))
+
+    reserved = run_companion(["reserve-job", "review", "reserved focus"], repo, env)
+
+    assert reserved.returncode == 0, reserved.stderr
+    reserved_payload = json.loads(reserved.stdout)
+    assert reserved_payload["status"] == "reserved"
+    job_id = reserved_payload["jobId"]
+    status = run_companion(["status", job_id], repo, env)
+    assert json.loads(status.stdout)["status"] == "reserved"
+
+    rejected = run_companion(["reserve-job", "review-gate"], repo, env)
+    assert rejected.returncode == 2
+    assert "cannot be reserved" in rejected.stderr
+
+    started = run_companion(["run-reserved-job", job_id], repo, env)
+    assert started.returncode == 0, started.stderr
+    assert json.loads(started.stdout)["status"] == "queued"
+    final_status = wait_for_job(repo, env, job_id)
+    assert final_status["status"] == "succeeded"
+    result = run_companion(["result", job_id], repo, env)
+    assert json.loads(result.stdout)["stdout"] == "RESERVED_OK"
+
+
+def test_job_cancellation_uses_process_group_and_preserves_finished_jobs(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    env = companion_env(tmp_path, fake_agy(tmp_path, never_exit=True))
+
+    queued = run_companion(["review", "--background", "cancel me"], repo, env)
+    job_id = json.loads(queued.stdout)["jobId"]
+    running = wait_for_job(repo, env, job_id, terminal=False)
+    assert running["worker"]["pid"] > 0
+
+    cancel = run_companion(["cancel", job_id], repo, env)
+    assert cancel.returncode == 0, cancel.stderr
+    assert json.loads(cancel.stdout)["status"] == "cancelled"
+
+    finished_env = companion_env(tmp_path / "finished", fake_agy(tmp_path / "finished", response="DONE"))
+    finished = run_companion(["review", "--background", "finish me"], repo, finished_env)
+    finished_id = json.loads(finished.stdout)["jobId"]
+    wait_for_job(repo, finished_env, finished_id)
+    cancel_finished = subprocess.run([NODE, str(runtime), "cancel", finished_id], cwd=repo, env=finished_env, capture_output=True, text=True)
+    assert cancel_finished.returncode == 0, cancel_finished.stderr
+    assert json.loads(cancel_finished.stdout)["status"] == "succeeded"
+
+
+def test_setup_does_not_emit_command_inventory(tmp_path):
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+
+    setup = run_companion(["setup"], tmp_path, env)
+
+    assert setup.returncode == 0, setup.stderr
+    payload = json.loads(setup.stdout)
+    assert "commands" not in payload
+
+
 def test_setup_exits_zero_when_agy_is_unavailable():
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     env = os.environ.copy()
@@ -772,6 +939,9 @@ def test_release_check_passes():
     assert "PASS github-actions-template" in result.stdout
     assert "PASS github-actions-release-ref" in result.stdout
     assert "PASS skill-antigravity-role-packs" in result.stdout
+    assert "PASS skill-antigravity-status" in result.stdout
+    assert "PASS skill-antigravity-result" in result.stdout
+    assert "PASS skill-antigravity-cancel" in result.stdout
     assert "PASS workflow-plugin-install" in result.stdout
 
 

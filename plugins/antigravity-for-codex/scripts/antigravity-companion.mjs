@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -10,6 +10,18 @@ import {
   antigravityPrint,
   antigravityPrintAsync
 } from "./lib/antigravity-runtime.mjs";
+import {
+  cancelJob,
+  createJob,
+  finishJob,
+  listJobs,
+  markJobRunning,
+  markJobViewed,
+  readJob,
+  reserveJob,
+  TERMINAL_JOB_STATUSES
+} from "./lib/jobs.mjs";
+import { captureProcessIdentity } from "./lib/process.mjs";
 import {
   renderWorkflow,
   validateWorkflow
@@ -44,13 +56,22 @@ const VALID_COMMANDS = new Set([
   "plan",
   "rescue",
   "report",
+  "jobs",
+  "status",
+  "result",
+  "cancel",
+  "reserve-job",
+  "run-reserved-job",
+  "__run-job",
   "review-gate",
   "real-smoke",
   "release-check"
 ]);
+const USER_VISIBLE_COMMANDS = [...VALID_COMMANDS].filter((command) => command !== "__run-job");
 const REVIEW_COMMANDS = new Set(["review", "adversarial-review", "plan", "rescue"]);
 const VALID_MODEL_PROVIDERS = new Set(["gemini", "claude"]);
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
+const COMPANION_PATH = fileURLToPath(import.meta.url);
 const PLUGIN_VERSION = "0.1.0";
 const RELEASE_REF = `antigravity-for-codex-v${PLUGIN_VERSION}`;
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
@@ -74,7 +95,7 @@ function usage(command = "") {
   if (command === "report") {
     return "Usage: antigravity-companion.mjs report --latest\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|review-gate|real-smoke|release-check> [args]\n";
+  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -97,7 +118,8 @@ function parseArgs(rawArgs) {
     quick: false,
     structured: false,
     json: false,
-    latest: false
+    latest: false,
+    background: false
   };
   for (let index = 0; index < rawArgs.length; index += 1) {
     const token = rawArgs[index];
@@ -138,6 +160,8 @@ function parseArgs(rawArgs) {
       args.structured = true;
     } else if (token === "--latest") {
       args.latest = true;
+    } else if (token === "--background") {
+      args.background = true;
     } else if (token === "--timeout-seconds") {
       const value = Number(readOptionValue(rawArgs, index, token));
       if (!Number.isFinite(value) || value < 1 || value > 3600) {
@@ -396,6 +420,64 @@ function parseReviewGateOutput(output) {
   return { kind: "invalid", firstLine };
 }
 
+function rawArgsWithoutBackground(rawArgs) {
+  return rawArgs.filter((arg) => arg !== "--background");
+}
+
+function jobSummary(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    command: job.command,
+    args: job.args,
+    cwd: job.cwd,
+    status: job.status,
+    viewed: Boolean(job.viewed),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    endedAt: job.endedAt,
+    worker: job.worker
+  };
+}
+
+function jobResultPayload(job) {
+  return {
+    ...jobSummary(job),
+    stdout: job.stdout || "",
+    stderr: job.stderr || "",
+    error: job.error || ""
+  };
+}
+
+function writeJson(payload) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function spawnStoredJobWorker(job) {
+  const child = spawn(process.execPath, [COMPANION_PATH, "__run-job", job.id], {
+    cwd: job.cwd,
+    env: {
+      ...process.env,
+      ANTIGRAVITY_INTERNAL_DISPATCH: "1"
+    },
+    detached: process.platform !== "win32",
+    stdio: "ignore"
+  });
+  child.unref();
+  return child;
+}
+
+function queueBackgroundJob(command, rawArgs) {
+  const job = createJob({
+    command,
+    args: rawArgsWithoutBackground(rawArgs),
+    cwd: process.cwd()
+  }, process.env);
+  spawnStoredJobWorker(job);
+  writeJson({ status: "queued", jobId: job.id });
+}
+
 function runSetupOrCapabilities(command, rawArgs) {
   const args = parseArgsOrExit(rawArgs);
   if (args.help) {
@@ -403,7 +485,11 @@ function runSetupOrCapabilities(command, rawArgs) {
     return;
   }
   const preflight = antigravityPreflight(process.env, args);
-  process.stdout.write(`${JSON.stringify({ ok: preflight.ok, provider: preflight }, null, 2)}\n`);
+  const payload = { ok: preflight.ok, provider: preflight };
+  if (command === "capabilities") {
+    payload.commands = USER_VISIBLE_COMMANDS;
+  }
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(command === "setup" ? 0 : (preflight.ok ? 0 : 1));
 }
 
@@ -412,6 +498,9 @@ function runReview(kind, rawArgs) {
   if (args.help) {
     process.stdout.write(usage(kind));
     return;
+  }
+  if (args.background) {
+    return queueBackgroundJob(kind, rawArgs);
   }
   const preflight = antigravityPreflight(process.env, args);
   if (!preflight.ok) {
@@ -479,6 +568,123 @@ function runRoles(rawArgs) {
   process.stdout.write(`${JSON.stringify({ roles: REVIEW_ROLES, packs: BUILT_IN_ROLE_PACKS })}\n`);
 }
 
+function requireJobId(rawArgs, command) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help || args.positional.length !== 1) {
+    process.stdout.write(`Usage: antigravity-companion.mjs ${command} <job-id>\n`);
+    process.exit(args.help ? 0 : 2);
+  }
+  return args.positional[0];
+}
+
+function runJobs(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write("Usage: antigravity-companion.mjs jobs\n");
+    return;
+  }
+  writeJson({ jobs: listJobs(process.cwd(), process.env).map(jobSummary) });
+}
+
+function runStatus(rawArgs) {
+  const jobId = requireJobId(rawArgs, "status");
+  const job = readJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  writeJson(jobSummary(job));
+}
+
+function runResult(rawArgs) {
+  const jobId = requireJobId(rawArgs, "result");
+  const job = markJobViewed(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  writeJson(jobResultPayload(job));
+}
+
+function runCancel(rawArgs) {
+  const jobId = requireJobId(rawArgs, "cancel");
+  const job = cancelJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  writeJson(jobSummary(job));
+}
+
+function runReserveJob(rawArgs) {
+  if (rawArgs.includes("--help") || rawArgs.includes("-h") || rawArgs[0] === "help" || rawArgs.length < 1) {
+    process.stdout.write("Usage: antigravity-companion.mjs reserve-job <review|adversarial-review|multi-review|plan|rescue> [args]\n");
+    process.exit(rawArgs.length < 1 ? 2 : 0);
+  }
+  const [command, ...commandArgs] = rawArgs;
+  try {
+    const job = reserveJob({ command, args: commandArgs, cwd: process.cwd() }, process.env);
+    writeJson({ status: "reserved", jobId: job.id });
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+}
+
+function runReservedJob(rawArgs) {
+  const jobId = requireJobId(rawArgs, "run-reserved-job");
+  const job = readJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  if (job.status !== "reserved") {
+    process.stderr.write(`Job "${jobId}" is not reserved.\n`);
+    process.exit(2);
+  }
+  spawnStoredJobWorker(job);
+  writeJson({ status: "queued", jobId: job.id });
+}
+
+function runStoredJob(rawArgs) {
+  if (process.env.ANTIGRAVITY_INTERNAL_DISPATCH !== "1") {
+    process.stderr.write("__run-job requires internal dispatch.\n");
+    process.exit(2);
+  }
+  const jobId = requireJobId(rawArgs, "__run-job");
+  const job = readJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  const running = markJobRunning(jobId, {
+    pid: process.pid,
+    identity: captureProcessIdentity(process.pid)
+  }, job.cwd, process.env);
+  if (!running) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  if (TERMINAL_JOB_STATUSES.has(running.status)) {
+    process.exit(0);
+  }
+
+  const result = spawnSync(process.execPath, [COMPANION_PATH, running.command, ...running.args], {
+    cwd: running.cwd,
+    env: process.env,
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: running.timeout || DEFAULT_TIMEOUT_MS,
+    killSignal: "SIGKILL"
+  });
+  finishJob(jobId, {
+    status: result.status ?? 1,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+    error: result.error ? String(result.error.message || result.error) : ""
+  }, running.cwd, process.env);
+}
+
 function runReviewGate(rawArgs) {
   if (!reviewGateEnabled()) {
     return;
@@ -519,6 +725,9 @@ async function runMultiReview(rawArgs) {
   if (args.help) {
     process.stdout.write(usage("multi-review"));
     return;
+  }
+  if (args.background) {
+    return queueBackgroundJob("multi-review", rawArgs);
   }
   const preflight = antigravityPreflight(process.env, args);
   if (!preflight.ok) {
@@ -572,7 +781,10 @@ function expectedSkills() {
     "antigravity-rescue",
     "antigravity-review-gate",
     "antigravity-github-actions-review",
-    "antigravity-role-packs"
+    "antigravity-role-packs",
+    "antigravity-status",
+    "antigravity-result",
+    "antigravity-cancel"
   ];
 }
 
@@ -673,6 +885,27 @@ async function main() {
   }
   if (command === "roles") {
     return runRoles(rest);
+  }
+  if (command === "jobs") {
+    return runJobs(rest);
+  }
+  if (command === "status") {
+    return runStatus(rest);
+  }
+  if (command === "result") {
+    return runResult(rest);
+  }
+  if (command === "cancel") {
+    return runCancel(rest);
+  }
+  if (command === "reserve-job") {
+    return runReserveJob(rest);
+  }
+  if (command === "run-reserved-job") {
+    return runReservedJob(rest);
+  }
+  if (command === "__run-job") {
+    return runStoredJob(rest);
   }
   if (command === "multi-review") {
     return runMultiReview(rest);
