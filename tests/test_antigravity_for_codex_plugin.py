@@ -75,6 +75,8 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "antigravity-runtime.mjs",
         "github-actions.mjs",
         "jobs.mjs",
+        "leases.mjs",
+        "mailbox.mjs",
         "prompt-template.mjs",
         "process.mjs",
         "reports.mjs",
@@ -110,6 +112,9 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         "antigravity-status",
         "antigravity-result",
         "antigravity-cancel",
+        "antigravity-collaboration-loop",
+        "antigravity-mailbox",
+        "antigravity-leases",
     ]
     for skill in expected:
         path = PLUGIN / "skills" / skill / "SKILL.md"
@@ -119,12 +124,6 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         assert "antigravity-companion.mjs" in text
         assert "gemini-companion.mjs" not in text
         assert "claude-companion.mjs" not in text
-    unexpected = [
-        "antigravity-collaboration-loop",
-    ]
-    for skill in unexpected:
-        assert not (PLUGIN / "skills" / skill).exists()
-
 
 def test_antigravity_hooks_use_antigravity_env_names():
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf8"))
@@ -135,6 +134,11 @@ def test_antigravity_hooks_use_antigravity_env_names():
     stop_hooks = hooks["hooks"]["Stop"][0]["hooks"]
     assert stop_hooks[0]["command"] == 'node "${ANTIGRAVITY_PLUGIN_ROOT:-$CODEX_PLUGIN_ROOT}/hooks/antigravity-review-gate.mjs"'
     assert stop_hooks[0]["timeout"] == 900
+    assert set(hooks["hooks"]) == {"Stop", "SessionStart", "SessionEnd", "UserPromptSubmit"}
+    assert "session-lifecycle.mjs" in hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+    assert "session-lifecycle.mjs" in hooks["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
+    assert "unread-result.mjs" in hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
+    assert "antigravity-review-gate.mjs" in stop_hooks[0]["command"]
 
 
 FAKE_AGY_HELP = (
@@ -954,6 +958,202 @@ def test_immediate_job_cancellation_does_not_leave_worker_running(tmp_path):
         assert not process_is_running(agy_pid)
 
 
+def test_mailbox_and_leases_are_repo_external(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+
+    lease = run_companion(["leases", "claim", "--role", "security", "--ttl-seconds", "60"], repo, env)
+    assert lease.returncode == 0, lease.stderr
+    lease_payload = json.loads(lease.stdout)
+    assert lease_payload["status"] == "claimed"
+    assert lease_payload["lease"]["role"] == "security"
+
+    mailbox = run_companion(["mailbox", "post", "--thread", "t1", "--message", "hello"], repo, env)
+    assert mailbox.returncode == 0, mailbox.stderr
+    mailbox_payload = json.loads(mailbox.stdout)
+    assert mailbox_payload["status"] == "posted"
+
+    mailbox_list = run_companion(["mailbox", "list"], repo, env)
+    assert mailbox_list.returncode == 0, mailbox_list.stderr
+    assert json.loads(mailbox_list.stdout)["threads"][0]["thread"] == "t1"
+
+    mailbox_show = run_companion(["mailbox", "show", "--thread", "t1"], repo, env)
+    assert mailbox_show.returncode == 0, mailbox_show.stderr
+    shown = json.loads(mailbox_show.stdout)
+    assert shown["thread"] == "t1"
+    assert shown["messages"][0]["message"] == "hello"
+
+    lease_list = run_companion(["leases", "list"], repo, env)
+    assert lease_list.returncode == 0, lease_list.stderr
+    assert json.loads(lease_list.stdout)["leases"][0]["id"] == lease_payload["leaseId"]
+
+    lease_release = run_companion(["leases", "release", "--id", lease_payload["leaseId"]], repo, env)
+    assert lease_release.returncode == 0, lease_release.stderr
+    assert json.loads(lease_release.stdout)["status"] == "released"
+    assert not (repo / ".antigravity-for-codex").exists()
+
+
+def test_mailbox_and_leases_preserve_concurrent_writes(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+
+    posts = [
+        subprocess.Popen(
+            [NODE, str(runtime), "mailbox", "post", "--thread", "concurrent", "--message", f"msg-{index}"],
+            cwd=repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(12)
+    ]
+    post_results = [proc.communicate(timeout=10) + (proc.returncode,) for proc in posts]
+    assert all(result[2] == 0 for result in post_results), post_results
+    shown = json.loads(run_companion(["mailbox", "show", "--thread", "concurrent"], repo, env).stdout)
+    assert len(shown["messages"]) == 12
+
+    claims = [
+        subprocess.Popen(
+            [NODE, str(runtime), "leases", "claim", "--role", f"role-{index}", "--ttl-seconds", "60"],
+            cwd=repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(12)
+    ]
+    claim_results = [proc.communicate(timeout=10) + (proc.returncode,) for proc in claims]
+    assert all(result[2] == 0 for result in claim_results), claim_results
+    leases = json.loads(run_companion(["leases", "list"], repo, env).stdout)
+    assert len(leases["leases"]) == 12
+
+
+def test_invalid_lease_ttl_is_rejected(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+
+    invalid_text = run_companion(["leases", "claim", "--role", "security", "--ttl-seconds", "abc"], repo, env)
+    invalid_zero = run_companion(["leases", "claim", "--role", "security", "--ttl-seconds", "0"], repo, env)
+
+    assert invalid_text.returncode == 2
+    assert "Lease TTL must be between" in invalid_text.stderr
+    assert invalid_zero.returncode == 2
+    assert "Lease TTL must be between" in invalid_zero.stderr
+
+
+def test_advisory_state_write_failure_does_not_fail_multi_review(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    bad_state = tmp_path / "state-file"
+    bad_state.write_text("not a directory", encoding="utf8")
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ALLOW"))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(bad_state)
+
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "multi-review", "--use-mailbox", "--advisory-leases"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "## correctness" in result.stdout
+
+
+def test_result_marks_job_viewed_and_unread_hook_clears(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="UNREAD_DONE", delay_ms=100))
+    hook = PLUGIN / "hooks" / "unread-result.mjs"
+
+    queued = run_companion(["review", "--background", "unread result"], repo, env)
+    job_id = json.loads(queued.stdout)["jobId"]
+    assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
+
+    first = subprocess.run([NODE, str(hook)], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0
+    assert job_id in first.stderr
+    viewed = run_companion(["result", job_id], repo, env)
+    assert viewed.returncode == 0, viewed.stderr
+    second = subprocess.run([NODE, str(hook)], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0
+    assert job_id not in second.stderr
+
+
+def test_session_lifecycle_hook_writes_repo_external_marker(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    hook = PLUGIN / "hooks" / "session-lifecycle.mjs"
+
+    started = subprocess.run([NODE, str(hook), "start"], cwd=repo, env=env, capture_output=True, text=True)
+    ended = subprocess.run([NODE, str(hook), "end"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert started.returncode == 0, started.stderr
+    assert ended.returncode == 0, ended.stderr
+    assert list((tmp_path / "state").rglob("session-lifecycle.json"))
+    assert not (repo / ".antigravity-for-codex").exists()
+
+
+def test_session_lifecycle_hook_recovers_non_object_state(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    hook = PLUGIN / "hooks" / "session-lifecycle.mjs"
+    seeded = subprocess.run([NODE, str(hook), "start"], cwd=repo, env=env, capture_output=True, text=True)
+    assert seeded.returncode == 0, seeded.stderr
+    marker = next((tmp_path / "state").rglob("session-lifecycle.json"))
+    marker.write_text("[]\n", encoding="utf8")
+
+    recovered = subprocess.run([NODE, str(hook), "end"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert recovered.returncode == 0, recovered.stderr
+    payload = json.loads(marker.read_text(encoding="utf8"))
+    assert isinstance(payload, dict)
+    assert payload["events"][-1]["event"] == "end"
+
+
+def test_session_lifecycle_hook_preserves_concurrent_events(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    hook = PLUGIN / "hooks" / "session-lifecycle.mjs"
+
+    runs = [
+        subprocess.Popen(
+            [NODE, str(hook), "start"],
+            cwd=repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(12)
+    ]
+    results = [proc.communicate(timeout=10) + (proc.returncode,) for proc in runs]
+
+    assert all(result[2] == 0 for result in results), results
+    marker = next((tmp_path / "state").rglob("session-lifecycle.json"))
+    payload = json.loads(marker.read_text(encoding="utf8"))
+    assert len(payload["events"]) == 12
+
+
 def test_finish_job_preserves_all_terminal_statuses(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1136,6 +1336,9 @@ def test_review_gate_uses_inner_timeout_below_hook_timeout(tmp_path):
     assert result.returncode == 0, result.stderr
     argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
     assert argv[argv.index("--print-timeout") + 1] == "840s"
+    prompt = argv[argv.index("--prompt") + 1]
+    assert "<role_name>stop-gate</role_name>" in prompt
+    assert "<task>Run a stop-gate review of the current git changes.</task>" in prompt
 
 
 def test_release_check_passes():

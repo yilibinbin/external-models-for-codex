@@ -28,6 +28,16 @@ import {
   validateWorkflow
 } from "./lib/github-actions.mjs";
 import {
+  claimLease,
+  listLeases,
+  releaseLease
+} from "./lib/leases.mjs";
+import {
+  listMailboxThreads,
+  postMailboxMessage,
+  showMailboxThread
+} from "./lib/mailbox.mjs";
+import {
   readPromptTemplate,
   renderTemplate
 } from "./lib/prompt-template.mjs";
@@ -61,6 +71,8 @@ const VALID_COMMANDS = new Set([
   "status",
   "result",
   "cancel",
+  "mailbox",
+  "leases",
   "reserve-job",
   "run-reserved-job",
   "__run-job",
@@ -88,7 +100,7 @@ function usage(command = "") {
     return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [--structured] [--json] [focus]\n";
   }
   if (command === "multi-review") {
-    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [--role-pack default|security|release] [focus]\n";
+    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [--role-pack default|security|release] [--use-mailbox] [--advisory-leases] [focus]\n";
   }
   if (command === "roles") {
     return "Usage: antigravity-companion.mjs roles --json\n";
@@ -96,7 +108,13 @@ function usage(command = "") {
   if (command === "report") {
     return "Usage: antigravity-companion.mjs report --latest\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
+  if (command === "mailbox") {
+    return "Usage: antigravity-companion.mjs mailbox <list|post|show> [--thread <id>] [--message <text>]\n";
+  }
+  if (command === "leases") {
+    return "Usage: antigravity-companion.mjs leases <claim|list|release> [--role <role>] [--ttl-seconds <n>] [--id <lease-id>]\n";
+  }
+  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -120,7 +138,14 @@ function parseArgs(rawArgs) {
     structured: false,
     json: false,
     latest: false,
-    background: false
+    background: false,
+    useMailbox: false,
+    advisoryLeases: false,
+    role: "",
+    ttlSeconds: undefined,
+    thread: "",
+    message: "",
+    id: ""
   };
   for (let index = 0; index < rawArgs.length; index += 1) {
     const token = rawArgs[index];
@@ -163,6 +188,35 @@ function parseArgs(rawArgs) {
       args.latest = true;
     } else if (token === "--background") {
       args.background = true;
+    } else if (token === "--use-mailbox") {
+      args.useMailbox = true;
+    } else if (token === "--advisory-leases") {
+      args.advisoryLeases = true;
+    } else if (token === "--role") {
+      args.role = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--role=")) {
+      args.role = token.slice("--role=".length);
+    } else if (token === "--ttl-seconds") {
+      args.ttlSeconds = Number(readOptionValue(rawArgs, index, token));
+      index += 1;
+    } else if (token.startsWith("--ttl-seconds=")) {
+      args.ttlSeconds = Number(token.slice("--ttl-seconds=".length));
+    } else if (token === "--thread") {
+      args.thread = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--thread=")) {
+      args.thread = token.slice("--thread=".length);
+    } else if (token === "--message") {
+      args.message = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--message=")) {
+      args.message = token.slice("--message=".length);
+    } else if (token === "--id") {
+      args.id = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--id=")) {
+      args.id = token.slice("--id=".length);
     } else if (token === "--timeout-seconds") {
       const value = Number(readOptionValue(rawArgs, index, token));
       if (!Number.isFinite(value) || value < 1 || value > 3600) {
@@ -364,7 +418,7 @@ function templatePromptFor(kind, args, preflight) {
 }
 
 function renderCommandPrompt(command, values) {
-  const templateName = command === "multi-review" ? "multi-review-role" : command;
+  const templateName = command === "multi-review" || command === "review-gate" ? `${command}-role` : command;
   const template = readPromptTemplate(ROOT_DIR, templateName);
   return renderTemplate(template, {
     ROLE_NAME: values.ROLE ?? "",
@@ -617,6 +671,64 @@ function runCancel(rawArgs) {
   writeJson(jobSummary(job));
 }
 
+function runMailbox(rawArgs) {
+  const [action = "", ...rest] = rawArgs;
+  const args = parseArgsOrExit(rest);
+  if (args.help || !action) {
+    process.stdout.write(usage("mailbox"));
+    process.exit(action ? 0 : 2);
+  }
+  try {
+    if (action === "list") {
+      return writeJson(listMailboxThreads(process.cwd(), process.env));
+    }
+    if (action === "post") {
+      return writeJson(postMailboxMessage({
+        thread: args.thread,
+        message: args.message,
+        cwd: process.cwd()
+      }, process.env));
+    }
+    if (action === "show") {
+      return writeJson(showMailboxThread(args.thread, process.cwd(), process.env));
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  process.stderr.write(`Unknown mailbox action "${action}".\n`);
+  process.exit(2);
+}
+
+function runLeases(rawArgs) {
+  const [action = "", ...rest] = rawArgs;
+  const args = parseArgsOrExit(rest);
+  if (args.help || !action) {
+    process.stdout.write(usage("leases"));
+    process.exit(action ? 0 : 2);
+  }
+  try {
+    if (action === "claim") {
+      return writeJson(claimLease({
+        role: args.role,
+        ttlSeconds: args.ttlSeconds,
+        cwd: process.cwd()
+      }, process.env));
+    }
+    if (action === "list") {
+      return writeJson(listLeases(process.cwd(), process.env));
+    }
+    if (action === "release") {
+      return writeJson(releaseLease(args.id, process.cwd(), process.env));
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  process.stderr.write(`Unknown leases action "${action}".\n`);
+  process.exit(2);
+}
+
 function runReserveJob(rawArgs) {
   if (rawArgs.includes("--help") || rawArgs.includes("-h") || rawArgs[0] === "help" || rawArgs.length < 1) {
     process.stdout.write("Usage: antigravity-companion.mjs reserve-job <review|adversarial-review|multi-review|plan|rescue> [args]\n");
@@ -695,7 +807,15 @@ function runReviewGate(rawArgs) {
 
   let result;
   try {
-    result = antigravityPrint(reviewGatePrompt(args), args, process.env);
+    const prompt = renderCommandPrompt("review-gate", {
+      ROLE: "stop-gate",
+      ROLE_BRIEF: "Block only concrete issues that should prevent Codex from stopping.",
+      TASK: focusBlock(args),
+      GIT_CONTEXT: gitContext(),
+      MODEL_PROVIDER: args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
+      MODEL: args.model || ""
+    });
+    result = antigravityPrint(prompt, args, process.env);
   } catch (error) {
     warnReviewGate(`runtime error; allowing stop: ${error.message || String(error)}`);
     return;
@@ -740,6 +860,29 @@ async function runMultiReview(rawArgs) {
   }
   const sharedGitContext = gitContext();
   const task = focusBlock(args);
+  const advisoryLeaseIds = [];
+  if (args.useMailbox) {
+    try {
+      postMailboxMessage({
+        thread: "multi-review",
+        message: `Started Antigravity multi-review with roles: ${roles.map((role) => role.name).join(", ")}`,
+        cwd: process.cwd()
+      }, process.env);
+    } catch (error) {
+      process.stderr.write(`[antigravity-for-codex advisory] mailbox unavailable: ${error.message || String(error)}\n`);
+    }
+  }
+  if (args.advisoryLeases) {
+    for (const role of roles) {
+      try {
+        const claim = claimLease({ role: role.name, ttlSeconds: 900, cwd: process.cwd() }, process.env);
+        advisoryLeaseIds.push(claim.leaseId);
+      } catch (error) {
+        process.stderr.write(`[antigravity-for-codex advisory] lease unavailable: ${error.message || String(error)}\n`);
+        break;
+      }
+    }
+  }
   const results = await Promise.all(roles.map(async (role) => {
     const prompt = renderCommandPrompt("multi-review", {
       ROLE: role.name,
@@ -762,6 +905,13 @@ async function runMultiReview(rawArgs) {
       failed = true;
     }
   }
+  for (const leaseId of advisoryLeaseIds) {
+    try {
+      releaseLease(leaseId, process.cwd(), process.env);
+    } catch {
+      // Advisory leases must not affect review outcome.
+    }
+  }
   process.exit(failed ? 1 : 0);
 }
 
@@ -781,7 +931,10 @@ function expectedSkills() {
     "antigravity-role-packs",
     "antigravity-status",
     "antigravity-result",
-    "antigravity-cancel"
+    "antigravity-cancel",
+    "antigravity-collaboration-loop",
+    "antigravity-mailbox",
+    "antigravity-leases"
   ];
 }
 
@@ -894,6 +1047,12 @@ async function main() {
   }
   if (command === "cancel") {
     return runCancel(rest);
+  }
+  if (command === "mailbox") {
+    return runMailbox(rest);
+  }
+  if (command === "leases") {
+    return runLeases(rest);
   }
   if (command === "reserve-job") {
     return runReserveJob(rest);
