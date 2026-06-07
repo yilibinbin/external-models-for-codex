@@ -163,6 +163,7 @@ def write_fake_agy(
     script,
     response="AGY_OK",
     capture_argv=None,
+    capture_pid=None,
     help_text=FAKE_AGY_HELP,
     models_text=FAKE_AGY_MODELS,
     exit_code=0,
@@ -173,6 +174,10 @@ def write_fake_agy(
     capture = (
         f"fs.writeFileSync({json.dumps(str(capture_argv))}, JSON.stringify({{argv: process.argv.slice(2), cwd: process.cwd()}}));\n"
         if capture_argv else ""
+    )
+    pid_capture = (
+        f"fs.writeFileSync({json.dumps(str(capture_pid))}, String(process.pid));\n"
+        if capture_pid else ""
     )
     sigterm_handler = 'process.on("SIGTERM", () => {});\n' if ignore_sigterm else ""
     keep_alive = "setInterval(() => {}, 1000);\n" if never_exit else ""
@@ -190,6 +195,7 @@ def write_fake_agy(
         f"if (argv.join(' ') === '--help') {{ process.stdout.write({json.dumps(help_text)}); process.exit(0); }}\n"
         f"if (argv.join(' ') === 'models') {{ process.stdout.write({json.dumps(models_text)}); process.exit(0); }}\n"
         f"{capture}"
+        f"{pid_capture}"
         "if (!argv.includes('--prompt')) { console.error('missing prompt'); process.exit(9); }\n"
         "if (!argv.includes('--model')) { console.error('missing model'); process.exit(8); }\n"
         "if (argv.includes('--dangerously-skip-permissions')) { console.error('unsafe permissions'); process.exit(7); }\n"
@@ -242,6 +248,11 @@ def wait_for_job(repo, env, job_id, terminal=True, timeout=5):
             return last
         time.sleep(0.05)
     raise AssertionError(f"job {job_id} did not reach expected state: {last}")
+
+
+def process_is_running(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "pid="], capture_output=True, text=True)
+    return result.returncode == 0 and str(pid) in result.stdout
 
 
 def test_runtime_defaults_to_gemini_model(tmp_path):
@@ -789,6 +800,24 @@ def test_reserved_job_lifecycle_is_explicit(tmp_path):
     assert json.loads(result.stdout)["stdout"] == "RESERVED_OK"
 
 
+def test_reserved_job_duplicate_start_is_rejected(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="RESERVED_ONCE", delay_ms=300))
+
+    reserved = run_companion(["reserve-job", "review", "reserved once"], repo, env)
+    job_id = json.loads(reserved.stdout)["jobId"]
+    first = run_companion(["run-reserved-job", job_id], repo, env)
+    second = run_companion(["run-reserved-job", job_id], repo, env)
+
+    assert first.returncode == 0, first.stderr
+    assert json.loads(first.stdout)["status"] == "queued"
+    assert second.returncode == 2
+    assert "is not reserved" in second.stderr
+    assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
+
+
 def test_job_cancellation_uses_process_group_and_preserves_finished_jobs(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -812,6 +841,40 @@ def test_job_cancellation_uses_process_group_and_preserves_finished_jobs(tmp_pat
     cancel_finished = subprocess.run([NODE, str(runtime), "cancel", finished_id], cwd=repo, env=finished_env, capture_output=True, text=True)
     assert cancel_finished.returncode == 0, cancel_finished.stderr
     assert json.loads(cancel_finished.stdout)["status"] == "succeeded"
+
+
+def test_job_cancellation_confirms_sigterm_ignored_worker_exits(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    agy_pid_file = tmp_path / "agy.pid"
+    env = companion_env(tmp_path, fake_agy(tmp_path, capture_pid=agy_pid_file, ignore_sigterm=True, never_exit=True))
+
+    queued = run_companion(["review", "--background", "ignore sigterm"], repo, env)
+    job_id = json.loads(queued.stdout)["jobId"]
+    running = wait_for_job(repo, env, job_id, terminal=False)
+    worker_pid = running["worker"]["pid"]
+    assert process_is_running(worker_pid)
+
+    try:
+        deadline = time.time() + 2
+        while not agy_pid_file.exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert agy_pid_file.exists()
+        agy_pid = int(agy_pid_file.read_text(encoding="utf8"))
+        assert process_is_running(agy_pid)
+
+        cancel = run_companion(["cancel", job_id], repo, env)
+
+        assert cancel.returncode == 0, cancel.stderr
+        assert json.loads(cancel.stdout)["status"] == "cancelled"
+        assert not process_is_running(worker_pid)
+        assert not process_is_running(agy_pid)
+    finally:
+        if agy_pid_file.exists():
+            agy_pid = int(agy_pid_file.read_text(encoding="utf8"))
+            if process_is_running(agy_pid):
+                subprocess.run(["kill", "-KILL", str(agy_pid)], capture_output=True, text=True)
 
 
 def test_finish_job_preserves_all_terminal_statuses(tmp_path):

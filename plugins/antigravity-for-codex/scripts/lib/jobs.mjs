@@ -86,6 +86,16 @@ export function reserveJob({ command, args = [], cwd = process.cwd() }, env = pr
   return writeJob(job, cwd, env);
 }
 
+export function claimReservedJob(cwd = process.cwd(), jobId, env = process.env) {
+  const job = readJob(jobId, cwd, env);
+  if (!job || job.status !== "reserved") {
+    return null;
+  }
+  job.status = "queued";
+  job.updatedAt = now();
+  return writeJob(job, cwd, env);
+}
+
 export function listJobs(cwd = process.cwd(), env = process.env) {
   const dir = ensureJobsDir(cwd, env);
   return fs.readdirSync(dir)

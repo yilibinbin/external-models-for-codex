@@ -12,6 +12,7 @@ import {
 } from "./lib/antigravity-runtime.mjs";
 import {
   cancelJob,
+  claimReservedJob,
   createJob,
   finishJob,
   listJobs,
@@ -633,12 +634,8 @@ function runReserveJob(rawArgs) {
 
 function runReservedJob(rawArgs) {
   const jobId = requireJobId(rawArgs, "run-reserved-job");
-  const job = readJob(jobId, process.cwd(), process.env);
+  const job = claimReservedJob(process.cwd(), jobId, process.env);
   if (!job) {
-    process.stderr.write(`Unknown job "${jobId}".\n`);
-    process.exit(1);
-  }
-  if (job.status !== "reserved") {
     process.stderr.write(`Job "${jobId}" is not reserved.\n`);
     process.exit(2);
   }
