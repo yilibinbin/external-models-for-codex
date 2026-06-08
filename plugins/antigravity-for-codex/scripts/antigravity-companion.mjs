@@ -438,16 +438,6 @@ function focusBlock(args) {
   return focus ? `<focus>${focus}</focus>` : "";
 }
 
-function promptFor(kind, args) {
-  return [
-    `<task>${kind}</task>`,
-    `Model provider: ${args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini"}.`,
-    `<git_context>${gitContext()}</git_context>`,
-    focusBlock(args),
-    "Return concise findings first. Do not edit files."
-  ].filter(Boolean).join("\n");
-}
-
 function templatePromptFor(kind, args, preflight) {
   const template = readPromptTemplate(ROOT_DIR, kind);
   return renderTemplate(template, {

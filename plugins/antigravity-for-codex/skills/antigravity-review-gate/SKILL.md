@@ -7,6 +7,12 @@ description: Configure and manually run the opt-in Antigravity Stop review gate 
 
 Use this skill when the user wants Antigravity to run a Stop-time gate before Codex finishes a turn.
 
+Run:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" review-gate "$ARGUMENTS"
+```
+
 Enable the gate in the environment that launches Codex hooks:
 
 ```bash
@@ -17,12 +23,6 @@ Disable or bypass the gate:
 
 ```bash
 export ANTIGRAVITY_FOR_CODEX_REVIEW_GATE=off
-```
-
-Manual gate run:
-
-```bash
-node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" review-gate "$ARGUMENTS"
 ```
 
 ## Natural-Language Model Routing

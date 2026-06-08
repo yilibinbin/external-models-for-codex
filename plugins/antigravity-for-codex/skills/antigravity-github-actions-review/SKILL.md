@@ -7,7 +7,7 @@ description: Use Antigravity CLI from Codex to review GitHub Actions workflow ch
 
 Use this skill when the user asks Antigravity to inspect GitHub Actions workflow changes, review automation, or fork-safety concerns.
 
-Review local workflow changes:
+Run:
 
 ```bash
 node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" review "GitHub Actions workflow safety, fork PR behavior, secret exposure, permissions, and immutable plugin refs. $ARGUMENTS"

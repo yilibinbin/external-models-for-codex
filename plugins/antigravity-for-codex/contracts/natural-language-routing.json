@@ -35,7 +35,9 @@
   "userExamplesEnd": "\nInternal routing procedure:",
   "forbiddenUserExampleSubstrings": [
     "--model",
+    "--model-provider",
     "ANTIGRAVITY_FOR_CODEX_MODEL",
+    "ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER",
     "ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL",
     "ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL"
   ],

@@ -7,6 +7,12 @@ description: Run Antigravity for Codex multi-review with advisory mailbox and le
 
 Use this skill when Codex needs a coordinated Antigravity review pass with advisory state.
 
+Run:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/antigravity-companion.mjs" multi-review --use-mailbox --advisory-leases "$ARGUMENTS"
+```
+
 ## Natural-Language Model Routing
 
 Codex should let the user ask for a coordinated Antigravity collaboration loop in normal language. Do not ask the user to write `--model-provider` or `--model` unless troubleshooting the plugin itself.

@@ -8,7 +8,9 @@ import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "antigravity-for-codex"
-NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/Codex.app/Contents/Resources/node"
+NODE = os.environ.get("NODE_BINARY") or shutil.which("node")
+if not NODE:
+    raise RuntimeError("node not found; set NODE_BINARY or put node on PATH")
 
 
 def test_antigravity_manifest_is_valid_json():
@@ -122,6 +124,8 @@ def test_antigravity_package_only_ships_wired_runtime_files():
 
 
 def test_antigravity_skills_exist_and_use_antigravity_commands():
+    contract = json.loads((PLUGIN / "contracts" / "natural-language-routing.json").read_text(encoding="utf8"))
+    routed_model_skills = set(contract["routedModelSkills"])
     expected = [
         "antigravity-review",
         "antigravity-adversarial-review",
@@ -146,6 +150,11 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         assert "antigravity-companion.mjs" in text
         assert "gemini-companion.mjs" not in text
         assert "claude-companion.mjs" not in text
+        if skill in routed_model_skills:
+            routing_start = text.find("## Natural-Language Model Routing")
+            assert routing_start >= 0, f"routing section missing from {skill}"
+            run_start = text.find("\nRun:\n")
+            assert 0 <= run_start < routing_start, f"primary Run block missing before routing section in {skill}"
 
 
 def test_antigravity_skills_encode_natural_language_model_routing():
