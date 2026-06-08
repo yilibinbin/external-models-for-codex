@@ -1,23 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
   <title id="title">Antigravity for Codex composer icon</title>
-  <desc id="desc">Compact joint Antigravity arch and Codex cloud terminal mark.</desc>
+  <desc id="desc">A compact dual-tile Antigravity and Codex icon.</desc>
   <defs>
-    <linearGradient id="arch" x1="6" y1="45" x2="46" y2="10" gradientUnits="userSpaceOnUse">
+    <linearGradient id="arch" x1="7" y1="42.6" x2="32.4" y2="13.4" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#4285F4"/>
       <stop offset=".35" stop-color="#4285F4"/>
-      <stop offset=".55" stop-color="#34A853"/>
+      <stop offset=".56" stop-color="#34A853"/>
       <stop offset=".76" stop-color="#FBBC04"/>
       <stop offset="1" stop-color="#EA4335"/>
     </linearGradient>
-    <linearGradient id="cloud" x1="31" y1="25" x2="59" y2="59" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#B7B4FF"/>
-      <stop offset=".5" stop-color="#5A8DFF"/>
-      <stop offset="1" stop-color="#2A2DFF"/>
+    <linearGradient id="cloud" x1="34" y1="21" x2="55" y2="51" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B8B4FF"/>
+      <stop offset=".5" stop-color="#5D8EFF"/>
+      <stop offset="1" stop-color="#2F32FF"/>
     </linearGradient>
   </defs>
-  <rect width="64" height="64" rx="14" fill="#FFFFFF"/>
-  <path d="M7 45c8.5-6.2 10.8-18 13.7-26.2 1.8-4.9 4.2-7.9 7.4-7.9 3.4 0 5.9 3.3 7.7 8.5 2.8 8.1 5.1 19.3 13.4 25.5" fill="none" stroke="url(#arch)" stroke-width="8.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M49 28c-3.4-3.3-7.5-4.6-12.2-3.6-3.9.8-6.9 3-9 6.5-5 .1-8.7 2.4-10.9 6.7-2.1 4.2-1.4 8.5 2 12.8 1.9 2.4 4.8 3.7 8.6 3.9h22.1c5.5-.4 9-3.5 10-8.7.6-3.4-.3-6.5-2.6-9.2.3-3.5-1.6-6.6-8-8.4Z" fill="url(#cloud)"/>
-  <path d="m28 36 4 6-4 6" fill="none" stroke="#FFFFFF" stroke-width="4.2" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M40 45h8" fill="none" stroke="#FFFFFF" stroke-width="4.2" stroke-linecap="round"/>
+  <rect width="64" height="64" rx="14" fill="#F8FAFC"/>
+  <rect x="6" y="10" width="27.5" height="38" rx="9" fill="#FFFFFF"/>
+  <path d="M8.3 42.5c5.8-4.3 7.3-12.4 9.3-18 1.3-3.7 3-6 5.3-6 2.5 0 4.4 2.6 5.7 6.5 2 5.7 3.6 13.7 9.4 17.6" fill="none" stroke="url(#arch)" stroke-width="5.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="28.5" y="17" width="28.5" height="34" rx="9" fill="#FFFFFF"/>
+  <path d="M50.4 25.1c-2.5-2.6-5.8-3.8-9.6-3.5-3.7.3-6.6 2.2-8.6 5.5-3.9-.2-7.1 1-9.4 3.6-2.4 2.6-3.2 5.9-2.4 9.7.9 4.6 4.3 7.4 9.3 7.7h18.5c5-.3 8.2-3.2 9-7.8.5-3.2-.4-6-2.6-8.5.2-2.6-1.2-5-4.2-6.7Z" fill="url(#cloud)"/>
+  <path d="m32 32.1 3 4.5-3 4.5" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M41.1 39.6h6.6" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/>
 </svg>
