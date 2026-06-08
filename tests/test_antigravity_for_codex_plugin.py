@@ -2048,6 +2048,7 @@ def test_release_check_passes():
     assert "PASS docs-version-aligned" in result.stdout
     assert "PASS marketplace-docs-release-ref" in result.stdout
     assert "PASS manifest-model-policy" in result.stdout
+    assert "PASS skills-natural-language-routing-paths" in result.stdout
     assert "PASS skills-natural-language-routing" in result.stdout
     assert "PASS agy-prompt-timeout-argv" in result.stdout
     assert "PASS no-print-argv" in result.stdout

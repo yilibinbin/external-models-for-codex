@@ -1142,6 +1142,7 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
     releaseCheckResult(manifestCapabilities.includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(githubActionsForbiddenPathsExist, "skills-natural-language-routing-paths"),
     releaseCheckResult(
       naturalLanguageRoutingContractLoaded
         && routedSkillsHaveNaturalLanguageRouting
