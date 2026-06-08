@@ -161,6 +161,8 @@ Claude native SDK mode is explicit and experimental until live SDK subagent smok
 
 SDK native subagent structured reviews use nested per-role review objects and remain an explicit opt-in path. The default review backend is unchanged.
 
+Claude for Codex supports `--quality auto|fast|standard|strong|max`. `auto` is the default and scores command type, role count, risky roles, backend, semantic context, and diff size. `fast` maps to `sonnet` plus low effort, `standard` maps to `sonnet` plus high effort, `strong` maps to `opus` plus xhigh effort, and `max` maps to `opus` plus max effort. Explicit `--model` and `--effort` always win. The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`; `ultracode` is not passed as `--effort`, and `ultrareview` remains a separate explicit-cost command.
+
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is not used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because it may use remote/cloud execution and usage-credit billing.
 
 Claude reviewer role packs are built-in presets for `multi-review`. Use `roles list`, `roles inspect <pack>`, and `multi-review --role-pack <pack>` for presets such as `minimal`, `release`, `security`, and `default`. User-authored JSON packs can be validated with `roles validate <file>`, but they are validate/inspect-only and are not executable by review commands. Role packs are plugin-managed presets, not native Claude subagents, and cannot grant tools, shell commands, hooks, MCP servers, environment variables, backend mode, or write permissions.

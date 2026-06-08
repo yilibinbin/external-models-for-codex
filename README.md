@@ -91,6 +91,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 
 These are skills-and-hook plugins, not MCP/app tool plugins. It is expected that `tool_search` will not expose callable `claude-for-codex`, `gemini-for-codex`, or `antigravity-for-codex` tools. Codex should route through the provider skills such as `claude-for-codex:*`, `gemini-for-codex:*`, and `antigravity-for-codex:*`.
 
+Claude for Codex supports `--quality auto|fast|standard|strong|max`. The policy uses Claude Code aliases (`sonnet`, `opus`) plus valid effort values (`low`, `medium`, `high`, `xhigh`, `max`) instead of concrete model ids, so future Claude Code alias updates do not require a plugin change. Explicit `--model` and `--effort` override quality. `ultracode` is not emitted as an effort value, and `claude-ultrareview` remains explicit-cost only.
+
 ## Stop Review Gate
 
 The Stop hook is installed but disabled by default. Enable it in the repository you want to protect:

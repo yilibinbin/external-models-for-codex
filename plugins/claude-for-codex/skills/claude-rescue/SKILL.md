@@ -45,7 +45,10 @@ Arguments:
 - `--base <ref>` includes branch diff context when available.
 - `--scope auto|working-tree|branch` controls git context selection.
 - `--path <path>` or `--paths <path>` filters git context.
+- `--quality auto|fast|standard|strong|max` selects adaptive Claude Code aliases and effort. Use `--quality strong` for deeper local Claude diagnosis without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude rescue pass.
 - `--model <model>` and `--effort <level>` are passed to Claude CLI.
 - `--write` allows Claude Code write permissions after recording git working-tree fingerprints.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
+
+Do not substitute `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview requires the `claude-ultrareview` skill and explicit cost confirmation.

@@ -23,6 +23,7 @@ Published capabilities:
 - Claude implementation planning for Codex to reconcile before editing.
 - Read-only Claude rescue diagnosis when Codex is stuck or validation is failing.
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
+- Adaptive `--quality auto|fast|standard|strong|max` model/effort policy using Claude Code aliases.
 - Native SDK subagent review teams with `--backend sdk --agent-team sdk-subagents`.
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Native structured output and sanitized streaming progress with `--native-structured` and `--stream-progress`.
@@ -53,6 +54,19 @@ Safety and operating model:
 - Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
 - The Stop gate reviews current git working-tree changes, not an exact previous-turn file list.
 - Generated GitHub Actions workflows use `pull_request`, avoid default `pull_request_target`, pin immutable release refs, and skip fork PR Claude/comment/annotation steps by default.
+
+Adaptive quality:
+
+- `--quality auto` is the default and scores command type, role count, risky roles, backend, semantic context, and diff size.
+- `--quality fast` uses Claude Code's `sonnet` alias with low effort.
+- `--quality standard` uses `sonnet` with high effort.
+- `--quality strong` uses `opus` with xhigh effort.
+- `--quality max` uses `opus` with max effort for explicit deepest local review.
+- Explicit `--model` and `--effort` always win over `--quality`.
+- The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`, so Claude Code can map aliases to the current best available model.
+- `ultracode` is not passed as `--effort`; current noninteractive Claude Code accepts only `low`, `medium`, `high`, `xhigh`, and `max`.
+- `claude ultrareview` remains a separate explicit command requiring `--confirm-cost` and is never used by hooks or default review paths.
+- Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks remain conservative unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
 
 Important routing note:
 

@@ -63,6 +63,7 @@ Arguments:
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
+- `--quality auto|fast|standard|strong|max` selects adaptive Claude Code aliases and effort. Use `--quality strong` when the user asks for a deeper local Claude pass without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude review.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
 - `--json` asks every role for a normalized review object and returns one role-tagged aggregate object.
 - `--semantic-context <provider>` is optional and off by default. The provider context is fetched once per command and shared across role prompts as advisory context.
@@ -70,6 +71,7 @@ Arguments:
 - `--sequential` runs roles one at a time for debugging or rate-limit-sensitive environments.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
+- Do not substitute `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview requires the `claude-ultrareview` skill and explicit cost confirmation.
 
 Examples:
 - `--base main`

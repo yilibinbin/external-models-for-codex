@@ -21,6 +21,7 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue
 - Dispatch exactly one Codex subagent with the returned `workerCommand` and returned `cwd`.
 - Tell the subagent to run `workerCommand` exactly once as argv from the returned `cwd`.
 - Preserve `workerCommand` element boundaries. If a transport forces shell execution, quote every element rather than flattening or re-tokenizing the command.
+- The parent may include `--quality strong` for deeper local Claude review without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude review.
 
 Child rules:
 - The child must run `workerCommand` exactly once as argv from the returned `cwd`.
@@ -40,3 +41,4 @@ Safety boundaries:
 - `--write` is not delegatable through this skill.
 - Stop hooks do not use this skill.
 - If the runtime returns malformed JSON, no `workerCommand`, no returned `cwd`, or an unsupported command, report the failure instead of inventing a command.
+- Do not substitute `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview remains explicit-cost only.
