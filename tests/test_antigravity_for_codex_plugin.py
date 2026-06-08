@@ -1879,19 +1879,37 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     extra_checks = {check["name"]: check["ok"] for check in json.loads(extra_write.stdout)["checks"]}
     assert extra_checks["minimal-contents-permission"] is False
 
+    linux_local_path_workflow = tmp_path / "linux-local-path.yml"
+    linux_local_path_workflow.write_text(
+        custom_render.stdout.replace(
+            'ANTIGRAVITY_FOR_CODEX_MODEL: ""',
+            'ANTIGRAVITY_FOR_CODEX_MODEL: ""\n          LEAKED_LOCAL_PATH: "/home/example/project/plugins/antigravity-for-codex"',
+        ),
+        encoding="utf8",
+    )
+    linux_local_path = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(linux_local_path_workflow)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert linux_local_path.returncode == 1
+    linux_local_path_checks = {check["name"]: check["ok"] for check in json.loads(linux_local_path.stdout)["checks"]}
+    assert linux_local_path_checks["no-local-absolute-paths"] is False
+
 
 def test_github_actions_rejects_invalid_shell_like_model(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     marker = tmp_path / "SHOULD_NOT_RUN"
     rendered = subprocess.run(
-        [NODE, str(runtime), "github-actions", "render", "--model", f"$(touch {marker})"],
+        [NODE, str(runtime), "github-actions", "render", "--model", f"gemini $(touch {marker})"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
     )
 
     assert rendered.returncode == 2
-    assert "rejected model" in rendered.stderr
+    assert "Invalid Antigravity model value" in rendered.stderr
     assert rendered.stdout == ""
     assert not marker.exists()
 

@@ -152,7 +152,7 @@ export function normalizedModelProvider(value = process.env[MODEL_PROVIDER_ENV])
 function assertSafeModelText(value) {
   const model = String(value || "").trim();
   if (!model) throw new Error("Missing Antigravity model.");
-  if (model.startsWith("-") || /[\r\n\0]/.test(model)) {
+  if (model.startsWith("-") || /[\r\n\0$`]/.test(model)) {
     throw new Error("Invalid Antigravity model value.");
   }
   if (/\b(gpt|openai)\b/i.test(model)) {
