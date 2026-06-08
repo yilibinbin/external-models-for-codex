@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 - 2026-06-08
+
+- Refresh the Antigravity plugin logo and composer icon using the official Antigravity app arch mark as the base visual element.
+- Keep existing `agy` behavior, model-provider selection, hooks, workflows, release checks, and safety boundaries unchanged.
+
 ## 0.5.0 - 2026-06-08
 
 - Promote Antigravity for Codex to the mature plugin-managed workflow surface: structured review output, sanitized reports, role packs, background jobs, status/result/cancel, mailbox, leases, lifecycle hooks, GitHub Actions workflow rendering and validation, release checks, and opt-in real smoke.
