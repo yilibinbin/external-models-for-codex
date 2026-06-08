@@ -2449,6 +2449,31 @@ def test_rescue_quality_auto_escalates_to_strong(tmp_path):
     assert argv[argv.index("--effort") + 1] == "xhigh"
 
 
+def test_multi_review_quality_auto_uses_strong_for_risky_roles(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--quality", "auto", "--roles", "correctness,security,tests,release,adversarial", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(argvs) == 5
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "opus"
+        assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_multi_review_quality_fast_can_be_requested_explicitly(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--quality", "fast", "--roles", "correctness,tests", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "low"
+
+
 def test_multi_review_scope_branch_omits_working_tree_context_in_every_prompt(tmp_path):
     result, prompts, _argvs = run_fake_claude_multi_review(
         tmp_path,
@@ -3046,6 +3071,20 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     assert "claude-for-codex-git" in query["mcpServers"]
 
 
+def test_sdk_backend_receives_quality_resolved_model_and_effort(tmp_path):
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout="SDK_OK")
+    result, _prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--backend", "sdk", "--quality", "strong", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(sdk_entry)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "opus"
+    assert query["effort"] == "xhigh"
+
+
 def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -3118,7 +3157,7 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
         assert definition["tools"] == ["Read", "Grep", "Glob"]
         assert "permissionMode" not in definition
         assert definition["maxTurns"] == 4
-        assert definition["model"] == "inherit"
+        assert definition["model"] == "opus"
         assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
             set(definition["disallowedTools"])
         )
@@ -3144,6 +3183,69 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     assert "sdk-session-secret" not in serialized
     assert "correctness ok" not in serialized
     assert "security ok" not in serialized
+
+
+def test_sdk_subagents_receive_quality_resolved_opus_model(tmp_path):
+    structured = {
+        "role_results": [
+            {
+                "agent": "cfc_correctness",
+                "role": "correctness",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("correctness ok"),
+                },
+            },
+            {
+                "agent": "cfc_security",
+                "role": "security",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("security ok"),
+                },
+            },
+        ]
+    }
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout=json.dumps(structured), structured_output=structured)
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "sample.txt").write_text("base\nchange\n")
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_entry)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+            "--native-structured",
+            "--json",
+            "--roles",
+            "correctness,security",
+            "--quality",
+            "strong",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "opus"
+    assert query["effort"] == "xhigh"
+    agents = query["agents"]
+    assert agents["cfc_correctness"]["model"] == "opus"
+    assert agents["cfc_security"]["model"] == "opus"
 
 
 def test_sdk_native_structured_output_passes_schema(tmp_path):
