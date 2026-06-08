@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.14.2 - 2026-06-08
+
+### Added
+
+- Add adaptive `--quality auto|fast|standard|strong|max` model/effort policy using Claude Code aliases instead of pinned concrete model IDs.
+- Add Claude for Codex artwork based on the Claude.app icon and the actual Codex.app icon, with PNG manifest assets for the plugin page.
+- Add release-check validation for manifest image assets.
+
+### Fixed
+
+- Propagate resolved effort into native SDK subagent definitions.
+- Cover explicit high-quality manual `review-gate` escalation while keeping Stop hooks capped to conservative defaults.
+
+### Documentation
+
+- Document adaptive quality routing, `ultracode` CLI limitations, SDK native subagent behavior, and immutable `0.14.2` install refs.
+
 ## 0.14.1 - 2026-06-06
 
 ### Fixed

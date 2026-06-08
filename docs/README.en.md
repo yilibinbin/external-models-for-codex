@@ -13,7 +13,7 @@ Included plugins:
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.0
