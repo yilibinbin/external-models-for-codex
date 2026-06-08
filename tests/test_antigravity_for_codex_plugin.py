@@ -581,6 +581,98 @@ def test_structured_review_rejects_reversed_line_ranges(tmp_path):
     assert "line_end must be >= line_start" in result.stderr
 
 
+def test_structured_review_rejects_approve_with_findings_and_parses_balanced_json(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    payload = {
+        "verdict": "approve",
+        "summary": "summary",
+        "findings": [{
+            "severity": "low",
+            "title": "Finding",
+            "body": "Approve must not carry findings.",
+            "file": "file.txt",
+            "line_start": 1,
+            "line_end": 1,
+            "confidence": 0.8,
+            "recommendation": ""
+        }],
+        "next_steps": ["ship"]
+    }
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f"prefix {{not json}}\n{json.dumps(payload)}\ntrailing {{note}}"))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "Structured review output invalid" in result.stderr
+    assert "approve requires an empty findings array" in result.stderr
+
+
+def test_structured_review_prefers_schema_like_json_candidate(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    payload = {
+        "verdict": "approve",
+        "summary": "ok",
+        "findings": [],
+        "next_steps": ["ship"]
+    }
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f"Example object: {{}}\n{json.dumps(payload)}"))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["summary"] == "ok"
+
+
+def test_structured_review_skips_partial_schema_like_json_candidate(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    payload = {
+        "verdict": "approve",
+        "summary": "ok after partial",
+        "findings": [],
+        "next_steps": ["ship"]
+    }
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f'Example: {{"findings":"not review output"}}\n{json.dumps(payload)}'))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["summary"] == "ok after partial"
+
+
+def test_structured_review_recovers_after_unclosed_prose_brace(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    payload = {
+        "verdict": "approve",
+        "summary": "ok after brace",
+        "findings": [],
+        "next_steps": ["ship"]
+    }
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f"Intro with unfinished brace {{\n{json.dumps(payload)}"))
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+
+    result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["summary"] == "ok after brace"
+
+
 def test_review_invokes_agy_with_prompt_model_and_no_dangerous_permissions(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     repo = tmp_path / "repo"
@@ -685,6 +777,31 @@ def test_review_from_subdirectory_includes_root_relative_untracked_excerpt(tmp_p
     argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
     prompt = argv[argv.index("--prompt") + 1]
     assert "Untracked file: subdir/new.txt" in prompt
+    assert unique in prompt
+
+
+def test_review_from_subdirectory_includes_root_tracked_diff(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    subdir = repo / "subdir"
+    argv_file = tmp_path / "agy-argv.json"
+    unique = "ROOT_TRACKED_UNIQUE_CONTEXT_4d4b28"
+    subdir.mkdir(parents=True)
+    init_git_repo(repo)
+    (repo / "tracked.txt").write_text("before\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked.txt").write_text(f"before\n{unique}\n", encoding="utf8")
+    agy = fake_agy(tmp_path, response="AGY_REVIEW_OK", capture_argv=argv_file)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=subdir, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
+    prompt = argv[argv.index("--prompt") + 1]
+    assert "tracked.txt" in prompt
     assert unique in prompt
 
 
@@ -1088,6 +1205,30 @@ def test_mailbox_and_leases_preserve_concurrent_writes(tmp_path):
     assert all(result[2] == 0 for result in claim_results), claim_results
     leases = json.loads(run_companion(["leases", "list"], repo, env).stdout)
     assert len(leases["leases"]) == 12
+
+
+def test_mailbox_thread_history_is_bounded(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+
+    for index in range(105):
+        posted = run_companion(["mailbox", "post", "--thread", "bounded", "--message", f"msg-{index}"], repo, env)
+        assert posted.returncode == 0, posted.stderr
+
+    shown = json.loads(run_companion(["mailbox", "show", "--thread", "bounded"], repo, env).stdout)
+    messages = [item["message"] for item in shown["messages"]]
+    assert len(messages) == 100
+    assert messages[0] == "msg-5"
+    assert messages[-1] == "msg-104"
+    assert shown["truncated"] is True
+    assert shown["droppedMessages"] == 5
+    assert shown["retainedMessages"] == 100
+    listed = json.loads(run_companion(["mailbox", "list"], repo, env).stdout)["threads"][0]
+    assert listed["truncated"] is True
+    assert listed["droppedMessages"] == 5
+    assert listed["retainedMessages"] == 100
 
 
 def test_invalid_lease_ttl_is_rejected(tmp_path):
@@ -1599,6 +1740,38 @@ def test_review_gate_uses_inner_timeout_below_hook_timeout(tmp_path):
     prompt = argv[argv.index("--prompt") + 1]
     assert "<role_name>stop-gate</role_name>" in prompt
     assert "<task>Run a stop-gate review of the current git changes.</task>" in prompt
+
+
+def test_review_gate_hook_does_not_block_on_open_stdin_pipe(tmp_path):
+    hook = PLUGIN / "hooks" / "antigravity-review-gate.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ALLOW: ok"))
+    text = hook.read_text(encoding="utf8")
+    assert "readFileSync(0" not in text
+
+    proc = subprocess.Popen(
+        [NODE, str(hook)],
+        cwd=repo,
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        proc.wait(timeout=10)
+    finally:
+        if proc.stdin:
+            proc.stdin.close()
+    stdout = proc.stdout.read() if proc.stdout else ""
+    stderr = proc.stderr.read() if proc.stderr else ""
+    assert proc.returncode == 0
+    assert stdout == ""
+    assert stderr == ""
 
 
 def test_release_check_passes():

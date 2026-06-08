@@ -6,6 +6,7 @@ import { stateDirForCwd } from "./state.mjs";
 
 const MESSAGE_LIMIT = 16 * 1024;
 const THREAD_LIMIT = 120;
+const MESSAGE_HISTORY_LIMIT = 100;
 const LOCK_WAIT_MS = 1000;
 const LOCK_STALE_MS = 30_000;
 
@@ -130,6 +131,13 @@ export function postMailboxMessage({ thread, message, role = "codex", cwd = proc
       createdAt
     };
     current.messages.push(entry);
+    const overflow = Math.max(0, current.messages.length - MESSAGE_HISTORY_LIMIT);
+    if (overflow > 0) {
+      current.truncated = true;
+      current.droppedMessages = Number(current.droppedMessages || 0) + overflow;
+      current.retainedMessages = MESSAGE_HISTORY_LIMIT;
+    }
+    current.messages = current.messages.slice(-MESSAGE_HISTORY_LIMIT);
     current.updatedAt = createdAt;
     writeJsonAtomic(file, current);
     return { status: "posted", thread: id, message: entry };
@@ -146,6 +154,9 @@ export function listMailboxThreads(cwd = process.cwd(), env = process.env) {
         return {
           thread: payload.thread || name.slice(0, -5),
           messageCount: Array.isArray(payload.messages) ? payload.messages.length : 0,
+          truncated: Boolean(payload.truncated),
+          droppedMessages: Number(payload.droppedMessages || 0),
+          retainedMessages: Number(payload.retainedMessages || 0),
           updatedAt: payload.updatedAt || ""
         };
       } catch {

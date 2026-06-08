@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
@@ -15,19 +14,11 @@ const RUNTIME = path.resolve(SCRIPT_DIR, "..", "scripts", "antigravity-companion
 const WRAPPER_TIMEOUT_MS = 870 * 1000;
 
 try {
-  let input = "";
-  if (!process.stdin.isTTY) {
-    try {
-      input = fs.readFileSync(0, "utf8");
-    } catch (error) {
-      process.stderr.write(`[antigravity-for-codex review-gate] failed to read stdin; allowing stop: ${error.message}\n`);
-    }
-  }
-
+  // The Stop gate reviews repository git state. Do not pre-read or forward hook
+  // stdin here; an open host pipe without EOF would bypass the wrapper timeout.
   const result = spawnSync(process.execPath, [RUNTIME, "review-gate"], {
     cwd: process.cwd(),
     env: process.env,
-    input,
     encoding: "utf8",
     maxBuffer: 20 * 1024 * 1024,
     timeout: WRAPPER_TIMEOUT_MS

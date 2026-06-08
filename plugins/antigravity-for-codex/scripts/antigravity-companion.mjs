@@ -412,11 +412,11 @@ function gitContext() {
   if (!root) {
     return "No git repository was detected. Review only the user's explicit focus text.";
   }
-  const status = runGit(["status", "--short"]);
-  const stagedStat = runGit(["diff", "--cached", "--stat"]);
-  const workingStat = runGit(["diff", "--stat"]);
-  const stagedDiff = runGit(["diff", "--cached", "--", "."]);
-  const workingDiff = runGit(["diff", "--", "."]);
+  const status = runGit(["status", "--short"], { cwd: root });
+  const stagedStat = runGit(["diff", "--cached", "--stat"], { cwd: root });
+  const workingStat = runGit(["diff", "--stat"], { cwd: root });
+  const stagedDiff = runGit(["diff", "--cached", "--", "."], { cwd: root });
+  const workingDiff = runGit(["diff", "--", "."], { cwd: root });
   const untracked = untrackedContext(root);
   return [
     `Repository: ${root}`,
@@ -470,30 +470,6 @@ function renderCommandPrompt(command, values) {
 function reviewGateEnabled() {
   const value = String(process.env.ANTIGRAVITY_FOR_CODEX_REVIEW_GATE ?? "").trim().toLowerCase();
   return value !== "" && value !== "off" && value !== "false" && value !== "0";
-}
-
-function reviewGatePrompt(args) {
-  const focus = args.positional.join(" ").trim();
-  return [
-    "<task>Run a stop-gate review of the current git changes.</task>",
-    `Model provider: ${args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini"}.`,
-    `<git_context>${gitContext()}</git_context>`,
-    focus ? `<focus>${focus}</focus>` : "",
-    "<rules>",
-    "- Do not edit files.",
-    "- Review only the current git working-tree changes shown in the git context.",
-    "- Use BLOCK only for concrete issues that should prevent Codex from stopping now.",
-    "- Use ALLOW if there is no blocking issue.",
-    "- Ground every BLOCK claim in concrete changed-file evidence when possible.",
-    "</rules>",
-    "<output_contract>",
-    "Your first line must be exactly one of:",
-    "ALLOW: <short reason>",
-    "BLOCK: <short reason>",
-    "Do not put anything before that first line.",
-    "After the first line, include concise evidence for BLOCK results.",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
 }
 
 function warnReviewGate(message) {

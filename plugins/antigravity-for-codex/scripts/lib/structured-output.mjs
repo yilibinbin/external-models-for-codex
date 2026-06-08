@@ -24,13 +24,73 @@ export function extractJsonObject(rawOutput) {
     if (fenced) {
       return JSON.parse(fenced[1].trim());
     }
-    const start = text.indexOf("{");
-    const end = text.lastIndexOf("}");
-    if (start !== -1 && end > start) {
-      return JSON.parse(text.slice(start, end + 1));
+    const candidates = balancedObjectCandidates(text);
+    let firstParsed;
+    for (const candidate of candidates) {
+      try {
+        const parsed = JSON.parse(candidate);
+        if (firstParsed === undefined) {
+          firstParsed = parsed;
+        }
+        if (looksLikeStructuredReview(parsed)) {
+          return parsed;
+        }
+      } catch {
+        // Try the next balanced object candidate.
+      }
+    }
+    if (firstParsed !== undefined) {
+      return firstParsed;
     }
     throw new Error("Antigravity output did not contain a JSON object.");
   }
+}
+
+// This extractor is intentionally biased toward the structured review schema.
+// If reused for unrelated JSON payloads, split out a schema-neutral variant.
+function balancedObjectCandidates(text) {
+  const candidates = [];
+  const seen = new Set();
+  const spans = [];
+  const stack = [];
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === "\"") {
+      inString = true;
+    } else if (char === "{") {
+      stack.push(index);
+    } else if (char === "}" && stack.length) {
+      spans.push({ start: stack.pop(), end: index + 1 });
+    }
+  }
+  spans.sort((left, right) => left.start - right.start);
+  for (const span of spans) {
+    const candidate = text.slice(span.start, span.end);
+    if (!seen.has(candidate)) {
+      seen.add(candidate);
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
+function looksLikeStructuredReview(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+  return ["verdict", "summary", "findings", "next_steps"].every((key) => Object.hasOwn(value, key));
 }
 
 function assertPlainObject(value, message) {
@@ -68,6 +128,9 @@ export function validateStructuredReview(value) {
   assertString(value.summary, "Structured review output summary must be a non-empty string.");
   assertArray(value.findings, "Structured review output findings must be an array.");
   assertArray(value.next_steps, "Structured review output next_steps must be an array.");
+  if (value.verdict === "approve" && value.findings.length > 0) {
+    throw new Error("Structured review output verdict approve requires an empty findings array.");
+  }
 
   for (const [index, finding] of value.findings.entries()) {
     assertPlainObject(finding, `Structured review finding ${index} must be a JSON object.`);
