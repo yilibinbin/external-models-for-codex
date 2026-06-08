@@ -1,11 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">Gemini for Codex logo</title>
-  <desc id="desc">A rounded square plugin logo showing Codex and Gemini collaboration.</desc>
-  <rect width="1024" height="1024" rx="192" fill="#111827"/>
-  <circle cx="340" cy="512" r="168" fill="#4F46E5"/>
-  <circle cx="684" cy="512" r="168" fill="#F59E0B"/>
-  <path d="M414 512c0-62 50-112 112-112s112 50 112 112-50 112-112 112-112-50-112-112Z" fill="#F9FAFB"/>
-  <path d="M300 430h92v52h-92c-17 0-30 13-30 30s13 30 30 30h92v52h-92c-46 0-82-36-82-82s36-82 82-82Z" fill="#F9FAFB"/>
-  <path d="M632 430h92c46 0 82 36 82 82s-36 82-82 82h-92v-52h92c17 0 30-13 30-30s-13-30-30-30h-92v-52Z" fill="#111827"/>
-  <path d="M516 463l53 49-53 49-35-35 16-14-16-14 35-35Z" fill="#111827"/>
+  <desc id="desc">A dual-tile joint Gemini and Codex plugin logo with the Gemini sparkle and the Codex cloud terminal mark.</desc>
+  <defs>
+    <clipPath id="sparkle">
+      <path d="M310 180c28 118 70 188 138 234 46 31 100 52 162 68-118 28-188 70-234 138-31 46-52 100-66 162-28-118-70-188-138-234-46-31-100-52-162-66 118-28 188-70 234-138 31-46 52-100 66-164Z"/>
+    </clipPath>
+    <filter id="blur" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="28"/>
+    </filter>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#111827" flood-opacity=".18"/>
+    </filter>
+    <linearGradient id="cloud" x1="534" y1="342" x2="858" y2="810" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B8B4FF"/>
+      <stop offset=".5" stop-color="#5D8EFF"/>
+      <stop offset="1" stop-color="#2F32FF"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="192" fill="#F8FAFC"/>
+  <rect x="112" y="176" width="442" height="584" rx="128" fill="#FFFFFF" filter="url(#shadow)"/>
+  <g clip-path="url(#sparkle)">
+    <rect x="8" y="170" width="610" height="620" fill="#4285F4"/>
+    <circle cx="310" cy="180" r="180" fill="#EA4335" filter="url(#blur)"/>
+    <circle cx="18" cy="482" r="226" fill="#FBBC04" filter="url(#blur)"/>
+    <circle cx="316" cy="772" r="236" fill="#34A853" filter="url(#blur)"/>
+  </g>
+  <rect x="448" y="286" width="420" height="500" rx="128" fill="#FFFFFF" filter="url(#shadow)"/>
+  <path d="M760 408c-36-38-83-55-138-50-54 5-96 32-126 80-56-3-102 14-136 52-34 38-46 85-35 141 13 66 62 106 134 110h266c72-5 119-46 130-113 7-46-6-87-38-123 3-38-16-72-57-97Z" fill="url(#cloud)"/>
+  <path d="m500 514 43 65-43 65" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M630 622h96" fill="none" stroke="#FFFFFF" stroke-width="40" stroke-linecap="round"/>
 </svg>

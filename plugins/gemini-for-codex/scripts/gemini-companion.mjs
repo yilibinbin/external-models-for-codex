@@ -1643,7 +1643,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.11.0") failures.push(`manifest version is ${manifest.version}, expected 0.11.0`);
+    if (manifest.version !== "0.11.2") failures.push(`manifest version is ${manifest.version}, expected 0.11.2`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1715,7 +1715,7 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.11.0")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.11.2")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);

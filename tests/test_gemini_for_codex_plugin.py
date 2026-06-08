@@ -147,7 +147,7 @@ def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.11.0"
+    assert manifest["version"] == "0.11.2"
     assert "Antigravity" not in json.dumps(manifest)
     assert "antigravity" not in json.dumps(manifest).lower()
     assert manifest["skills"] == "./skills/"
@@ -166,7 +166,7 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "Real Gemini smoke diagnostics" in manifest["interface"]["capabilities"]
     assert "Gemini CLI extension and MCP capability diagnostics" in manifest["interface"]["capabilities"]
     github_actions = (PLUGIN / "scripts" / "lib" / "github-actions.mjs").read_text(encoding="utf8")
-    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.11.0";' in github_actions
+    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.11.2";' in github_actions
 
 
 def test_marketplace_lists_gemini_for_codex():
@@ -2503,7 +2503,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.11.0" in text
+    assert "--ref gemini-for-codex-v0.11.2" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text
@@ -2931,4 +2931,3 @@ def test_gemini_plugin_tracked_files_do_not_ship_antigravity_residue():
         text = path.read_text(encoding="utf8")
         for token in forbidden:
             assert token not in text, f"{token} residue in {path}"
-

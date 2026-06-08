@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.2 - 2026-06-08
+
+- Replace the Gemini plugin logo and composer icon with a dual-tile Gemini + Codex joint-brand design.
+- Keep existing Gemini CLI behavior, hooks, workflows, and safety boundaries unchanged.
+
+## 0.11.1 - 2026-06-08
+
+- Refresh the Gemini plugin logo and composer icon using the official Gemini app sparkle mark as the base visual element.
+- Keep existing Gemini CLI behavior, hooks, workflows, and safety boundaries unchanged.
+
 ## 0.11.0 - 2026-06-07
 
 - Restore Gemini for Codex as a Gemini CLI-only plugin.

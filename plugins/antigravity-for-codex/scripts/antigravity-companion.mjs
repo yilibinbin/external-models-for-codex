@@ -1,19 +1,71 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
   antigravityPreflight,
+  antigravityModelDiagnostics,
   antigravityPrint,
-  antigravityPrintAsync
+  antigravityPrintAsync,
+  MODEL_PROVIDER_ENV,
+  MODEL_ENV,
+  normalizedModelProvider,
+  selectedModel
 } from "./lib/antigravity-runtime.mjs";
 import {
+  cancelJob,
+  claimReservedJob,
+  createJob,
+  finishJob,
+  listJobs,
+  markJobRunning,
+  markJobViewed,
+  readJob,
+  reserveJob,
+  TERMINAL_JOB_STATUSES
+} from "./lib/jobs.mjs";
+import { captureProcessIdentity } from "./lib/process.mjs";
+import {
   renderWorkflow,
-  validateWorkflow
+  validateWorkflow,
+  writeWorkflow
 } from "./lib/github-actions.mjs";
+import {
+  claimLease,
+  listLeases,
+  releaseLease
+} from "./lib/leases.mjs";
+import {
+  listMailboxThreads,
+  postMailboxMessage,
+  showMailboxThread
+} from "./lib/mailbox.mjs";
+import {
+  readPromptTemplate,
+  renderTemplate
+} from "./lib/prompt-template.mjs";
+import {
+  latestReport,
+  operationReport,
+  writeOperationReport
+} from "./lib/reports.mjs";
+import {
+  BUILT_IN_ROLE_PACKS,
+  REVIEW_ROLES,
+  resolveRoles
+} from "./lib/role-packs.mjs";
+import {
+  appendStructuredReviewInstructions,
+  extractJsonObject,
+  validateStructuredReview
+} from "./lib/structured-output.mjs";
+import {
+  PLUGIN_VERSION,
+  RELEASE_REF
+} from "./lib/version.mjs";
 
 const VALID_COMMANDS = new Set([
   "setup",
@@ -21,17 +73,30 @@ const VALID_COMMANDS = new Set([
   "review",
   "adversarial-review",
   "multi-review",
+  "roles",
   "plan",
   "rescue",
+  "report",
+  "jobs",
+  "status",
+  "result",
+  "cancel",
+  "mailbox",
+  "leases",
+  "github-actions",
+  "reserve-job",
+  "run-reserved-job",
+  "__run-job",
   "review-gate",
   "real-smoke",
   "release-check"
 ]);
+const USER_VISIBLE_COMMANDS = [...VALID_COMMANDS].filter((command) => command !== "__run-job");
 const REVIEW_COMMANDS = new Set(["review", "adversarial-review", "plan", "rescue"]);
 const VALID_MODEL_PROVIDERS = new Set(["gemini", "claude"]);
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const PLUGIN_VERSION = "0.1.0";
-const RELEASE_REF = `antigravity-for-codex-v${PLUGIN_VERSION}`;
+const REPO_ROOT_DIR = path.resolve(ROOT_DIR, "..", "..");
+const COMPANION_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_INNER_TIMEOUT_MS = 14 * 60 * 1000;
 const GIT_TIMEOUT_MS = 30 * 1000;
@@ -42,12 +107,27 @@ const UNTRACKED_BYTES_PER_FILE = 16 * 1024;
 
 function usage(command = "") {
   if (command === "review") {
-    return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [focus]\n";
+    return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [--structured] [--json] [focus]\n";
   }
   if (command === "multi-review") {
-    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [focus]\n";
+    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [--role-pack default|security|release] [--use-mailbox] [--advisory-leases] [focus]\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|plan|rescue|review-gate|real-smoke|release-check> [args]\n";
+  if (command === "roles") {
+    return "Usage: antigravity-companion.mjs roles --json\n";
+  }
+  if (command === "report") {
+    return "Usage: antigravity-companion.mjs report --latest\n";
+  }
+  if (command === "mailbox") {
+    return "Usage: antigravity-companion.mjs mailbox <list|post|show> [--thread <id>] [--message <text>]\n";
+  }
+  if (command === "leases") {
+    return "Usage: antigravity-companion.mjs leases <claim|list|release> [--role <role>] [--ttl-seconds <n>] [--id <lease-id>]\n";
+  }
+  if (command === "github-actions") {
+    return "Usage: antigravity-companion.mjs github-actions <render|init|validate> [--force] [--model-provider gemini|claude] [--model <label>] [--ref <tag>] [--timeout-minutes <n>] [--path <workflow-path>]\n";
+  }
+  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|github-actions|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -64,9 +144,26 @@ function parseArgs(rawArgs) {
     modelProvider: undefined,
     model: undefined,
     roles: undefined,
+    rolePack: undefined,
     help: false,
     timeout: DEFAULT_TIMEOUT_MS,
-    quick: false
+    quick: false,
+    full: false,
+    structured: false,
+    json: false,
+    latest: false,
+    background: false,
+    useMailbox: false,
+    advisoryLeases: false,
+    role: "",
+    ttlSeconds: undefined,
+    thread: "",
+    message: "",
+    id: "",
+    force: false,
+    ref: "",
+    timeoutMinutes: 0,
+    workflowPath: ""
   };
   for (let index = 0; index < rawArgs.length; index += 1) {
     const token = rawArgs[index];
@@ -91,10 +188,72 @@ function parseArgs(rawArgs) {
         .split(",")
         .map((role) => role.trim())
         .filter(Boolean);
+    } else if (token === "--role-pack") {
+      args.rolePack = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--role-pack=")) {
+      args.rolePack = token.slice("--role-pack=".length);
     } else if (token === "--help" || token === "-h" || token === "help") {
       args.help = true;
     } else if (token === "--quick") {
       args.quick = true;
+    } else if (token === "--full") {
+      args.full = true;
+    } else if (token === "--structured") {
+      args.structured = true;
+    } else if (token === "--json") {
+      args.json = true;
+      args.structured = true;
+    } else if (token === "--latest") {
+      args.latest = true;
+    } else if (token === "--background") {
+      args.background = true;
+    } else if (token === "--use-mailbox") {
+      args.useMailbox = true;
+    } else if (token === "--advisory-leases") {
+      args.advisoryLeases = true;
+    } else if (token === "--role") {
+      args.role = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--role=")) {
+      args.role = token.slice("--role=".length);
+    } else if (token === "--ttl-seconds") {
+      args.ttlSeconds = Number(readOptionValue(rawArgs, index, token));
+      index += 1;
+    } else if (token.startsWith("--ttl-seconds=")) {
+      args.ttlSeconds = Number(token.slice("--ttl-seconds=".length));
+    } else if (token === "--thread") {
+      args.thread = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--thread=")) {
+      args.thread = token.slice("--thread=".length);
+    } else if (token === "--message") {
+      args.message = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--message=")) {
+      args.message = token.slice("--message=".length);
+    } else if (token === "--id") {
+      args.id = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--id=")) {
+      args.id = token.slice("--id=".length);
+    } else if (token === "--force") {
+      args.force = true;
+    } else if (token === "--ref") {
+      args.ref = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--ref=")) {
+      args.ref = token.slice("--ref=".length);
+    } else if (token === "--timeout-minutes") {
+      args.timeoutMinutes = Number(readOptionValue(rawArgs, index, token));
+      index += 1;
+    } else if (token.startsWith("--timeout-minutes=")) {
+      args.timeoutMinutes = Number(token.slice("--timeout-minutes=".length));
+    } else if (token === "--path") {
+      args.workflowPath = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--path=")) {
+      args.workflowPath = token.slice("--path=".length);
     } else if (token === "--timeout-seconds") {
       const value = Number(readOptionValue(rawArgs, index, token));
       if (!Number.isFinite(value) || value < 1 || value > 3600) {
@@ -124,6 +283,10 @@ function parseArgs(rawArgs) {
 
 function readText(relativePath) {
   return fs.readFileSync(path.join(ROOT_DIR, relativePath), "utf8");
+}
+
+function readRepoText(relativePath) {
+  return fs.readFileSync(path.join(REPO_ROOT_DIR, relativePath), "utf8");
 }
 
 function exists(relativePath) {
@@ -253,11 +416,11 @@ function gitContext() {
   if (!root) {
     return "No git repository was detected. Review only the user's explicit focus text.";
   }
-  const status = runGit(["status", "--short"]);
-  const stagedStat = runGit(["diff", "--cached", "--stat"]);
-  const workingStat = runGit(["diff", "--stat"]);
-  const stagedDiff = runGit(["diff", "--cached", "--", "."]);
-  const workingDiff = runGit(["diff", "--", "."]);
+  const status = runGit(["status", "--short"], { cwd: root });
+  const stagedStat = runGit(["diff", "--cached", "--stat"], { cwd: root });
+  const workingStat = runGit(["diff", "--stat"], { cwd: root });
+  const stagedDiff = runGit(["diff", "--cached", "--", "."], { cwd: root });
+  const workingDiff = runGit(["diff", "--", "."], { cwd: root });
   const untracked = untrackedContext(root);
   return [
     `Repository: ${root}`,
@@ -270,44 +433,37 @@ function gitContext() {
   ].filter(Boolean).join("\n\n");
 }
 
-function promptFor(kind, args) {
+function focusBlock(args) {
   const focus = args.positional.join(" ").trim();
-  return [
-    `<task>${kind}</task>`,
-    `Model provider: ${args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini"}.`,
-    `<git_context>${gitContext()}</git_context>`,
-    focus ? `<focus>${focus}</focus>` : "",
-    "Return concise findings first. Do not edit files."
-  ].filter(Boolean).join("\n");
+  return focus ? `<focus>${focus}</focus>` : "";
+}
+
+function templatePromptFor(kind, args, preflight) {
+  const template = readPromptTemplate(ROOT_DIR, kind);
+  return renderTemplate(template, {
+    MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
+    MODEL: preflight?.model || args.model || "",
+    GIT_CONTEXT: gitContext(),
+    FOCUS_BLOCK: focusBlock(args)
+  });
+}
+
+function renderCommandPrompt(command, values) {
+  const templateName = command === "multi-review" || command === "review-gate" ? `${command}-role` : command;
+  const template = readPromptTemplate(ROOT_DIR, templateName);
+  return renderTemplate(template, {
+    ROLE_NAME: values.ROLE ?? "",
+    ROLE_DIRECTIVE: values.ROLE_BRIEF ?? "",
+    MODEL_PROVIDER: values.MODEL_PROVIDER ?? "",
+    MODEL: values.MODEL ?? "",
+    GIT_CONTEXT: values.GIT_CONTEXT ?? "",
+    FOCUS_BLOCK: values.TASK ?? ""
+  });
 }
 
 function reviewGateEnabled() {
   const value = String(process.env.ANTIGRAVITY_FOR_CODEX_REVIEW_GATE ?? "").trim().toLowerCase();
   return value !== "" && value !== "off" && value !== "false" && value !== "0";
-}
-
-function reviewGatePrompt(args) {
-  const focus = args.positional.join(" ").trim();
-  return [
-    "<task>Run a stop-gate review of the current git changes.</task>",
-    `Model provider: ${args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini"}.`,
-    `<git_context>${gitContext()}</git_context>`,
-    focus ? `<focus>${focus}</focus>` : "",
-    "<rules>",
-    "- Do not edit files.",
-    "- Review only the current git working-tree changes shown in the git context.",
-    "- Use BLOCK only for concrete issues that should prevent Codex from stopping now.",
-    "- Use ALLOW if there is no blocking issue.",
-    "- Ground every BLOCK claim in concrete changed-file evidence when possible.",
-    "</rules>",
-    "<output_contract>",
-    "Your first line must be exactly one of:",
-    "ALLOW: <short reason>",
-    "BLOCK: <short reason>",
-    "Do not put anything before that first line.",
-    "After the first line, include concise evidence for BLOCK results.",
-    "</output_contract>"
-  ].filter(Boolean).join("\n");
 }
 
 function warnReviewGate(message) {
@@ -326,6 +482,64 @@ function parseReviewGateOutput(output) {
   return { kind: "invalid", firstLine };
 }
 
+function rawArgsWithoutBackground(rawArgs) {
+  return rawArgs.filter((arg) => arg !== "--background");
+}
+
+function jobSummary(job) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    command: job.command,
+    args: job.args,
+    cwd: job.cwd,
+    status: job.status,
+    viewed: Boolean(job.viewed),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    startedAt: job.startedAt,
+    endedAt: job.endedAt,
+    worker: job.worker
+  };
+}
+
+function jobResultPayload(job) {
+  return {
+    ...jobSummary(job),
+    stdout: job.stdout || "",
+    stderr: job.stderr || "",
+    error: job.error || ""
+  };
+}
+
+function writeJson(payload) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+}
+
+function spawnStoredJobWorker(job) {
+  const child = spawn(process.execPath, [COMPANION_PATH, "__run-job", job.id], {
+    cwd: job.cwd,
+    env: {
+      ...process.env,
+      ANTIGRAVITY_INTERNAL_DISPATCH: "1"
+    },
+    detached: process.platform !== "win32",
+    stdio: "ignore"
+  });
+  child.unref();
+  return child;
+}
+
+function queueBackgroundJob(command, rawArgs) {
+  const job = createJob({
+    command,
+    args: rawArgsWithoutBackground(rawArgs),
+    cwd: process.cwd()
+  }, process.env);
+  spawnStoredJobWorker(job);
+  writeJson({ status: "queued", jobId: job.id });
+}
+
 function runSetupOrCapabilities(command, rawArgs) {
   const args = parseArgsOrExit(rawArgs);
   if (args.help) {
@@ -333,7 +547,12 @@ function runSetupOrCapabilities(command, rawArgs) {
     return;
   }
   const preflight = antigravityPreflight(process.env, args);
-  process.stdout.write(`${JSON.stringify({ ok: preflight.ok, provider: preflight }, null, 2)}\n`);
+  const diagnostics = antigravityModelDiagnostics(process.env, args);
+  const payload = { ok: preflight.ok, provider: preflight, modelCatalog: diagnostics.modelCatalog };
+  if (command === "capabilities") {
+    payload.commands = USER_VISIBLE_COMMANDS;
+  }
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(command === "setup" ? 0 : (preflight.ok ? 0 : 1));
 }
 
@@ -343,15 +562,294 @@ function runReview(kind, rawArgs) {
     process.stdout.write(usage(kind));
     return;
   }
-  const result = antigravityPrint(promptFor(kind, args), args, process.env);
+  if (args.background) {
+    return queueBackgroundJob(kind, rawArgs);
+  }
+  const preflight = antigravityPreflight(process.env, args);
+  if (!preflight.ok) {
+    process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
+    process.exit(2);
+  }
+  const startedAt = new Date().toISOString();
+  let prompt = templatePromptFor(kind, args, preflight);
+  if (args.structured || args.json) {
+    prompt = appendStructuredReviewInstructions(prompt);
+  }
+  const result = antigravityPrint(prompt, { ...args, preflight }, process.env);
+  const endedAt = new Date().toISOString();
   if (result.status !== 0) {
     process.stderr.write(`${result.stderr || result.error || "Antigravity review failed."}\n`);
     process.exit(result.status);
+  }
+  let parsed;
+  if (args.structured || args.json) {
+    try {
+      parsed = validateStructuredReview(extractJsonObject(result.stdout));
+    } catch (error) {
+      process.stderr.write(`Structured review output invalid: ${error.message || String(error)}\n`);
+      process.exit(1);
+    }
+  }
+  try {
+    writeOperationReport(process.cwd(), operationReport({ command: kind, args, result, startedAt, endedAt, parsed }), process.env);
+  } catch {
+    // Report writes are best-effort and must not mask successful CLI output.
+  }
+  if (args.json) {
+    process.stdout.write(`${JSON.stringify(parsed)}\n`);
+    return;
+  }
+  if (args.structured) {
+    process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+    return;
   }
   process.stdout.write(result.stdout);
   if (!result.stdout.endsWith("\n")) {
     process.stdout.write("\n");
   }
+}
+
+function runReport(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write(usage("report"));
+    return;
+  }
+  if (!args.latest) {
+    process.stderr.write("report requires --latest.\n");
+    process.exit(2);
+  }
+  process.stdout.write(`${JSON.stringify(latestReport(process.cwd(), process.env))}\n`);
+}
+
+function runRoles(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write(usage("roles"));
+    return;
+  }
+  process.stdout.write(`${JSON.stringify({ roles: REVIEW_ROLES, packs: BUILT_IN_ROLE_PACKS })}\n`);
+}
+
+function requireJobId(rawArgs, command) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help || args.positional.length !== 1) {
+    process.stdout.write(`Usage: antigravity-companion.mjs ${command} <job-id>\n`);
+    process.exit(args.help ? 0 : 2);
+  }
+  return args.positional[0];
+}
+
+function runJobs(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write("Usage: antigravity-companion.mjs jobs\n");
+    return;
+  }
+  writeJson({ jobs: listJobs(process.cwd(), process.env).map(jobSummary) });
+}
+
+function runStatus(rawArgs) {
+  const jobId = requireJobId(rawArgs, "status");
+  const job = readJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  writeJson(jobSummary(job));
+}
+
+function runResult(rawArgs) {
+  const jobId = requireJobId(rawArgs, "result");
+  const job = markJobViewed(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  writeJson(jobResultPayload(job));
+}
+
+function runCancel(rawArgs) {
+  const jobId = requireJobId(rawArgs, "cancel");
+  const job = cancelJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  writeJson(jobSummary(job));
+}
+
+function runMailbox(rawArgs) {
+  const [action = "", ...rest] = rawArgs;
+  const args = parseArgsOrExit(rest);
+  if (args.help || !action) {
+    process.stdout.write(usage("mailbox"));
+    process.exit(action ? 0 : 2);
+  }
+  try {
+    if (action === "list") {
+      return writeJson(listMailboxThreads(process.cwd(), process.env));
+    }
+    if (action === "post") {
+      return writeJson(postMailboxMessage({
+        thread: args.thread,
+        message: args.message,
+        cwd: process.cwd()
+      }, process.env));
+    }
+    if (action === "show") {
+      return writeJson(showMailboxThread(args.thread, process.cwd(), process.env));
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  process.stderr.write(`Unknown mailbox action "${action}".\n`);
+  process.exit(2);
+}
+
+function runLeases(rawArgs) {
+  const [action = "", ...rest] = rawArgs;
+  const args = parseArgsOrExit(rest);
+  if (args.help || !action) {
+    process.stdout.write(usage("leases"));
+    process.exit(action ? 0 : 2);
+  }
+  try {
+    if (action === "claim") {
+      return writeJson(claimLease({
+        role: args.role,
+        ttlSeconds: args.ttlSeconds,
+        cwd: process.cwd()
+      }, process.env));
+    }
+    if (action === "list") {
+      return writeJson(listLeases(process.cwd(), process.env));
+    }
+    if (action === "release") {
+      return writeJson(releaseLease(args.id, process.cwd(), process.env));
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  process.stderr.write(`Unknown leases action "${action}".\n`);
+  process.exit(2);
+}
+
+function githubActionOptions(args, env = process.env) {
+  const modelProvider = normalizedModelProvider(args.modelProvider || env[MODEL_PROVIDER_ENV]);
+  const explicitModel =
+    args.model
+    || env[MODEL_ENV]
+    || "";
+  const selected = explicitModel ? selectedModel(env, { modelProvider, model: explicitModel }) : { modelProvider, model: "" };
+  return {
+    modelProvider: selected.modelProvider,
+    model: explicitModel ? selected.model : "",
+    releaseRef: args.ref || RELEASE_REF,
+    timeoutMinutes: args.timeoutMinutes === 0 ? undefined : args.timeoutMinutes
+  };
+}
+
+function runGithubActions(rawArgs) {
+  const [action = "", ...rest] = rawArgs;
+  const args = parseArgsOrExit(rest);
+  if (args.help || !action) {
+    process.stdout.write(usage("github-actions"));
+    process.exit(action ? 0 : 2);
+  }
+  try {
+    if (action === "render") {
+      process.stdout.write(renderWorkflow(ROOT_DIR, githubActionOptions(args)));
+      return;
+    }
+    if (action === "init") {
+      const workflow = renderWorkflow(ROOT_DIR, githubActionOptions(args));
+      const target = writeWorkflow(process.cwd(), workflow, { force: args.force });
+      return writeJson({ status: "written", path: target });
+    }
+    if (action === "validate") {
+      const target = args.workflowPath || path.join(process.cwd(), ".github", "workflows", "antigravity-for-codex-review.yml");
+      const text = fs.readFileSync(target, "utf8");
+      const validation = validateWorkflow(text);
+      writeJson(validation);
+      if (!validation.ok) {
+        process.exit(1);
+      }
+      return;
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  process.stderr.write(`Unknown github-actions action "${action}".\n`);
+  process.exit(2);
+}
+
+function runReserveJob(rawArgs) {
+  if (rawArgs.includes("--help") || rawArgs.includes("-h") || rawArgs[0] === "help" || rawArgs.length < 1) {
+    process.stdout.write("Usage: antigravity-companion.mjs reserve-job <review|adversarial-review|multi-review|plan|rescue> [args]\n");
+    process.exit(rawArgs.length < 1 ? 2 : 0);
+  }
+  const [command, ...commandArgs] = rawArgs;
+  try {
+    const job = reserveJob({ command, args: commandArgs, cwd: process.cwd() }, process.env);
+    writeJson({ status: "reserved", jobId: job.id });
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+}
+
+function runReservedJob(rawArgs) {
+  const jobId = requireJobId(rawArgs, "run-reserved-job");
+  const job = claimReservedJob(process.cwd(), jobId, process.env);
+  if (!job) {
+    process.stderr.write(`Job "${jobId}" is not reserved.\n`);
+    process.exit(2);
+  }
+  spawnStoredJobWorker(job);
+  writeJson({ status: "queued", jobId: job.id });
+}
+
+function runStoredJob(rawArgs) {
+  if (process.env.ANTIGRAVITY_INTERNAL_DISPATCH !== "1") {
+    process.stderr.write("__run-job requires internal dispatch.\n");
+    process.exit(2);
+  }
+  const jobId = requireJobId(rawArgs, "__run-job");
+  const job = readJob(jobId, process.cwd(), process.env);
+  if (!job) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  const running = markJobRunning(jobId, {
+    pid: process.pid,
+    identity: captureProcessIdentity(process.pid)
+  }, job.cwd, process.env);
+  if (!running) {
+    process.stderr.write(`Unknown job "${jobId}".\n`);
+    process.exit(1);
+  }
+  if (TERMINAL_JOB_STATUSES.has(running.status)) {
+    process.exit(0);
+  }
+
+  const result = spawnSync(process.execPath, [COMPANION_PATH, running.command, ...running.args], {
+    cwd: running.cwd,
+    env: process.env,
+    encoding: "utf8",
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: running.timeout || DEFAULT_TIMEOUT_MS,
+    killSignal: "SIGKILL"
+  });
+  finishJob(jobId, {
+    status: result.status ?? 1,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+    error: result.error ? String(result.error.message || result.error) : ""
+  }, running.cwd, process.env);
 }
 
 function runReviewGate(rawArgs) {
@@ -367,7 +865,20 @@ function runReviewGate(rawArgs) {
 
   let result;
   try {
-    result = antigravityPrint(reviewGatePrompt(args), args, process.env);
+    const preflight = antigravityPreflight(process.env, args);
+    if (!preflight.ok) {
+      warnReviewGate(`runtime unavailable; allowing stop: ${preflight.error || `missing ${preflight.missing.join(", ")}`}`);
+      return;
+    }
+    const prompt = renderCommandPrompt("review-gate", {
+      ROLE: "stop-gate",
+      ROLE_BRIEF: "Block only concrete issues that should prevent Codex from stopping.",
+      TASK: focusBlock(args),
+      GIT_CONTEXT: gitContext(),
+      MODEL_PROVIDER: preflight.modelProvider,
+      MODEL: preflight.model
+    });
+    result = antigravityPrint(prompt, { ...args, preflight }, process.env);
   } catch (error) {
     warnReviewGate(`runtime error; allowing stop: ${error.message || String(error)}`);
     return;
@@ -395,16 +906,57 @@ async function runMultiReview(rawArgs) {
     process.stdout.write(usage("multi-review"));
     return;
   }
+  if (args.background) {
+    return queueBackgroundJob("multi-review", rawArgs);
+  }
   const preflight = antigravityPreflight(process.env, args);
   if (!preflight.ok) {
     process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
     process.exit(2);
   }
-  const roles = args.roles?.length ? args.roles : ["correctness", "security", "tests", "release", "adversarial"];
+  let roles;
+  try {
+    roles = resolveRoles({ roles: args.roles, rolePack: args.rolePack });
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  const sharedGitContext = gitContext();
+  const task = focusBlock(args);
+  const advisoryLeaseIds = [];
+  if (args.useMailbox) {
+    try {
+      postMailboxMessage({
+        thread: "multi-review",
+        message: `Started Antigravity multi-review with roles: ${roles.map((role) => role.name).join(", ")}`,
+        cwd: process.cwd()
+      }, process.env);
+    } catch (error) {
+      process.stderr.write(`[antigravity-for-codex advisory] mailbox unavailable: ${error.message || String(error)}\n`);
+    }
+  }
+  if (args.advisoryLeases) {
+    for (const role of roles) {
+      try {
+        const claim = claimLease({ role: role.name, ttlSeconds: 900, cwd: process.cwd() }, process.env);
+        advisoryLeaseIds.push(claim.leaseId);
+      } catch (error) {
+        process.stderr.write(`[antigravity-for-codex advisory] lease unavailable: ${error.message || String(error)}\n`);
+        break;
+      }
+    }
+  }
   const results = await Promise.all(roles.map(async (role) => {
-    const roleArgs = { ...args, positional: [`Role: ${role}`, ...args.positional] };
-    const result = await antigravityPrintAsync(promptFor("multi-review", roleArgs), { ...roleArgs, preflight }, process.env);
-    return { role, result };
+    const prompt = renderCommandPrompt("multi-review", {
+      ROLE: role.name,
+      ROLE_BRIEF: role.brief,
+      TASK: task,
+      GIT_CONTEXT: sharedGitContext,
+      MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
+      MODEL: preflight?.model || args.model || ""
+    });
+    const result = await antigravityPrintAsync(prompt, { ...args, preflight }, process.env);
+    return { role: role.name, result };
   }));
 
   let failed = false;
@@ -414,6 +966,13 @@ async function runMultiReview(rawArgs) {
     process.stdout.write(`## ${role}\n${body || "No output."}${timeoutNote}\n\n`);
     if (result.status !== 0) {
       failed = true;
+    }
+  }
+  for (const leaseId of advisoryLeaseIds) {
+    try {
+      releaseLease(leaseId, process.cwd(), process.env);
+    } catch {
+      // Advisory leases must not affect review outcome.
     }
   }
   process.exit(failed ? 1 : 0);
@@ -431,7 +990,38 @@ function expectedSkills() {
     "antigravity-plan",
     "antigravity-rescue",
     "antigravity-review-gate",
-    "antigravity-github-actions-review"
+    "antigravity-github-actions-review",
+    "antigravity-role-packs",
+    "antigravity-status",
+    "antigravity-result",
+    "antigravity-cancel",
+    "antigravity-collaboration-loop",
+    "antigravity-mailbox",
+    "antigravity-leases"
+  ];
+}
+
+function expectedPublicCommands() {
+  return [
+    "review",
+    "adversarial-review",
+    "multi-review",
+    "plan",
+    "rescue",
+    "review-gate",
+    "real-smoke",
+    "release-check",
+    "report",
+    "roles",
+    "jobs",
+    "status",
+    "result",
+    "cancel",
+    "reserve-job",
+    "run-reserved-job",
+    "mailbox",
+    "leases",
+    "github-actions"
   ];
 }
 
@@ -452,22 +1042,138 @@ function runReleaseCheck(rawArgs) {
 
   const companion = readText("scripts/antigravity-companion.mjs");
   const runtime = readText("scripts/lib/antigravity-runtime.mjs");
+  const versionHelper = readText("scripts/lib/version.mjs");
+  const githubActions = readText("scripts/lib/github-actions.mjs");
+  const jobs = readText("scripts/lib/jobs.mjs");
+  const reports = readText("scripts/lib/reports.mjs");
+  const mailbox = readText("scripts/lib/mailbox.mjs");
+  const leases = readText("scripts/lib/leases.mjs");
+  const readme = readText("README.md");
+  const changelog = readText("CHANGELOG.md");
+  const antigravityDocs = `${readme}\n${changelog}`;
+  let naturalLanguageRoutingContract = {
+    routedModelSkills: [],
+    requiredAnchors: [],
+    requiredPolicyPhrases: [],
+    requiredMarkers: [],
+    skillMarkers: {},
+    userExamplesStart: "",
+    userExamplesEnd: "",
+    forbiddenUserExampleSubstrings: [],
+    githubActionsInitForbiddenSubstrings: [],
+    githubActionsInitForbiddenPaths: []
+  };
+  let naturalLanguageRoutingContractLoaded = false;
+  try {
+    naturalLanguageRoutingContract = JSON.parse(readText(path.join("contracts", "natural-language-routing.json")));
+    naturalLanguageRoutingContractLoaded = true;
+  } catch {
+    naturalLanguageRoutingContractLoaded = false;
+  }
+  const routedSkillDocs = (naturalLanguageRoutingContract.routedModelSkills || []).map((skillName) => ({
+    skillName,
+    text: exists(path.join("skills", skillName, "SKILL.md")) ? readText(path.join("skills", skillName, "SKILL.md")) : ""
+  }));
+  const routedSkillsHaveNaturalLanguageRouting = routedSkillDocs.every(({ text }) =>
+    (naturalLanguageRoutingContract.requiredAnchors || []).every((anchor) => text.includes(anchor))
+      && (naturalLanguageRoutingContract.requiredPolicyPhrases || []).every((phrase) => text.includes(phrase))
+      && (naturalLanguageRoutingContract.requiredMarkers || []).every((marker) => text.includes(marker))
+  );
+  const routedSkillsHaveExpectedMarkers = routedSkillDocs.every(({ skillName, text }) =>
+    ((naturalLanguageRoutingContract.skillMarkers || {})[skillName] || []).every((marker) => text.includes(marker))
+  );
+  const extractMarkdownSection = (text, startMarker, endMarker) => {
+    const start = text.indexOf(startMarker);
+    if (start === -1) {
+      return "";
+    }
+    const bodyStart = start + startMarker.length;
+    const end = text.indexOf(endMarker, bodyStart);
+    if (end === -1) {
+      return "";
+    }
+    return text.slice(bodyStart, end);
+  };
+  const routedSkillUserExamplesHideInternalFlags = routedSkillDocs.every(({ text }) => {
+    const routingStart = text.indexOf("## Natural-Language Model Routing");
+    if (routingStart === -1) {
+      return false;
+    }
+    const userExamples = extractMarkdownSection(
+      text.slice(routingStart),
+      naturalLanguageRoutingContract.userExamplesStart,
+      naturalLanguageRoutingContract.userExamplesEnd
+    );
+    return userExamples
+      && (naturalLanguageRoutingContract.forbiddenUserExampleSubstrings || []).every((forbidden) => !userExamples.includes(forbidden));
+  });
+  const repoTextIfExists = (relativePath) => {
+    try {
+      return readRepoText(relativePath);
+    } catch {
+      return "";
+    }
+  };
+  const githubActionsForbiddenPathDocs = (naturalLanguageRoutingContract.githubActionsInitForbiddenPaths || [])
+    .map((relativePath) => ({ relativePath, text: repoTextIfExists(relativePath) }));
+  const githubActionsForbiddenPathsExist = githubActionsForbiddenPathDocs.every(({ text }) => Boolean(text));
+  const githubActionsInitHidesInternalFlags = githubActionsForbiddenPathDocs
+    .every(({ text }) => {
+      return text
+        && (naturalLanguageRoutingContract.githubActionsInitForbiddenSubstrings || []).every((forbidden) => !text.includes(forbidden));
+    });
+  const marketplaceInstallDocs = [
+    readRepoText("README.md"),
+    readRepoText(path.join("docs", "README.en.md")),
+    readRepoText(path.join("docs", "README.zh-CN.md"))
+  ];
   const hooks = exists("hooks/hooks.json") ? readText("hooks/hooks.json") : "";
   const renderedWorkflow = renderWorkflow(ROOT_DIR, { releaseRef: RELEASE_REF });
   const workflowValidation = validateWorkflow(renderedWorkflow);
+  const matureCommands = expectedPublicCommands();
+  const manifestCapabilities = Array.isArray(manifest.interface?.capabilities) ? manifest.interface.capabilities : [];
+  const printHotPath = runtime.match(/export function antigravityPrintArgs[\s\S]*?export function antigravityPrint\(/)?.[0] || "";
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
     releaseCheckResult(manifest.version === PLUGIN_VERSION, "manifest-version"),
+    releaseCheckResult(versionHelper.includes(`PLUGIN_VERSION = "${manifest.version}"`), "version-helper"),
+    releaseCheckResult(readme.includes(`Version: ${PLUGIN_VERSION}`) && changelog.includes(`## ${PLUGIN_VERSION} `), "docs-version-aligned"),
+    releaseCheckResult(marketplaceInstallDocs.every((doc) => doc.includes(`--ref ${RELEASE_REF}`)), "marketplace-docs-release-ref"),
+    releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
-    releaseCheckResult(JSON.stringify(manifest).includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(manifestCapabilities.includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(githubActionsForbiddenPathsExist, "skills-natural-language-routing-paths"),
+    releaseCheckResult(
+      naturalLanguageRoutingContractLoaded
+        && routedSkillsHaveNaturalLanguageRouting
+        && routedSkillsHaveExpectedMarkers
+        && routedSkillUserExamplesHideInternalFlags
+        && githubActionsForbiddenPathsExist
+        && githubActionsInitHidesInternalFlags,
+      "skills-natural-language-routing"
+    ),
+    releaseCheckResult(antigravityDocs.includes("operational maturity for plugin-managed workflows"), "docs-maturity-boundary"),
+    releaseCheckResult(antigravityDocs.includes("does not claim Claude SDK, Gemini native-agent, or ultrareview parity"), "docs-no-unsupported-parity"),
+    releaseCheckResult(antigravityDocs.includes("Claude-through-Antigravity is an explicit Antigravity model-provider choice"), "docs-claude-through-antigravity-boundary"),
+    releaseCheckResult(antigravityDocs.includes("real smoke remains opt-in") || antigravityDocs.includes("real-smoke` is opt-in"), "docs-real-smoke-opt-in"),
+    releaseCheckResult(antigravityDocs.includes("CI runs require an authenticated `agy`"), "docs-ci-authenticated-agy"),
     releaseCheckResult(companion.includes('"real-smoke"') && companion.includes('"release-check"'), "valid-commands"),
+    releaseCheckResult(matureCommands.every((commandName) => USER_VISIBLE_COMMANDS.includes(commandName)), "all-mature-commands"),
+    releaseCheckResult(!USER_VISIBLE_COMMANDS.includes("__run-job"), "capabilities-hide-internal"),
+    releaseCheckResult(runtime.includes("GPT/OpenAI") && runtime.includes("/\\b(gpt|openai)\\b/i"), "model-policy-rejects-openai"),
     releaseCheckResult(runtime.includes("--prompt") && runtime.includes("--print-timeout"), "agy-prompt-timeout-argv"),
     releaseCheckResult(!/args\.push\(\s*["']--print["']/.test(runtime), "no-print-argv"),
     releaseCheckResult(!runtime.includes("--dangerously-skip-permissions") || runtime.includes("forbidden"), "dangerous-permission-guard"),
     releaseCheckResult(hooks.includes("ANTIGRAVITY_PLUGIN_ROOT") && hooks.includes("antigravity-review-gate.mjs"), "hooks-discovery"),
     releaseCheckResult(exists("hooks/antigravity-review-gate.mjs"), "hook-wrapper"),
+    releaseCheckResult(exists("hooks/session-lifecycle.mjs") && exists("hooks/unread-result.mjs"), "lifecycle-hooks"),
     releaseCheckResult(exists("templates/github-actions/antigravity-for-codex-review.yml"), "github-actions-template"),
     releaseCheckResult(renderedWorkflow.includes(RELEASE_REF), "github-actions-release-ref"),
+    releaseCheckResult(renderWorkflow(ROOT_DIR).includes(`--ref ${RELEASE_REF}`), "github-actions-default-ref-derived"),
+    releaseCheckResult(!printHotPath.includes("antigravityModelCatalog") && !printHotPath.includes("antigravityModelDiagnostics"), "model-catalog-not-in-hot-path"),
+    releaseCheckResult(companion.includes("antigravityModelDiagnostics") && companion.includes("modelCatalog"), "model-catalog-diagnostics"),
+    releaseCheckResult(jobs.includes("stateDirForCwd") && mailbox.includes("stateDirForCwd") && leases.includes("stateDirForCwd"), "repo-external-state"),
+    releaseCheckResult(reports.includes("stdoutBytes") && !reports.includes("stdout:"), "reports-omit-raw-output"),
     ...expectedSkills().map((skill) => releaseCheckResult(exists(path.join("skills", skill, "SKILL.md")), `skill-${skill}`)),
     ...workflowValidation.checks.map((check) => releaseCheckResult(check.ok, `workflow-${check.name}`, check.detail))
   ];
@@ -489,24 +1195,88 @@ async function runRealSmoke(rawArgs) {
   }
   const args = parseArgsOrExit(rawArgs);
   if (args.help) {
-    process.stdout.write("Usage: antigravity-companion.mjs real-smoke [--quick] [--model-provider gemini|claude] [--model <label>] [--timeout-seconds <n>]\n");
+    process.stdout.write("Usage: antigravity-companion.mjs real-smoke [--quick|--full] [--model-provider gemini|claude] [--model <label>] [--timeout-seconds <n>]\n");
     return;
   }
 
   const providers = args.modelProvider ? [args.modelProvider] : ["gemini", "claude"];
   const results = [];
+  const modelArgs = args.model ? ["--model", args.model] : [];
+  const runCommandSmoke = (provider, label, commandArgs, extraEnv = {}) => {
+    const result = spawnSync(process.execPath, [COMPANION_PATH, ...commandArgs], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        ...extraEnv,
+        ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: provider
+      },
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: args.timeout || DEFAULT_TIMEOUT_MS,
+      killSignal: "SIGKILL"
+    });
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    const ok = label === "review-gate"
+      ? (result.status ?? 1) === 0 && !result.stderr
+      : (result.status ?? 1) === 0 && output.includes("ANTIGRAVITY_FOR_CODEX_SMOKE_OK");
+    return {
+      provider,
+      label,
+      ok,
+      result: {
+        status: result.status ?? 1,
+        stdout: result.stdout || "",
+        stderr: result.stderr || "",
+        error: result.error ? String(result.error.message || result.error) : ""
+      }
+    };
+  };
   for (const provider of providers) {
+    const diagnostics = antigravityModelDiagnostics(process.env, { ...args, modelProvider: provider });
+    process.stdout.write(`INFO real-smoke ${provider} modelCatalog ${JSON.stringify(diagnostics.modelCatalog)}\n`);
     const smokeArgs = {
       ...args,
       modelProvider: provider,
       timeout: args.timeout || (args.quick ? 60 * 1000 : DEFAULT_TIMEOUT_MS)
     };
-    const result = await antigravityPrintAsync("Return exactly ANTIGRAVITY_FOR_CODEX_SMOKE_OK.", smokeArgs, process.env);
-    const ok = result.status === 0 && result.stdout.includes("ANTIGRAVITY_FOR_CODEX_SMOKE_OK");
-    results.push({ provider, ok, result });
-    process.stdout.write(`${ok ? "PASS" : "FAIL"} real-smoke ${provider}\n`);
-    if (!ok) {
-      process.stdout.write(`${result.stdout || result.stderr || result.error || "no output"}\n`);
+    if (args.full) {
+      const commandChecks = [
+        ["direct", ["review", "--model-provider", provider, ...modelArgs, "Return exactly ANTIGRAVITY_FOR_CODEX_SMOKE_OK."]],
+        ["structured", ["review", "--model-provider", provider, ...modelArgs, "--structured", "Return a valid structured review JSON and include ANTIGRAVITY_FOR_CODEX_SMOKE_OK."], {}],
+        ["multi-review", ["multi-review", "--model-provider", provider, ...modelArgs, "--roles", "correctness,security", "Include ANTIGRAVITY_FOR_CODEX_SMOKE_OK."], {}],
+        ["review-gate", ["review-gate", "--model-provider", provider, ...modelArgs], { ANTIGRAVITY_FOR_CODEX_REVIEW_GATE: "on" }]
+      ];
+      for (const [label, commandArgs, extraEnv] of commandChecks) {
+        const item = runCommandSmoke(provider, label, commandArgs, extraEnv);
+        results.push({ ...item, diagnostics });
+        process.stdout.write(`${item.ok ? "PASS" : "FAIL"} real-smoke ${provider} ${label}\n`);
+        if (!item.ok) {
+          process.stdout.write(`${item.result.stdout || item.result.stderr || item.result.error || "no output"}\n`);
+        }
+      }
+      const startedAt = new Date().toISOString();
+      const reportResult = results.find((item) => item.provider === provider && item.label === "direct")?.result || { status: 1, stdout: "", stderr: "", error: "missing direct smoke result" };
+      try {
+        writeOperationReport(process.cwd(), operationReport({
+          command: "real-smoke",
+          args: { ...smokeArgs, modelProvider: provider },
+          result: reportResult,
+          startedAt,
+          endedAt: new Date().toISOString()
+        }), process.env);
+        process.stdout.write(`PASS real-smoke ${provider} report\n`);
+      } catch (error) {
+        results.push({ provider, label: "report", ok: false, result: { status: 1, stdout: "", stderr: "", error: error.message || String(error) }, diagnostics });
+        process.stdout.write(`FAIL real-smoke ${provider} report\n${error.message || String(error)}\n`);
+      }
+    } else {
+      const result = await antigravityPrintAsync("Return exactly ANTIGRAVITY_FOR_CODEX_SMOKE_OK.", smokeArgs, process.env);
+      const ok = result.status === 0 && result.stdout.includes("ANTIGRAVITY_FOR_CODEX_SMOKE_OK");
+      results.push({ provider, label: provider, ok, result, diagnostics });
+      process.stdout.write(`${ok ? "PASS" : "FAIL"} real-smoke ${provider}\n`);
+      if (!ok) {
+        process.stdout.write(`${result.stdout || result.stderr || result.error || "no output"}\n`);
+      }
     }
   }
   if (results.some((item) => !item.ok)) {
@@ -526,6 +1296,42 @@ async function main() {
   }
   if (command === "setup" || command === "capabilities") {
     return runSetupOrCapabilities(command, rest);
+  }
+  if (command === "report") {
+    return runReport(rest);
+  }
+  if (command === "roles") {
+    return runRoles(rest);
+  }
+  if (command === "jobs") {
+    return runJobs(rest);
+  }
+  if (command === "status") {
+    return runStatus(rest);
+  }
+  if (command === "result") {
+    return runResult(rest);
+  }
+  if (command === "cancel") {
+    return runCancel(rest);
+  }
+  if (command === "mailbox") {
+    return runMailbox(rest);
+  }
+  if (command === "leases") {
+    return runLeases(rest);
+  }
+  if (command === "github-actions") {
+    return runGithubActions(rest);
+  }
+  if (command === "reserve-job") {
+    return runReserveJob(rest);
+  }
+  if (command === "run-reserved-job") {
+    return runReservedJob(rest);
+  }
+  if (command === "__run-job") {
+    return runStoredJob(rest);
   }
   if (command === "multi-review") {
     return runMultiReview(rest);
