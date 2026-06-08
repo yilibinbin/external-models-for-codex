@@ -8,12 +8,14 @@ Included plugins:
 - Gemini for Codex lets Codex call the legacy Gemini CLI (`gemini`) for Gemini-only read-only review, planning, rescue diagnosis, structured review output, and Gemini CLI-native session capability checks.
 - Antigravity for Codex lets Codex call Google Antigravity CLI (`agy`) for mature plugin-managed review workflows: read-only review, adversarial critique, planning, rescue diagnosis, multi-role review, structured reports, role packs, background jobs, mailbox/leases, lifecycle hooks, GitHub Actions workflow rendering, release checks, opt-in real smoke, and an opt-in Stop hook gate with explicit Gemini or Claude model-provider selection.
 
+Natural-language Claude routing rule: users should ask for Claude normally, for example "Use Claude for a strict multi-role release review" or "Use the strongest local Claude review." Codex maps the request to Claude for Codex quality, model, effort, backend, role, and background-job arguments. Generic strict or strong review language never selects ultrareview; ultrareview remains explicit because it may use remote/cloud execution and usage-credit billing.
+
 ## Installation
 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2

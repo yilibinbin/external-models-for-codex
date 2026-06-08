@@ -23,6 +23,31 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue
 - Preserve `workerCommand` element boundaries. If a transport forces shell execution, quote every element rather than flattening or re-tokenizing the command.
 - The parent may include `--quality strong` for deeper local Claude review without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude review.
 
+## Natural-Language Claude Routing
+
+<!--
+routing:codex-subagent-delegation
+routing:worker-command-exactly-once
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Use `subagent-command` to create the exact `workerCommand` JSON argv.
+- The child Codex subagent runs that argv exactly once from the returned `cwd`.
+- The child must not replace the plugin call with raw `claude -p`.
+- Model, effort, quality, backend, role, and background flags must be chosen by the parent before dispatch and passed through the returned worker command.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "Delegate the Claude review to a Codex subagent."
+- "Have a child Codex worker run the Claude multi-role review."
+- "Use a Codex subagent to run Claude rescue diagnosis."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Use this skill only when a parent Codex turn delegates a Claude for Codex review or rescue command to exactly one Codex child.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Child rules:
 - The child must run `workerCommand` exactly once as argv from the returned `cwd`.
 - The child must not inspect or reinterpret the repository before execution.

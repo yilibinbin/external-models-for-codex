@@ -1180,24 +1180,75 @@ def parse_skill_frontmatter(text):
     return fields
 
 
+def markdown_section_after(text, anchor, start_marker, end_marker, label):
+    anchor_index = text.find(anchor)
+    assert anchor_index >= 0, f"{anchor!r} missing from {label}"
+    start = text.find(start_marker, anchor_index)
+    assert start >= 0, f"{start_marker!r} missing from {label}"
+    body_start = start + len(start_marker)
+    end = text.find(end_marker, body_start)
+    assert end >= 0, f"{end_marker!r} missing after {start_marker!r} in {label}"
+    return text[body_start:end]
+
+
+def test_claude_skills_encode_natural_language_routing():
+    contract = json.loads((PLUGIN / "contracts" / "natural-language-routing.json").read_text(encoding="utf8"))
+
+    for skill in contract["routedClaudeSkills"]:
+        text = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf8")
+        for anchor in contract["requiredAnchors"]:
+            assert anchor in text, f"{anchor!r} missing from {skill}"
+        for phrase in contract["requiredCommonPolicyPhrases"]:
+            assert phrase in text, f"{phrase!r} missing from {skill}"
+        for phrase in contract["requiredPolicyPhrasesBySkill"].get(skill, []):
+            assert phrase in text, f"{phrase!r} missing from {skill}"
+        for marker in contract["skillMarkers"].get(skill, []):
+            assert marker in text, f"{marker!r} missing from {skill}"
+        user_examples = markdown_section_after(
+            text,
+            "## Natural-Language Claude Routing",
+            contract["userExamplesStart"],
+            contract["userExamplesEnd"],
+            skill,
+        )
+        for forbidden in contract["forbiddenUserExampleSubstrings"]:
+            assert forbidden not in user_examples, f"{forbidden!r} leaked into user examples for {skill}"
+
+
+def test_claude_docs_explain_natural_language_routing():
+    contract = json.loads((PLUGIN / "contracts" / "natural-language-routing.json").read_text(encoding="utf8"))
+
+    for relative_path, phrases in contract["docsRequiredPhrases"].items():
+        text = (ROOT / relative_path).read_text(encoding="utf8")
+        for phrase in phrases:
+            assert phrase in text, f"{phrase!r} missing from {relative_path}"
+
+
 def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.14.2"
+    assert data["version"] == "0.15.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
+    assert len(data["interface"]["defaultPrompt"]) <= 3
+    asset_paths = [
+        data["interface"]["composerIcon"],
+        data["interface"]["logo"],
+        *data["interface"]["screenshots"],
+    ]
+    assert all(path.startswith("./assets/") for path in asset_paths)
 
 
-def test_claude_manifest_version_is_0142():
+def test_claude_manifest_version_is_0150():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.14.2"
+    assert manifest["version"] == "0.15.0"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.14.2"
+    assert manifest["version"] == "0.15.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -2517,6 +2568,20 @@ def test_quality_auto_branch_scope_counts_base_diff(tmp_path):
     result, _prompt, argv = run_fake_claude_review(
         tmp_path,
         ["--quality", "auto", "--scope", "branch", "--base", "HEAD~1"],
+        commit_head=True,
+        branch_file_count=15,
+        branch_lines_per_file=100,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_quality_auto_default_scope_counts_base_diff(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "auto", "--base", "HEAD~1"],
         commit_head=True,
         branch_file_count=15,
         branch_lines_per_file=100,
@@ -4496,7 +4561,7 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
-def test_release_check_knows_claude_0142_native_assets():
+def test_release_check_knows_claude_0150_native_assets():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run(
         [NODE, str(runtime), "release-check"],
@@ -4509,7 +4574,7 @@ def test_release_check_knows_claude_0142_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.14.2"
+    assert checks["manifest-version"]["detail"] == "version=0.15.0"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -4517,6 +4582,7 @@ def test_release_check_knows_claude_0142_native_assets():
     assert "--agent-team sdk-subagents" in detail
     assert "--confirm-cost" in detail
     assert "@anthropic-ai/claude-agent-sdk" in detail
+    assert checks["manifest-defaultPrompt-limit"]["ok"] is True
     assert checks["manifest-asset-composerIcon"]["ok"] is True
     assert checks["manifest-asset-logo"]["ok"] is True
     assert checks["manifest-asset-screenshots.0"]["ok"] is True
@@ -4539,6 +4605,7 @@ def test_release_check_knows_claude_0142_native_assets():
     assert checks["read-only-no-config-dir-relocation"]["ok"] is True
     assert checks["read-only-sdk-structured-output"]["ok"] is True
     assert checks["sdk-native-structured-review-contract"]["ok"] is True
+    assert checks["skills-natural-language-routing"]["ok"] is True
 
 
 def test_release_check_knows_subagent_review_skill():
@@ -4556,6 +4623,24 @@ def test_release_check_knows_subagent_review_skill():
     assert "claude-subagent-review" in checks["skill-inventory"]["detail"]
     assert checks["skill-claude-subagent-review"]["ok"] is True
     assert checks["subagent-review-docs"]["ok"] is True
+
+
+def test_release_check_natural_language_routing_passes_for_installed_plugin_only(tmp_path):
+    installed = tmp_path / "claude-for-codex"
+    shutil.copytree(PLUGIN, installed)
+
+    result = subprocess.run(
+        [NODE, str(installed / "scripts" / "claude-companion.mjs"), "release-check", "--ci-simulate"],
+        cwd=installed,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr or result.stdout
+    payload = json.loads(result.stdout)
+    checks = {item["name"]: item for item in payload["checks"]}
+    assert checks["skills-natural-language-routing"]["ok"] is True
 
 
 def test_release_check_rejects_repo_root_subagent_example_late_in_section(tmp_path):
@@ -4647,7 +4732,11 @@ def test_release_check_remote_install_uses_requested_immutable_ref(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     fake_bin = tmp_path / "bin"
     log = tmp_path / "codex-calls.jsonl"
+    installed_plugin = tmp_path / "installed" / "claude-for-codex"
+    installed_runtime = installed_plugin / "scripts" / "claude-companion.mjs"
     fake_bin.mkdir()
+    installed_runtime.parent.mkdir(parents=True)
+    installed_runtime.write_text("#!/usr/bin/env node\n", encoding="utf8")
     fake_codex = fake_bin / "codex"
     fake_codex.write_text(
         f"""#!/usr/bin/env python3
@@ -4663,6 +4752,19 @@ if sys.argv[1:3] == ["plugin", "marketplace"] and "--ref" in sys.argv:
     raise SystemExit(0)
 if sys.argv[1:3] == ["plugin", "add"]:
     raise SystemExit(0)
+if sys.argv[1:] == ["plugin", "list", "--json"]:
+    print(json.dumps({{
+        "installed": [
+            {{
+                "pluginId": "claude-for-codex@external-models-for-codex",
+                "name": "claude-for-codex",
+                "marketplaceName": "external-models-for-codex",
+                "source": {{"source": "local", "path": {json.dumps(str(installed_plugin))}}},
+            }}
+        ],
+        "available": [],
+    }}))
+    raise SystemExit(0)
 raise SystemExit(1)
 """,
         encoding="utf8",
@@ -4672,7 +4774,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.14.2"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.15.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -4681,10 +4783,67 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.14.2"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.15.0"] in calls
+    assert ["plugin", "list", "--json"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.14.2"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.15.0"
+    assert checks["remote-install-plugin-list-schema"]["ok"] is True
+    assert checks["remote-install-plugin-list-schema"]["detail"] == f"installed root={installed_plugin}"
+
+
+def test_release_check_required_remote_install_fails_without_installed_source_path(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        """#!/usr/bin/env python3
+import json
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("codex fake")
+    raise SystemExit(0)
+if sys.argv[1:3] == ["plugin", "marketplace"] and "--ref" in sys.argv:
+    raise SystemExit(0)
+if sys.argv[1:3] == ["plugin", "add"]:
+    raise SystemExit(0)
+if sys.argv[1:] == ["plugin", "list", "--json"]:
+    print(json.dumps({
+        "installed": [
+            {
+                "pluginId": "claude-for-codex@external-models-for-codex",
+                "name": "claude-for-codex",
+                "marketplaceName": "external-models-for-codex",
+                "source": {"source": "git"},
+            }
+        ],
+        "available": [],
+    }))
+    raise SystemExit(0)
+raise SystemExit(1)
+""",
+        encoding="utf8",
+    )
+    fake_codex.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.15.0"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["remote-install-smoke"]["ok"] is True
+    assert checks["remote-install-plugin-list-schema"]["ok"] is False
+    assert checks["remote-install-plugin-list-schema"]["detail"] == "installed Claude plugin missing source.path"
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
@@ -4708,14 +4867,18 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
+    assert "codex plugin list --json" in text
+    assert "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" in text
+    assert 'node "$CLAUDE_PLUGIN_ROOT/scripts/claude-companion.mjs"' in text
+    assert "node plugins/claude-for-codex/scripts/" not in text
     assert "github.event.pull_request.base.sha" in text
     assert "fetch-depth: 0" in text
     assert "retention-days: 5" in text
     assert "github.*" not in text
     assert "/Users/fanghao" not in text
-    assert "claude-companion.mjs review --json --quality standard --scope branch" in text
+    assert 'claude-companion.mjs" review --json --quality standard --scope branch' in text
     assert "ultrareview" not in text
     assert "--quality max" not in text
 
@@ -4726,6 +4889,210 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert '"$BASE_SHA"' in text
     assert "$HEAD_REPO" in text
     assert "$BASE_REPO" in text
+
+
+def extract_claude_plugin_root_resolver_script(workflow_text):
+    match = re.search(
+        r"codex plugin list --json \| node -e '\n(?P<script>.*?)\n\s*'\n\s*\)",
+        workflow_text,
+        re.S,
+    )
+    assert match, "plugin root resolver script missing from rendered workflow"
+    return match.group("script")
+
+
+def test_github_actions_plugin_root_resolver_matches_codex_list_json_shape(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert rendered.returncode == 0, rendered.stderr
+    script = extract_claude_plugin_root_resolver_script(rendered.stdout)
+    payload = {
+        "installed": [
+            {
+                "pluginId": "claude-for-codex@external-models-for-codex",
+                "name": "claude-for-codex",
+                "marketplaceName": "external-models-for-codex",
+                "source": {"path": "/tmp/codex/plugins/claude-for-codex"},
+            }
+        ]
+    }
+    result = subprocess.run(
+        [NODE, "-e", script],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "/tmp/codex/plugins/claude-for-codex"
+
+
+def test_github_actions_plugin_root_resolver_fails_without_source_path(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert rendered.returncode == 0, rendered.stderr
+    script = extract_claude_plugin_root_resolver_script(rendered.stdout)
+    payload = {
+        "installed": [
+            {
+                "pluginId": "claude-for-codex@external-models-for-codex",
+                "name": "claude-for-codex",
+                "marketplaceName": "external-models-for-codex",
+                "source": {"source": "git"},
+            }
+        ]
+    }
+    result = subprocess.run(
+        [NODE, "-e", script],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+
+
+def test_github_actions_explicit_model_and_effort_are_forwarded_to_review_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--model", "opus", "--effort", "max"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = result.stdout
+    assert 'CLAUDE_FOR_CODEX_MODEL: "opus"' in text
+    assert 'CLAUDE_FOR_CODEX_EFFORT: "max"' in text
+    assert "CLAUDE_MODEL:" not in text
+    assert "CLAUDE_EFFORT:" not in text
+    assert "MODEL_ARGS=()" in text
+    assert 'MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")' in text
+    assert 'MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")' in text
+    assert '${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}' in text
+
+
+def test_github_actions_default_keeps_model_and_effort_empty_but_wired(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = result.stdout
+    assert 'CLAUDE_FOR_CODEX_MODEL: ""' in text
+    assert 'CLAUDE_FOR_CODEX_EFFORT: ""' in text
+    assert "CLAUDE_MODEL:" not in text
+    assert "CLAUDE_EFFORT:" not in text
+    assert "--quality standard" in text
+    assert "--quality max" not in text
+    assert 'MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")' in text
+    assert 'MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")' in text
+    assert '${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}' in text
+
+
+def test_github_actions_model_args_empty_array_is_nounset_safe(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert '${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}' in result.stdout
+
+    empty = subprocess.run(
+        [
+            "/bin/bash",
+            "-uc",
+            'MODEL_ARGS=(); argv=(node runtime --base "$BASE_SHA" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}) ; printf "%s\\n" "${argv[@]}"',
+        ],
+        env={**os.environ, "BASE_SHA": "base-sha"},
+        capture_output=True,
+        text=True,
+    )
+    assert empty.returncode == 0, empty.stderr
+    assert empty.stdout.splitlines() == ["node", "runtime", "--base", "base-sha"]
+
+    non_empty = subprocess.run(
+        [
+            "/bin/bash",
+            "-uc",
+            'MODEL_ARGS=(--model opus --effort max); argv=(node runtime --base "$BASE_SHA" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}) ; printf "%s\\n" "${argv[@]}"',
+        ],
+        env={**os.environ, "BASE_SHA": "base-sha"},
+        capture_output=True,
+        text=True,
+    )
+    assert non_empty.returncode == 0, non_empty.stderr
+    assert non_empty.stdout.splitlines() == ["node", "runtime", "--base", "base-sha", "--model", "opus", "--effort", "max"]
+
+
+def test_github_actions_rejects_invalid_effort_before_render(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--effort", "ultracode"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid --effort "ultracode"' in result.stderr
+
+
+@pytest.mark.parametrize("model", ["-inject", "opus\nbad"])
+def test_github_actions_rejects_invalid_model_before_render(tmp_path, model):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--model", model],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Invalid --model value." in result.stderr
 
 
 def test_github_actions_init_write_and_force(tmp_path):
@@ -4751,7 +5118,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.14.2" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.15.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -4839,7 +5206,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.14.2", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.15.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -4932,8 +5299,14 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-template-safe"]["ok"] is True
     assert checks["github-actions-fork-safe"]["ok"] is True
     assert checks["github-actions-immutable-ref"]["ok"] is True
+    assert checks["github-actions-plugin-root-resolved"]["ok"] is True
+    assert checks["github-actions-no-repo-relative-runtime-path"]["ok"] is True
     assert checks["github-actions-current-release-ref"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.14.2"
+    assert checks["github-actions-model-effort-array"]["ok"] is True
+    assert checks["github-actions-model-env-forwarded"]["ok"] is True
+    assert checks["github-actions-effort-env-forwarded"]["ok"] is True
+    assert checks["github-actions-model-effort-quoted"]["ok"] is True
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.15.0"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):

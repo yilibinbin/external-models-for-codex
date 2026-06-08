@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.15.0 - 2026-06-09
+
+### Added
+
+- Add contract-backed natural-language Claude routing guidance across review, multi-review, adversarial review, planning, rescue, GitHub Actions, role-pack, collaboration-loop, review-gate, and Codex subagent delegation skills.
+- Add static regression tests and release-check guards that ensure routed skills keep natural-language examples free of internal model, effort, and quality flags.
+
+### Fixed
+
+- Forward explicitly configured GitHub Actions `CLAUDE_FOR_CODEX_MODEL` and `CLAUDE_FOR_CODEX_EFFORT` values into the generated Claude review command while preserving the conservative default `--quality standard`.
+- Validate `github-actions --model` and `--effort` with the same runtime allowlist used by local review commands.
+
+### Documentation
+
+- Document natural-language Claude routing, ultrareview boundaries, and immutable `0.15.0` install refs in the plugin README and marketplace docs.
+
 ## 0.14.2 - 2026-06-08
 
 ### Added

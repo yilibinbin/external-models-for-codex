@@ -23,8 +23,8 @@ jobs:
       HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
       BASE_REPO: ${{ github.repository }}
       IS_FORK: ${{ github.event.pull_request.head.repo.fork }}
-      CLAUDE_MODEL: "{{MODEL}}"
-      CLAUDE_EFFORT: "{{EFFORT}}"
+      CLAUDE_FOR_CODEX_MODEL: "{{MODEL}}"
+      CLAUDE_FOR_CODEX_EFFORT: "{{EFFORT}}"
     steps:
       - name: Checkout pull request
         uses: actions/checkout@v4
@@ -53,20 +53,45 @@ jobs:
           npm install -g @openai/codex
           codex plugin marketplace add yilibinbin/external-models-for-codex --ref {{RELEASE_REF}}
           codex plugin add claude-for-codex@external-models-for-codex
+          CLAUDE_PLUGIN_ROOT="$(
+            codex plugin list --json | node -e '
+              const fs = require("fs");
+              const payload = JSON.parse(fs.readFileSync(0, "utf8"));
+              const plugin = (payload.installed || []).find((item) =>
+                item.pluginId === "claude-for-codex@external-models-for-codex" ||
+                (item.name === "claude-for-codex" && item.marketplaceName === "external-models-for-codex")
+              );
+              const sourcePath = plugin && plugin.source && plugin.source.path;
+              if (!sourcePath) process.exit(1);
+              process.stdout.write(sourcePath);
+            '
+          )"
+          if [ ! -f "$CLAUDE_PLUGIN_ROOT/scripts/claude-companion.mjs" ]; then
+            echo "Unable to locate installed Claude for Codex runtime." >&2
+            exit 1
+          fi
+          echo "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" >> "$GITHUB_ENV"
 
       - name: Run Claude review
         if: steps.fork-safety.outputs.safe_to_review == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          node plugins/claude-for-codex/scripts/claude-companion.mjs {{REVIEW_COMMAND}} --json {{QUALITY_ARGS}} --scope branch --base "$BASE_SHA" {{ROLE_ARGS}} {{SEMANTIC_ARGS}} > claude-for-codex-review.json
+          MODEL_ARGS=()
+          if [ -n "${CLAUDE_FOR_CODEX_MODEL:-}" ]; then
+            MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")
+          fi
+          if [ -n "${CLAUDE_FOR_CODEX_EFFORT:-}" ]; then
+            MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")
+          fi
+          node "$CLAUDE_PLUGIN_ROOT/scripts/claude-companion.mjs" {{REVIEW_COMMAND}} --json {{QUALITY_ARGS}} --scope branch --base "$BASE_SHA" ${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"} {{ROLE_ARGS}} {{SEMANTIC_ARGS}} > claude-for-codex-review.json
 
       - name: Render review comment
         if: steps.fork-safety.outputs.safe_to_review == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions render-comment --input claude-for-codex-review.json > claude-for-codex-review.md
+          node "$CLAUDE_PLUGIN_ROOT/scripts/claude-companion.mjs" github-actions render-comment --input claude-for-codex-review.json > claude-for-codex-review.md
 
       - name: Publish PR comment
         if: steps.fork-safety.outputs.safe_to_review == 'true'

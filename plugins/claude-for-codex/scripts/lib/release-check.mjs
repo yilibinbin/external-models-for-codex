@@ -6,7 +6,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.2";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.15.0";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -94,7 +94,7 @@ function normalizedWhitespace(text) {
 
 function workflowCommandPinsStandardQuality(text) {
   const normalized = normalizedWhitespace(text);
-  return /claude-companion\.mjs\s+review\b/.test(normalized)
+  return /claude-companion\.mjs"?\s+review\b/.test(normalized)
     && /--json\b/.test(normalized)
     && /--quality\s+standard\b/.test(normalized)
     && /--scope\s+branch\b/.test(normalized);
@@ -108,16 +108,21 @@ function githubActionsDefaultsToStandardQuality(text) {
 function manifestAssetChecks(pluginRoot) {
   const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
   const iface = manifest.interface ?? {};
+  const defaultPromptCount = Array.isArray(iface.defaultPrompt) ? iface.defaultPrompt.length : 0;
   const assetSpecs = [
     ["composerIcon", iface.composerIcon],
     ["logo", iface.logo],
     ...((iface.screenshots ?? []).map((value, index) => [`screenshots.${index}`, value]))
   ];
-  return assetSpecs.map(([label, value]) => {
-    const relativePath = String(value ?? "");
-    const safeRelative = relativePath && !path.isAbsolute(relativePath) && !relativePath.split(/[\\/]/).includes("..");
-    return result(Boolean(safeRelative && fs.existsSync(path.join(pluginRoot, relativePath))), `manifest-asset-${label}`, relativePath);
-  });
+  return [
+    result(defaultPromptCount <= 3, "manifest-defaultPrompt-limit", `count=${defaultPromptCount}`),
+    ...assetSpecs.map(([label, value]) => {
+      const relativePath = String(value ?? "");
+      const safeRelative = relativePath && !path.isAbsolute(relativePath) && !relativePath.split(/[\\/]/).includes("..");
+      const codexSchemaPath = relativePath.startsWith("./");
+      return result(Boolean(codexSchemaPath && safeRelative && fs.existsSync(path.join(pluginRoot, relativePath))), `manifest-asset-${label}`, relativePath);
+    })
+  ];
 }
 
 function resolveLayout(root) {
@@ -136,15 +141,50 @@ function commandExists(name) {
   return check.status === 0;
 }
 
+function claudePluginFromCodexList(parsed) {
+  const installed = Array.isArray(parsed?.installed) ? parsed.installed : [];
+  return installed.find((plugin) => {
+    if (!plugin || typeof plugin !== "object") {
+      return false;
+    }
+    if (plugin.pluginId === "claude-for-codex@external-models-for-codex") {
+      return true;
+    }
+    return plugin.name === "claude-for-codex" && plugin.marketplaceName === "external-models-for-codex";
+  });
+}
+
+function validateCodexInstalledClaudePlugin(listStdout) {
+  let parsed;
+  try {
+    parsed = JSON.parse(listStdout);
+  } catch (error) {
+    return { ok: false, detail: `plugin list JSON parse failed: ${error.message}` };
+  }
+  const plugin = claudePluginFromCodexList(parsed);
+  if (!plugin) {
+    return { ok: false, detail: "claude-for-codex@external-models-for-codex missing from codex plugin list" };
+  }
+  const pluginRoot = plugin.source?.path;
+  if (typeof pluginRoot !== "string" || !pluginRoot) {
+    return { ok: false, detail: "installed Claude plugin missing source.path" };
+  }
+  const runtime = path.join(pluginRoot, "scripts", "claude-companion.mjs");
+  if (!fs.existsSync(runtime)) {
+    return { ok: false, detail: `installed Claude runtime missing: ${runtime}` };
+  }
+  return { ok: true, detail: `installed root=${pluginRoot}` };
+}
+
 function checkManifest(root) {
   const { pluginRoot } = resolveLayout(root);
   const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.14.2", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.14.2"), "changelog-version", "CHANGELOG contains 0.14.2"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.14.2`"), "readme-current-version", "README current version is 0.14.2"),
+    result(manifest.version === "0.15.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.15.0"), "changelog-version", "CHANGELOG contains 0.15.0"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.15.0`"), "readme-current-version", "README current version is 0.15.0"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -243,9 +283,9 @@ function checkNativeReleaseAssets(root) {
   const docsJoined = docs.join("\n");
   const docsOk = docs.every((text) => requiredDocMarkers.every((marker) => text.includes(marker)));
   const nativeOptInDocsOk = docs.every((text) => text.includes("--backend sdk --agent-team sdk-subagents"));
-  const defaultCliDocsOk = docsJoined.includes("CLI mode remains the default") && docsJoined.includes("CLI remains the default backend");
+  const defaultCliDocsOk = docsJoined.includes("CLI mode remains the default backend");
   const ultrareviewConsentDocsOk = docsJoined.includes("--confirm-cost") && docsJoined.includes("CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1");
-  const ultrareviewNotDefaultDocsOk = docsJoined.includes("not used by hooks or default review paths") && docsJoined.includes("never used by hooks or default review paths");
+  const ultrareviewNotDefaultDocsOk = docsJoined.includes("never used by hooks or default review paths");
   const detail = "claude-ultrareview; native assets/docs include --agent-team sdk-subagents, --confirm-cost, @anthropic-ai/claude-agent-sdk";
   return [
     ...manifestAssetChecks(pluginRoot),
@@ -273,7 +313,7 @@ function checkNativeReleaseAssets(root) {
     result(
       backend.includes("const backend = args.backend || env[BACKEND_ENV] || \"cli\";") &&
         companion.includes("args.agentTeam = args.agentTeam ?? \"plugin\"") &&
-        defaultWorkflow.includes("claude-companion.mjs review --json") &&
+        workflowCommandPinsStandardQuality(defaultWorkflow) &&
         !defaultWorkflow.includes("--backend sdk") &&
         !defaultWorkflow.includes("--agent-team sdk-subagents") &&
         defaultCliDocsOk,
@@ -292,7 +332,7 @@ function checkNativeReleaseAssets(root) {
     result(
       !hooks.includes("ultrareview") &&
         hookWrapper.includes("[RUNTIME, \"review-gate\"]") &&
-        defaultWorkflow.includes("claude-companion.mjs review --json") &&
+        workflowCommandPinsStandardQuality(defaultWorkflow) &&
         !defaultWorkflow.includes("ultrareview") &&
         ultrareviewNotDefaultDocsOk,
       "ultrareview-not-hook-default",
@@ -488,6 +528,73 @@ function checkSubagentReviewDocs(root) {
   ];
 }
 
+function readRoutingContract(pluginRoot) {
+  try {
+    return {
+      loaded: true,
+      value: readJson(path.join(pluginRoot, "contracts", "natural-language-routing.json"))
+    };
+  } catch (error) {
+    return {
+      loaded: false,
+      value: {},
+      error: error.message || String(error)
+    };
+  }
+}
+
+function markdownSectionBetween(text, anchor, startMarker, endMarker) {
+  const anchorIndex = text.indexOf(anchor);
+  if (anchorIndex === -1) return "";
+  const start = text.indexOf(startMarker, anchorIndex);
+  if (start === -1) return "";
+  const bodyStart = start + startMarker.length;
+  const end = text.indexOf(endMarker, bodyStart);
+  if (end === -1) return "";
+  return text.slice(bodyStart, end);
+}
+
+function checkNaturalLanguageRouting(root) {
+  const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
+  const { loaded, value: contract, error } = readRoutingContract(pluginRoot);
+  if (!loaded) {
+    return [result(false, "skills-natural-language-routing", error)];
+  }
+  const skillChecks = [];
+  for (const skill of contract.routedClaudeSkills ?? []) {
+    const skillPath = path.join(pluginRoot, "skills", skill, "SKILL.md");
+    const text = fs.existsSync(skillPath) ? fs.readFileSync(skillPath, "utf8") : "";
+    const userExamples = markdownSectionBetween(
+      text,
+      "## Natural-Language Claude Routing",
+      contract.userExamplesStart,
+      contract.userExamplesEnd
+    );
+    const ok = Boolean(text)
+      && (contract.requiredAnchors ?? []).every((anchor) => text.includes(anchor))
+      && (contract.requiredCommonPolicyPhrases ?? []).every((phrase) => text.includes(phrase))
+      && ((contract.requiredPolicyPhrasesBySkill ?? {})[skill] ?? []).every((phrase) => text.includes(phrase))
+      && ((contract.skillMarkers ?? {})[skill] ?? []).every((marker) => text.includes(marker))
+      && Boolean(userExamples)
+      && (contract.forbiddenUserExampleSubstrings ?? []).every((forbidden) => !userExamples.includes(forbidden));
+    skillChecks.push(ok);
+  }
+  const docEntries = Object.entries(contract.docsRequiredPhrases ?? {});
+  const docChecks = docEntries.flatMap(([relativePath, phrases]) => {
+    if (installedPluginOnly && relativePath.startsWith("docs/")) {
+      return [];
+    }
+    const absolute = installedPluginOnly && relativePath === "plugins/claude-for-codex/README.md"
+      ? path.join(pluginRoot, "README.md")
+      : path.join(repoRoot, relativePath);
+    const text = fs.existsSync(absolute) ? fs.readFileSync(absolute, "utf8") : "";
+    return [Boolean(text) && phrases.every((phrase) => text.includes(phrase))];
+  });
+  return [
+    result(skillChecks.every(Boolean) && docChecks.every(Boolean), "skills-natural-language-routing")
+  ];
+}
+
 function checkGithubActionsCi(root) {
   const { pluginRoot } = resolveLayout(root);
   const defaultWorkflow = renderWorkflow(pluginRoot);
@@ -498,11 +605,17 @@ function checkGithubActionsCi(root) {
     result(validation.ok && annotationValidation.ok, "github-actions-template-safe"),
     result(validation.checks.some((check) => check.name === "github-actions-fork-safe" && check.ok), "github-actions-fork-safe"),
     result(validation.checks.some((check) => check.name === "immutable-release-ref" && check.ok), "github-actions-immutable-ref"),
+    result(validation.checks.some((check) => check.name === "plugin-root-resolved" && check.ok), "github-actions-plugin-root-resolved"),
+    result(validation.checks.some((check) => check.name === "no-repo-relative-runtime-path" && check.ok), "github-actions-no-repo-relative-runtime-path"),
     result(defaultWorkflow.includes(`--ref ${DEFAULT_RELEASE_REF}`), "github-actions-current-release-ref", DEFAULT_RELEASE_REF),
     result(defaultWorkflow.includes("ubuntu-latest") && defaultWorkflow.includes("npm install -g @openai/codex"), "github-actions-runner-sim"),
     result(!/\/Users\/fanghao/.test(defaultWorkflow), "github-actions-no-local-paths"),
     result(!defaultWorkflow.includes("pull_request_target"), "github-actions-no-pull-request-target"),
     result(defaultWorkflow.includes("BASE_SHA: ${{ github.event.pull_request.base.sha }}"), "github-actions-base-sha-env"),
+    result(defaultWorkflow.includes("MODEL_ARGS=()"), "github-actions-model-effort-array"),
+    result(defaultWorkflow.includes('MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")'), "github-actions-model-env-forwarded"),
+    result(defaultWorkflow.includes('MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")'), "github-actions-effort-env-forwarded"),
+    result(defaultWorkflow.includes('${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}'), "github-actions-model-effort-quoted"),
     result(defaultWorkflow.includes("retention-days: 5"), "github-actions-short-artifact-retention")
   ];
   return checks;
@@ -565,7 +678,25 @@ function remoteInstallSmoke(root, options) {
     encoding: "utf8",
     timeout
   });
-  return [result(install.status === 0 || !options.requireRemoteInstall, "remote-install-smoke", install.status === 0 ? `installed ref=${releaseRef}` : `skipped: ${install.stderr || install.error || "install failed"}`)];
+  if (install.status !== 0) {
+    return [result(!options.requireRemoteInstall, "remote-install-smoke", `skipped: ${install.stderr || install.error || "install failed"}`)];
+  }
+  const list = spawnSync("codex", ["plugin", "list", "--json"], {
+    env,
+    encoding: "utf8",
+    timeout
+  });
+  if (list.status !== 0) {
+    return [
+      result(true, "remote-install-smoke", `installed ref=${releaseRef}`),
+      result(!options.requireRemoteInstall, "remote-install-plugin-list-schema", `skipped: ${list.stderr || list.error || "plugin list failed"}`)
+    ];
+  }
+  const installed = validateCodexInstalledClaudePlugin(list.stdout ?? "");
+  return [
+    result(true, "remote-install-smoke", `installed ref=${releaseRef}`),
+    result(installed.ok || !options.requireRemoteInstall, "remote-install-plugin-list-schema", installed.detail)
+  ];
 }
 
 export function runReleaseCheck(root, options = {}) {
@@ -578,6 +709,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkSecrets(root),
     ...checkSkills(root),
     ...checkSubagentReviewDocs(root),
+    ...checkNaturalLanguageRouting(root),
     ...checkRolePacks(),
     ...checkMailboxLeaseSupport(root),
     ...checkPrompts(root),

@@ -34,7 +34,8 @@ const UNKNOWN_DENY_PATTERN = /^\s*Permission deny rule "([^"\r\n]{1,128})" match
 // Broad by design: ambiguous stderr that looks like model output must skip retry and fail closed.
 const MODEL_OUTPUT_METADATA_PATTERN = /\b(?:input_tokens|output_tokens|total_tokens|usage|cost|model|duration_ms)\b/i;
 const BENIGN_NON_MODEL_STDOUT_PATTERNS = Object.freeze([
-  /^Not logged in · Please run \/login\s*$/
+  /^Not logged in · Please run \/login\s*$/,
+  /^You've hit your session limit · resets .+\s*$/
 ]);
 
 export function normalizeToolName(tool) {
@@ -109,10 +110,13 @@ export function parseUnknownDenyToolFailure({ stdout = "", stderr = "" } = {}, c
   const stdoutText = String(stdout ?? "");
   const stderrText = String(stderr ?? "");
   const trimmedStdout = stdoutText.trim();
-  if (trimmedStdout && !nonModelStdoutDiagnostic(trimmedStdout)) {
+  const trimmedStderr = stderrText.trim();
+  const stdoutOnlyUnknownDeny = trimmedStdout && !trimmedStderr && UNKNOWN_DENY_PATTERN.test(trimmedStdout);
+  if (trimmedStdout && !stdoutOnlyUnknownDeny && !nonModelStdoutDiagnostic(trimmedStdout)) {
     return null;
   }
-  const boundedStderr = stderrText.slice(0, UNKNOWN_DENY_PARSE_LIMIT + 1);
+  const diagnosticText = stdoutOnlyUnknownDeny ? stdoutText : stderrText;
+  const boundedStderr = diagnosticText.slice(0, UNKNOWN_DENY_PARSE_LIMIT + 1);
   if (boundedStderr.length > UNKNOWN_DENY_PARSE_LIMIT) {
     return null;
   }

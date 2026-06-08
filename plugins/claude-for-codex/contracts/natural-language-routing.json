@@ -1,0 +1,73 @@
+{
+  "routedClaudeSkills": [
+    "claude-review",
+    "claude-adversarial-review",
+    "claude-multi-review",
+    "claude-plan",
+    "claude-rescue",
+    "claude-github-actions-review",
+    "claude-role-packs",
+    "claude-collaboration-loop",
+    "claude-review-gate",
+    "claude-subagent-review"
+  ],
+  "requiredAnchors": [
+    "## Natural-Language Claude Routing",
+    "\nUser-facing examples:",
+    "\nInternal routing procedure:"
+  ],
+  "requiredCommonPolicyPhrases": [
+    "Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.",
+    "Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation."
+  ],
+  "requiredPolicyPhrasesBySkill": {
+    "claude-review": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
+    "claude-multi-review": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
+    "claude-adversarial-review": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
+    "claude-plan": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
+    "claude-rescue": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
+    "claude-github-actions-review": ["Default generated workflows to `--quality standard` even if the local environment requests stronger manual review."],
+    "claude-role-packs": ["Keep Codex responsible for reconciling Claude output before edits."],
+    "claude-collaboration-loop": ["Keep Codex responsible for reconciling Claude output before edits."],
+    "claude-review-gate": ["Installed Stop hooks stay conservative and do not force `--quality strong`, `--quality max`, SDK backend, SDK subagents, or ultrareview."],
+    "claude-subagent-review": ["The child must not replace the plugin call with raw `claude -p`."]
+  },
+  "skillMarkers": {
+    "claude-review": ["routing:single-review"],
+    "claude-multi-review": ["routing:multi-review"],
+    "claude-adversarial-review": ["routing:adversarial-review"],
+    "claude-plan": ["routing:plan"],
+    "claude-rescue": ["routing:rescue"],
+    "claude-github-actions-review": ["routing:github-actions-review"],
+    "claude-role-packs": ["routing:role-packs"],
+    "claude-collaboration-loop": ["routing:collaboration-loop"],
+    "claude-review-gate": ["routing:review-gate"],
+    "claude-subagent-review": ["routing:codex-subagent-delegation"]
+  },
+  "userExamplesStart": "\nUser-facing examples:",
+  "userExamplesEnd": "\nInternal routing procedure:",
+  "forbiddenUserExampleSubstrings": [
+    "--quality",
+    "--model",
+    "--effort",
+    "CLAUDE_FOR_CODEX_QUALITY",
+    "CLAUDE_MODEL",
+    "CLAUDE_EFFORT",
+    "CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW"
+  ],
+  "docsRequiredPhrases": {
+    "plugins/claude-for-codex/README.md": [
+      "Users can ask for Claude in natural language",
+      "Codex maps the request to Claude for Codex quality, model, effort, backend, role, and background-job arguments",
+      "Generic strict or strong language never selects ultrareview"
+    ],
+    "docs/README.en.md": [
+      "Natural-language Claude routing rule:",
+      "Generic strict or strong review language never selects ultrareview"
+    ],
+    "docs/README.zh-CN.md": [
+      "Claude 自然语言路由规则：",
+      "普通的严格或强审阅表达不会自动选择 ultrareview"
+    ]
+  }
+}

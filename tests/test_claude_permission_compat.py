@@ -69,15 +69,18 @@ def test_unknown_deny_parser_accepts_only_pre_model_permission_failure():
       const cases = [
         parseUnknownDenyToolFailure({{stdout: "", stderr: 'Permission deny rule "MultiEdit" matches no known tool'}}),
         parseUnknownDenyToolFailure({{stdout: "", stderr: 'Permission deny rule "MultiEdit" matches no known tool — check for typos.'}}),
+        parseUnknownDenyToolFailure({{stdout: 'Permission deny rule "MultiEdit" matches no known tool — check for typos.\\n', stderr: ""}}),
         parseUnknownDenyToolFailure({{stdout: "Not logged in · Please run /login\\n", stderr: 'Permission deny rule "MultiEdit" matches no known tool — check for typos.'}}),
+        parseUnknownDenyToolFailure({{stdout: "You've hit your session limit · resets 5:50am (Asia/Shanghai)\\n", stderr: 'Permission deny rule "MultiEdit" matches no known tool — check for typos.'}}),
         parseUnknownDenyToolFailure({{stdout: "model answer", stderr: 'Permission deny rule "MultiEdit" matches no known tool'}}),
+        parseUnknownDenyToolFailure({{stdout: 'Permission deny rule "MultiEdit" matches no known tool\\nusage: input_tokens=1', stderr: ""}}),
         parseUnknownDenyToolFailure({{stdout: "", stderr: 'usage: input_tokens=1\\nPermission deny rule "MultiEdit" matches no known tool'}}),
         parseUnknownDenyToolFailure({{stdout: "", stderr: 'Permission deny rule "UnknownTool" matches no known tool'}}),
         parseUnknownDenyToolFailure({{stdout: "", stderr: 'Permission rule "MultiEdit" is not recognized'}})
       ];
       console.log(JSON.stringify(cases));
     """
-    assert json.loads(node_eval(source)) == ["MultiEdit", "MultiEdit", "MultiEdit", None, None, None, None]
+    assert json.loads(node_eval(source)) == ["MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", None, None, None, None, None]
 
 
 def test_cli_retry_omits_unknown_deny_candidate(tmp_path):
@@ -141,6 +144,55 @@ def test_cli_retry_omits_unknown_deny_candidate(tmp_path):
     assert len(set(tools_lists)) == 1
     assert len(set(allowed_lists)) == 1
     assert all("--strict-mcp-config" in args for args in invocations)
+
+
+def test_cli_retry_omits_unknown_deny_candidate_from_stdout(tmp_path):
+    fake_claude = tmp_path / "claude"
+    log_file = tmp_path / "claude-args.jsonl"
+    fake_claude.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env node
+            const fs = require("fs");
+            const args = process.argv.slice(2);
+            fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify(args) + "\\n");
+            const denyIndex = args.indexOf("--disallowedTools");
+            const deny = denyIndex >= 0 ? args[denyIndex + 1] : "";
+            if (deny.split(",").includes("MultiEdit")) {{
+              console.log('Permission deny rule "MultiEdit" matches no known tool — check for typos.');
+              process.exit(1);
+            }}
+            process.stdout.write("ALLOW\\n");
+            """
+        ),
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "node",
+            str(COMPANION),
+            "review",
+            "quick stdout permission compatibility smoke",
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "CLAUDE_CODE_PATH": str(fake_claude)},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "ALLOW" in result.stdout
+    assert 'rejected deny rule "MultiEdit"' in result.stderr
+    invocations = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    deny_lists = [
+        args[args.index("--disallowedTools") + 1]
+        for args in invocations
+        if "--disallowedTools" in args
+    ]
+    assert deny_lists == ["Edit,Write,MultiEdit,Bash", "Edit,Write,Bash"]
 
 
 def test_cli_retry_never_invokes_without_disallowed_tools(tmp_path):

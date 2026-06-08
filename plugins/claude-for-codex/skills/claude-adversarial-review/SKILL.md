@@ -1,6 +1,6 @@
 ---
 name: claude-adversarial-review
-description: Use Claude Code to challenge Codex's implementation approach, assumptions, tradeoffs, and failure modes.
+description: Use Claude Code to challenge Codex's implementation approach, assumptions, tradeoffs, failure modes, rollback paths, and removable complexity.
 ---
 
 # Claude Adversarial Review
@@ -12,6 +12,40 @@ Run:
 ```bash
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review "$ARGUMENTS"
 ```
+
+## Natural-Language Claude Routing
+
+Codex should let the user ask for Claude adversarial review in normal language. Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+
+When converting the user's request to companion invocation:
+- Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default.
+- Use this skill when the user asks Claude to challenge assumptions, rollback paths, failure modes, architecture, hidden security risk, or removable complexity.
+- Use `--parallel` only when the user asks for independent adversarial lenses or parallel skeptical agents.
+- Use `--quality strong` for strict, deep, high-risk, security-sensitive, or release-sensitive adversarial review.
+- Use `--quality max` only when the user explicitly asks for the strongest local adversarial Claude review.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+Internal invocation examples, not for users:
+- Strict adversarial pass: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review --quality strong "$ARGUMENTS"`.
+- Parallel lenses: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review --parallel "$ARGUMENTS"`.
+- Concrete lenses: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review --adversarial-lenses skeptic,architect "$ARGUMENTS"`.
+- Model, effort, quality, lenses, parallel, and background flags are added outside quoted `$ARGUMENTS`; `$ARGUMENTS` carries only natural-language focus text.
+
+<!--
+routing:adversarial-review
+routing:parallel-lenses-explicit
+-->
+
+User-facing examples:
+- "Use Claude to challenge this migration plan."
+- "Use Claude for a strict adversarial release review."
+- "Use independent Claude adversarial lenses on the rollback design."
+
+Internal routing procedure:
+- Classify the request as adversarial review when the user asks for challenge, skepticism, hidden risks, rollback concerns, simpler alternatives, or failure modes.
+- Use parallel lenses only when the user asks for independent lenses or parallel adversarial agents.
+- Preserve the skeptical focus as natural-language text.
+- Add model, effort, quality, lens, parallel, and background choices only as explicit argv tokens when the request calls for them.
 
 Background routing:
 - Foreground use runs the normal command above.

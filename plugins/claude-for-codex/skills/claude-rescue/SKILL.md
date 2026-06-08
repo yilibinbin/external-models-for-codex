@@ -13,6 +13,34 @@ Run:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" rescue "$ARGUMENTS"
 ```
 
+## Natural-Language Claude Routing
+
+<!--
+routing:rescue
+routing:write-mode-explicit
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default.
+- Use `--quality strong` for deep, strict, high-risk, migration, release, or difficult diagnosis/planning requests.
+- Use `--quality max` only when the user explicitly asks for the strongest local Claude pass.
+- If the user names a concrete Claude model or effort, pass it as explicit argv tokens outside quoted `$ARGUMENTS`.
+- Keep rescue read-only unless the user explicitly asks Claude to write or repair files.
+- Route explicit repair requests to `rescue --write`; inspect the resulting git diff before reporting success.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "Ask Claude to diagnose why this test keeps failing."
+- "Use Claude for a strict rescue diagnosis of the release blocker."
+- "Ask Claude to repair the stuck test, then inspect the diff."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Route stuck implementation, repeated test failure, confusing git state, or recovery diagnosis to `rescue`.
+- Keep the command read-only unless the user explicitly requests Claude-side repair.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Background routing:
 - Foreground use runs the normal command above.
 - If `$ARGUMENTS` contains `--background`, first run:

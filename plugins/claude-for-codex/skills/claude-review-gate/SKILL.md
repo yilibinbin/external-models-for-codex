@@ -37,6 +37,32 @@ Manual deep gate debugging:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review-gate --quality strong
 ```
 
+## Natural-Language Claude Routing
+
+<!--
+routing:review-gate
+routing:manual-gate-escalation-only
+routing:stop-hook-conservative
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Installed Stop hooks stay conservative and do not force `--quality strong`, `--quality max`, SDK backend, SDK subagents, or ultrareview.
+- Manual gate debugging may use `review-gate --quality strong` or `review-gate --quality max` only when the user explicitly asks for deeper manual gate review.
+- Gate enable/disable state is separate from model, effort, and quality routing.
+- Claude runtime failures, timeouts, invalid gate output, missing Claude, and semantic context failures remain fail-open unless Claude explicitly returns `BLOCK:`.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "Enable the Claude Stop review gate."
+- "Disable the Claude Stop review gate."
+- "Manually run a deeper Claude gate check for this repository."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Use setup for enable, disable, or status; use manual review-gate only for explicit debugging or explicit one-off gate review.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Rules:
 - The hook is opt-in. Installing the plugin does not enable blocking behavior.
 - The gate reviews current git working-tree changes, not an exact per-turn edit set.

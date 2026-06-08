@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.14.2`
+- Current version: `0.15.0`
 
 Published capabilities:
 
@@ -45,7 +45,7 @@ Safety and operating model:
 - Review commands invoke Claude Code with read-only tool permissions.
 - Read-only CLI review disables Claude Code slash commands, settings sources, and session persistence while preserving the normal Claude authentication path.
 - Read-only SDK review disables Claude Code settings, skills, hooks, plugins, and SDK session persistence while preserving the normal Claude authentication path.
-- CLI remains the default backend. The SDK backend runs only with `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk`.
+- CLI mode remains the default backend. The SDK backend runs only with `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk`.
 - Native SDK subagent teams require the SDK backend and keep the read-only Git MCP boundary.
 - Ultrareview may use remote/cloud execution and usage-credit billing; it requires `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1`.
 - Rescue is read-only by default; `rescue --write` is explicit opt-in and records git fingerprints before and after Claude runs.
@@ -67,6 +67,16 @@ Adaptive quality:
 - `ultracode` is not passed as `--effort`; current noninteractive Claude Code accepts only `low`, `medium`, `high`, `xhigh`, and `max`.
 - `claude ultrareview` remains a separate explicit command requiring `--confirm-cost` and is never used by hooks or default review paths.
 - Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks and `review-gate` remain capped to `standard` unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
+
+Natural-language Claude routing:
+
+- Users can ask for Claude in natural language. Codex maps the request to Claude for Codex quality, model, effort, backend, role, and background-job arguments.
+- Normal review requests use the existing adaptive quality policy.
+- Strict, deep, advanced, high-confidence, high-risk, release, security, migration, or difficult rescue/planning requests should route to stronger local Claude quality when the skill context supports it.
+- Requests for the strongest local Claude review route to max local quality unless the user names a concrete model or effort.
+- Requests for native Claude subagents route to SDK subagent mode only when explicitly asked.
+- Generic strict or strong language never selects ultrareview. Ultrareview remains explicit because it may use remote/cloud execution and usage-credit billing.
+- Users do not need to write internal flags in normal conversation. The skills describe the internal routing rules Codex should apply.
 
 Important routing note:
 
@@ -127,7 +137,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -227,9 +237,9 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.14.2` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.14.2` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.15.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.15.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

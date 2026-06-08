@@ -1,6 +1,6 @@
 ---
 name: claude-review
-description: Use Claude Code from Codex for a read-only code review of local git changes or a branch diff.
+description: Use Claude Code from Codex for a read-only single review of local git changes or a branch diff; strict-only review stays here unless the user asks for multiple roles, subagents, or perspectives.
 ---
 
 # Claude Review
@@ -12,6 +12,44 @@ Run:
 ```bash
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review "$ARGUMENTS"
 ```
+
+## Natural-Language Claude Routing
+
+Codex should let the user ask for Claude review in normal language. Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+
+When converting the user's request to companion invocation:
+- Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default.
+- Keep strict-only, focused, or "double check this" requests in `claude-review`; do not fan out unless the user asks for multiple roles, multiple perspectives, subagents, or a named team.
+- Use `--quality strong` for "deep", "strict", "advanced", "high-confidence", "strong Claude", or "harder local Claude" review when the user does not name a concrete model.
+- Use `--quality max` only when the user explicitly asks for the strongest local Claude review or max local effort.
+- If the user names a concrete Claude model or effort, pass it as explicit argv tokens outside quoted `$ARGUMENTS`.
+- Use `--background` for broad diffs, unclear scope, or long reviews instead of blocking the main Codex turn.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+Internal invocation examples, not for users:
+- Strict local quality: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review --quality strong "$ARGUMENTS"`.
+- Strongest local quality: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review --quality max "$ARGUMENTS"`.
+- Concrete model and effort: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review --model opus --effort xhigh "$ARGUMENTS"`.
+- Background path: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job review --background "$ARGUMENTS"`.
+- Model, effort, quality, backend, and background flags are added outside quoted `$ARGUMENTS`; `$ARGUMENTS` carries only natural-language focus text.
+
+<!--
+routing:single-review
+routing:strict-stays-single
+routing:multi-agent-to-multi-review
+routing:background-for-broad-review
+-->
+
+User-facing examples:
+- "Use Claude to review the current changes."
+- "Use Claude for a strict release-risk review."
+- "Use the strongest local Claude review for this patch."
+
+Internal routing procedure:
+- Classify the request as normal read-only review when the user asks for one Claude pass, focused review, strict review, or a second opinion.
+- If the user asks for multi-agent review, multiple perspectives, named review roles, SDK subagents, or role fan-out, use `claude-multi-review` instead.
+- Preserve the user's focus as natural-language text.
+- Add `--quality`, `--model`, `--effort`, and `--background` only as explicit argv tokens when the request calls for them.
 
 Background routing:
 - Foreground use runs the normal command above.

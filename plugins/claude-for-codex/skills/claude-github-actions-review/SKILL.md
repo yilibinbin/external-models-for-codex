@@ -25,6 +25,33 @@ Validate the generated or existing workflow:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" github-actions validate "$ARGUMENTS"
 ```
 
+## Natural-Language Claude Routing
+
+<!--
+routing:github-actions-review
+routing:github-actions-init-explicit
+routing:github-actions-quality-standard
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Use `github-actions render` for preview and `github-actions init --write` only when the user explicitly asks to create or update the workflow file.
+- Default generated workflows to `--quality standard` even if the local environment requests stronger manual review.
+- Persist concrete `--model` and `--effort` into the workflow only when the user explicitly asks for a concrete model or effort for CI.
+- Keep generic strict or strong language as review focus unless the user explicitly asks to change the workflow's model or effort.
+- Do not add `pull_request_target` unless the user explicitly asks to analyze that risk.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "Preview the Claude GitHub Actions review workflow."
+- "Create the fork-safe Claude PR review workflow."
+- "Validate the existing Claude PR review workflow."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Use render for preview, validate for checking an existing workflow, and init only when file creation or update is explicit.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Rules:
 - Default generated workflows use `pull_request`, not `pull_request_target`.
 - Fork pull requests skip Claude invocation, comments, annotations, and secret use by default.
