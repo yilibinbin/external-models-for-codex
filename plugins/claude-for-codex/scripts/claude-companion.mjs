@@ -1820,6 +1820,7 @@ function parseGithubActionsOptions(tokens) {
     roles: "correctness,security,tests",
     model: "",
     effort: "",
+    quality: "standard",
     semanticContext: "off",
     timeoutMinutes: 30,
     releaseRef: undefined,
@@ -1843,6 +1844,12 @@ function parseGithubActionsOptions(tokens) {
       index += 1;
     } else if (token === "--effort") {
       options.effort = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--quality") {
+      options.quality = readOptionValue(tokens, index, token).trim().toLowerCase();
+      if (!VALID_QUALITIES.includes(options.quality)) {
+        throw new Error(`Invalid --quality "${options.quality}". Valid values: ${VALID_QUALITIES.join(", ")}.`);
+      }
       index += 1;
     } else if (token === "--semantic-context") {
       options.semanticContext = readOptionValue(tokens, index, token);

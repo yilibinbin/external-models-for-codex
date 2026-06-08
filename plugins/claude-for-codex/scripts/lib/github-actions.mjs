@@ -52,6 +52,8 @@ export function renderWorkflow(pluginRoot, options = {}) {
   const releaseRef = options.releaseRef ?? DEFAULT_RELEASE_REF;
   const reviewCommand = multiReview ? "multi-review" : "review";
   const roleArgs = multiReview ? `--roles ${roles.join(",")}` : "";
+  const quality = options.quality ?? "standard";
+  const qualityArgs = quality ? `--quality ${escapeYamlString(quality)}` : "";
   const semanticArgs = semanticContext && semanticContext !== "off" ? `--semantic-context ${semanticContext}` : "";
   const annotationStep = annotations ? [
     "",
@@ -105,6 +107,7 @@ export function renderWorkflow(pluginRoot, options = {}) {
     .replaceAll("{{RELEASE_REF}}", releaseRef)
     .replaceAll("{{REVIEW_COMMAND}}", reviewCommand)
     .replaceAll("{{ROLE_ARGS}}", roleArgs)
+    .replaceAll("{{QUALITY_ARGS}}", qualityArgs)
     .replaceAll("{{SEMANTIC_ARGS}}", semanticArgs)
     .replaceAll("{{ANNOTATION_STEP}}", annotationStep);
 }

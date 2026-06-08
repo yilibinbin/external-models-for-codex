@@ -1109,7 +1109,7 @@ print(f"ALLOW: no blocking issue from {role}")
     return runtime, repo, capture_dir, env
 
 
-def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=None, extra_env=None):
+def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=None, extra_env=None, args=None):
     runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path, with_change=with_change)
     if extra_env:
         env.update(extra_env)
@@ -1124,7 +1124,7 @@ def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=
         assert setup.returncode == 0, setup.stderr
     input_text = json.dumps(hook_input or {"hook_event_name": "Stop", "cwd": str(repo)})
     result = subprocess.run(
-        ["node", str(runtime), "review-gate"],
+        [NODE, str(runtime), "review-gate", *(args or [])],
         cwd=repo,
         env=env,
         input=input_text,
@@ -2303,6 +2303,92 @@ def test_review_gate_rejects_default_role_pack_but_bare_gate_still_uses_default(
     assert "not gate-compatible" in rejected.stdout
 
 
+def test_review_gate_default_quality_is_conservative(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+        assert "ultrareview" not in argv
+
+
+def test_review_gate_env_quality_max_is_capped_to_standard(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_review_gate_explicit_auto_quality_is_still_capped(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        args=["--quality", "auto"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_review_gate_invalid_quality_env_fails_open_without_claude(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "ultracode"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "quality policy failed; allowing stop" in result.stderr
+    assert prompts == []
+
+
+def test_review_env_quality_max_escalates_manual_review(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_quality_flag_overrides_quality_env(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "fast", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "low"
+
+
 def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):
     result, prompts, argvs = run_fake_claude_multi_review(
         tmp_path,
@@ -2447,6 +2533,46 @@ def test_rescue_quality_auto_escalates_to_strong(tmp_path):
     assert result.returncode == 0, result.stderr
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_quality_auto_in_non_git_directory_does_not_crash(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+print("FAKE_CLAUDE_OK")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "plan", "--quality", "auto", "review non git"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads((capture_dir / "argv.json").read_text())
+    assert "--model" in argv
+    assert "--effort" in argv
 
 
 def test_multi_review_quality_auto_uses_strong_for_risky_roles(tmp_path):
@@ -4529,6 +4655,9 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "retention-days: 5" in text
     assert "github.*" not in text
     assert "/Users/fanghao" not in text
+    assert "claude-companion.mjs review --json --quality standard --scope branch" in text
+    assert "ultrareview" not in text
+    assert "--quality max" not in text
 
     run_blocks = re.findall(r"run: \|\n((?:        .+\n)+)", text)
     assert run_blocks

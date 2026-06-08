@@ -77,6 +77,34 @@ function markdownSection(text, heading) {
   return sectionLines.join("\n");
 }
 
+function sourceArrayIncludes(text, exportName, values) {
+  const match = new RegExp(`${exportName}\\s*=\\s*Object\\.freeze\\(\\s*\\[([^\\]]+)\\]\\s*\\)`).exec(text);
+  if (!match) return false;
+  const found = new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((entry) => entry[1]));
+  return values.every((value) => found.has(value));
+}
+
+function sourceHasAliasProfile(text, alias, effort) {
+  return new RegExp(`model\\s*:\\s*["']${alias}["'][\\s\\S]{0,80}effort\\s*:\\s*["']${effort}["']`).test(text);
+}
+
+function normalizedWhitespace(text) {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
+
+function workflowCommandPinsStandardQuality(text) {
+  const normalized = normalizedWhitespace(text);
+  return /claude-companion\.mjs\s+review\b/.test(normalized)
+    && /--json\b/.test(normalized)
+    && /--quality\s+standard\b/.test(normalized)
+    && /--scope\s+branch\b/.test(normalized);
+}
+
+function githubActionsDefaultsToStandardQuality(text) {
+  return /quality\s*:\s*["']standard["']/.test(text)
+    || /const\s+quality\s*=\s*options\.quality\s*\?\?\s*["']standard["']/.test(text);
+}
+
 function resolveLayout(root) {
   const repoPluginRoot = path.join(root, "plugins", "claude-for-codex");
   if (fs.existsSync(path.join(repoPluginRoot, ".codex-plugin", "plugin.json"))) {
@@ -173,6 +201,8 @@ function checkNativeReleaseAssets(root) {
   const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
   const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
+  const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
+  const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
   const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
@@ -251,6 +281,48 @@ function checkNativeReleaseAssets(root) {
         ultrareviewNotDefaultDocsOk,
       "ultrareview-not-hook-default",
       "hooks call review-gate; generated workflow calls review"
+    ),
+    result(
+      fs.existsSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs")) &&
+        sourceArrayIncludes(qualityPolicy, "VALID_QUALITIES", ["auto", "fast", "standard", "strong", "max"]) &&
+        sourceArrayIncludes(qualityPolicy, "VALID_EFFORTS", ["low", "medium", "high", "xhigh", "max"]) &&
+        companion.includes("--quality auto|fast|standard|strong|max"),
+      "quality-policy-assets",
+      "--quality auto|fast|standard|strong|max"
+    ),
+    result(
+      !qualityPolicy.includes("ultracode") &&
+        !companion.includes("--effort\", \"ultracode") &&
+        !defaultWorkflow.includes("ultracode") &&
+        !hooks.includes("ultracode"),
+      "quality-no-ultracode-effort",
+      "ultracode is not a CLI effort value"
+    ),
+    result(
+      !hooks.includes("--quality strong") &&
+        !hooks.includes("--quality max") &&
+        !hooks.includes("--backend sdk") &&
+        !hooks.includes("ultrareview") &&
+        !hookWrapper.includes("--quality strong") &&
+        !hookWrapper.includes("--quality max") &&
+        !hookWrapper.includes("ultrareview"),
+      "quality-hook-conservative",
+      "installed hooks do not force expensive quality paths"
+    ),
+    result(
+      workflowCommandPinsStandardQuality(defaultWorkflow) &&
+        githubActionsDefaultsToStandardQuality(githubActions) &&
+        !defaultWorkflow.includes("--quality max") &&
+        !defaultWorkflow.includes("ultrareview"),
+      "quality-ci-default-standard",
+      "default GitHub Actions workflow pins --quality standard"
+    ),
+    result(
+      !/claude-(opus|sonnet|haiku)-\d/i.test(qualityPolicy) &&
+        sourceHasAliasProfile(qualityPolicy, "opus", "xhigh") &&
+        sourceHasAliasProfile(qualityPolicy, "sonnet", "high"),
+      "quality-no-concrete-model-defaults",
+      "policy uses Claude Code aliases"
     )
   ];
 }
