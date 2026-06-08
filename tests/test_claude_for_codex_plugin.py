@@ -5379,7 +5379,7 @@ def test_subagent_command_materializes_backend_env_dependency(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     repo.mkdir()
-    env = os.environ.copy()
+    env = env_without("CLAUDE_FOR_CODEX_QUALITY")
     env["CLAUDE_FOR_CODEX_BACKEND"] = "sdk"
 
     result = subprocess.run(
@@ -5451,6 +5451,7 @@ def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_pat
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
 
     result = subprocess.run(
         [
@@ -5464,6 +5465,7 @@ def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_pat
             "sdk-subagents",
         ],
         cwd=repo,
+        env=env,
         capture_output=True,
         text=True,
     )
