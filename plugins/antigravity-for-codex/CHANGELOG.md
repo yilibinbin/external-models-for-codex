@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2 - 2026-06-08
+
+- Replace the Antigravity plugin logo and composer icon with a dual-tile Antigravity + Codex joint-brand design.
+- Keep existing `agy` behavior, model-provider selection, hooks, workflows, release checks, and safety boundaries unchanged.
+
 ## 0.5.1 - 2026-06-08
 
 - Refresh the Antigravity plugin logo and composer icon using the official Antigravity app arch mark as the base visual element.
