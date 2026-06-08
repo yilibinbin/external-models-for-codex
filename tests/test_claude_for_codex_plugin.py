@@ -16,7 +16,15 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
 
 
-def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None, command="review"):
+def run_fake_claude_review(
+    tmp_path,
+    args,
+    commit_head=False,
+    extra_env=None,
+    command="review",
+    branch_file_count=0,
+    branch_lines_per_file=0,
+):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -55,7 +63,10 @@ def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None, co
 
     if commit_head:
         (repo / "branch.txt").write_text("base\nbranch change\n")
-        subprocess.run(["git", "add", "branch.txt"], cwd=repo, check=True, capture_output=True, text=True)
+        for index in range(branch_file_count):
+            lines = "\n".join(f"branch {index} line {line}" for line in range(branch_lines_per_file))
+            (repo / f"branch-{index}.txt").write_text(f"base\n{lines}\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
         subprocess.run(
             ["git", "commit", "-m", "branch change"],
             cwd=repo,
@@ -94,7 +105,7 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(
-        ["node", str(runtime), command, *args],
+        [NODE, str(runtime), command, *args],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -103,6 +114,13 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     prompt = (capture_dir / "prompt.txt").read_text() if (capture_dir / "prompt.txt").exists() else ""
     argv = json.loads((capture_dir / "argv.json").read_text()) if (capture_dir / "argv.json").exists() else []
     return result, prompt, argv
+
+
+def env_without(*names):
+    env = os.environ.copy()
+    for name in names:
+        env.pop(name, None)
+    return env
 
 
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
@@ -2493,6 +2511,20 @@ def test_quality_auto_defaults_to_standard_for_small_review(tmp_path):
     assert result.returncode == 0, result.stderr
     assert argv[argv.index("--model") + 1] == "sonnet"
     assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_quality_auto_branch_scope_counts_base_diff(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "auto", "--scope", "branch", "--base", "HEAD~1"],
+        commit_head=True,
+        branch_file_count=15,
+        branch_lines_per_file=100,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
 
 
 def test_invalid_quality_exits_2_without_calling_claude(tmp_path):
@@ -5148,10 +5180,12 @@ def test_subagent_command_prints_foreground_worker_command(tmp_path):
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
     (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
 
     result = subprocess.run(
         [NODE, str(runtime), "subagent-command", "review", "--base", "main", "--path", "file.txt"],
         cwd=repo,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -5172,6 +5206,8 @@ def test_subagent_command_prints_foreground_worker_command(tmp_path):
         "file.txt",
         "--backend",
         "cli",
+        "--quality",
+        "auto",
     ]
     instructions = payload["forwardingInstructions"]
     assert "exactly one Codex subagent" in instructions
@@ -5261,10 +5297,12 @@ def test_subagent_command_normalizes_relative_parent_runtime_paths(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
 
     result = subprocess.run(
         [NODE, "claude-companion.mjs", "subagent-command", "rescue", "fix flaky test"],
         cwd=runtime.parent,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -5273,7 +5311,7 @@ def test_subagent_command_normalizes_relative_parent_runtime_paths(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["command"] == "rescue"
     assert payload["workerCommand"][1] == str(runtime.resolve())
-    assert payload["workerCommand"][2:] == ["rescue", "fix flaky test", "--backend", "cli"]
+    assert payload["workerCommand"][2:] == ["rescue", "fix flaky test", "--backend", "cli", "--quality", "auto"]
 
 
 def test_subagent_command_validates_delegated_command_not_top_level_command(tmp_path):
@@ -5354,13 +5392,42 @@ def test_subagent_command_materializes_backend_env_dependency(tmp_path):
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["workerCommand"][-2:] == ["--backend", "sdk"]
     assert payload["workerCommand"][2:] == [
         "review",
         "--scope",
         "working-tree",
         "--backend",
         "sdk",
+        "--quality",
+        "auto",
+    ]
+
+
+def test_subagent_command_materializes_quality_env_dependency(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
+    env["CLAUDE_FOR_CODEX_QUALITY"] = "strong"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["workerCommand"][2:] == [
+        "review",
+        "--scope",
+        "working-tree",
+        "--backend",
+        "cli",
+        "--quality",
+        "strong",
     ]
 
 
@@ -5411,6 +5478,8 @@ def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_pat
         "sdk",
         "--agent-team",
         "sdk-subagents",
+        "--quality",
+        "auto",
     ]
 
 

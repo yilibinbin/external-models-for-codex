@@ -33,7 +33,7 @@ Child rules:
 Background jobs:
 - For background work, the parent uses `reserve-job` through the normal review skill background route, then delegates the returned `workerCommand` to one Codex subagent.
 - Use `reserve-job` for `--background` work so the job is tracked by the plugin runtime.
-- The parent returns the job id and tells the user to retrieve results with `claude-result <job-id>`.
+- The parent returns the job id and tells the user to retrieve results with `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" result <job-id>`.
 
 Safety boundaries:
 - This skill is only for read-only review delegation through the plugin runtime.

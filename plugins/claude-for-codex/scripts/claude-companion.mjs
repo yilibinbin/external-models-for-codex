@@ -83,6 +83,7 @@ import {
   VALID_QUALITIES,
   VALID_EFFORTS,
   applyQualityPolicy,
+  assertValidQuality,
   assertSafeModelAliasOrId,
   assertValidEffort
 } from "./lib/quality-policy.mjs";
@@ -943,10 +944,13 @@ function qualityGitSignals(args) {
   }
   const paths = args.paths?.length ? args.paths : args.path ? [args.path] : [];
   const pathArgs = paths.length ? ["--", ...paths] : [];
+  const branchDiff = args.scope === "branch" && args.base
+    ? git(["diff", "--numstat", `${args.base}...HEAD`, ...pathArgs])
+    : null;
   const status = git(["status", "--short", "--untracked-files=all", ...pathArgs]);
   const staged = git(["diff", "--cached", "--numstat", ...pathArgs]);
   const unstaged = git(["diff", "--numstat", ...pathArgs]);
-  if (status.status !== 0 || staged.status !== 0 || unstaged.status !== 0) {
+  if (status.status !== 0 || staged.status !== 0 || unstaged.status !== 0 || (branchDiff && branchDiff.status !== 0)) {
     return { changedFiles: 0, diffLines: 0 };
   }
   const files = new Set();
@@ -955,7 +959,7 @@ function qualityGitSignals(args) {
     if (file) files.add(file);
   }
   let diffLines = 0;
-  for (const result of [staged, unstaged]) {
+  for (const result of [branchDiff, staged, unstaged].filter(Boolean)) {
     for (const line of result.stdout.split(/\r?\n/)) {
       const [added, deleted, file] = line.split(/\t/);
       if (file) files.add(file);
@@ -1299,6 +1303,10 @@ function hasExplicitBackendArg(args) {
   return args.some((arg) => arg === "--backend" || arg.startsWith("--backend="));
 }
 
+function hasExplicitQualityArg(args) {
+  return args.some((arg) => arg === "--quality" || arg.startsWith("--quality="));
+}
+
 function handleSubagentCommand(rawArgs) {
   const tokens = normalizeArgv(rawArgs);
   const delegatedCommand = tokens[0];
@@ -1324,6 +1332,11 @@ function handleSubagentCommand(rawArgs) {
   const materializedArgs = [...delegatedArgs];
   if (!hasExplicitBackendArg(materializedArgs)) {
     materializedArgs.push("--backend", parsed.backend);
+  }
+  if (!hasExplicitQualityArg(materializedArgs)) {
+    const source = parsed.quality !== undefined ? "--quality" : QUALITY_ENV;
+    const quality = assertValidQuality(parsed.quality ?? process.env[QUALITY_ENV] ?? "auto", source);
+    materializedArgs.push("--quality", quality);
   }
 
   return {
