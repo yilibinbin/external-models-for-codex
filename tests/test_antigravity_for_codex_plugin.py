@@ -200,9 +200,9 @@ def test_antigravity_skills_encode_natural_language_model_routing():
     assert "Natural-language routing rule: users should ask for Antigravity normally" in docs_en
     assert "Gemini is the default provider; Claude-through-Antigravity is used only when" in docs_en
     assert "Workflow generation note: `github-actions init` persists the selected provider" in docs_en
-    assert "自然语言路由规则：用户只需要正常表达" in docs_zh
-    assert "默认使用 Gemini provider；只有用户明确要求" in docs_zh
-    assert "工作流生成说明：`github-actions init` 会把所选 provider 持久化写入生成的 workflow" in docs_zh
+    assert "自然语言路由规则\uFF1A用户只需要正常表达" in docs_zh
+    assert "默认使用 Gemini provider\uFF1B只有用户明确要求" in docs_zh
+    assert "工作流生成说明\uFF1A`github-actions init` 会把所选 provider 持久化写入生成的 workflow" in docs_zh
 
 
 def test_antigravity_hooks_use_antigravity_env_names():
