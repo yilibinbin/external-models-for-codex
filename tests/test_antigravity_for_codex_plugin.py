@@ -14,7 +14,7 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.5.2"
+    assert manifest["version"] == "0.5.3"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
@@ -179,6 +179,21 @@ def test_antigravity_skills_encode_natural_language_model_routing():
         text = (ROOT / relative).read_text(encoding="utf8")
         for forbidden in contract["githubActionsInitForbiddenSubstrings"]:
             assert forbidden not in text, f"{forbidden!r} leaked into {relative}"
+
+    readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    docs_en = (ROOT / "docs" / "README.en.md").read_text(encoding="utf8")
+    docs_zh = (ROOT / "docs" / "README.zh-CN.md").read_text(encoding="utf8")
+    assert "Users can ask for Antigravity in natural language" in readme
+    assert "users do not need to write `--model-provider` or `--model`" in readme
+    assert "Treat \"strict\", \"deep\", \"advanced\", \"high-confidence\", and \"multi-agent\" as review strength" in readme
+    assert "`github-actions init` persists the selected provider into the generated workflow" in readme
+    assert "Provider-specific model defaults remain runtime-owned unless `ANTIGRAVITY_FOR_CODEX_MODEL` is explicitly set" in readme
+    assert "Natural-language routing rule: users should ask for Antigravity normally" in docs_en
+    assert "Gemini is the default provider; Claude-through-Antigravity is used only when" in docs_en
+    assert "Workflow generation note: `github-actions init` persists the selected provider" in docs_en
+    assert "自然语言路由规则：用户只需要正常表达" in docs_zh
+    assert "默认使用 Gemini provider；只有用户明确要求" in docs_zh
+    assert "工作流生成说明：`github-actions init` 会把所选 provider 持久化写入生成的 workflow" in docs_zh
 
 
 def test_antigravity_hooks_use_antigravity_env_names():
@@ -1557,6 +1572,182 @@ def test_github_actions_init_validate_and_render(tmp_path):
     assert json.loads(validate.stdout)["ok"] is True
 
 
+def test_github_actions_render_and_init_use_environment_provider(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+    env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "Claude Sonnet 4.5"
+
+    rendered = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert rendered.returncode == 0, rendered.stderr
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "claude"' in rendered.stdout
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: "Claude Sonnet 4.5"' in rendered.stdout
+
+    init = subprocess.run(
+        [NODE, str(runtime), "github-actions", "init", "--force"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert init.returncode == 0, init.stderr
+    workflow = repo / ".github" / "workflows" / "antigravity-for-codex-review.yml"
+    text = workflow.read_text(encoding="utf8")
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "claude"' in text
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: "Claude Sonnet 4.5"' in text
+
+
+def test_github_actions_rejects_invalid_environment_provider(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "openai"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "Valid values: gemini, claude" in result.stderr
+
+
+def test_github_actions_default_render_keeps_runtime_model_default(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    for name in [
+        "ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER",
+        "ANTIGRAVITY_FOR_CODEX_MODEL",
+        "ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL",
+        "ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL",
+    ]:
+        env.pop(name, None)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "gemini"' in result.stdout
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: ""' in result.stdout
+
+
+def test_github_actions_claude_provider_without_model_uses_runtime_default(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+    for name in [
+        "ANTIGRAVITY_FOR_CODEX_MODEL",
+        "ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL",
+    ]:
+        env.pop(name, None)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "claude"' in result.stdout
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: ""' in result.stdout
+
+
+def test_github_actions_provider_default_model_is_not_embedded(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+    env["ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL"] = "Claude Sonnet 4.5"
+    env.pop("ANTIGRAVITY_FOR_CODEX_MODEL", None)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "claude"' in result.stdout
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: ""' in result.stdout
+
+
+def test_github_actions_provider_default_model_is_not_validated_when_not_embedded(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "gemini"
+    env["ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL"] = "Claude Sonnet 4.5"
+    env.pop("ANTIGRAVITY_FOR_CODEX_MODEL", None)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: "gemini"' in result.stdout
+    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: ""' in result.stdout
+
+
+def test_review_gate_prompt_uses_resolved_environment_model(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "agy-argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+    agy = fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file)
+    env = companion_env(tmp_path, agy)
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+    env["ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL"] = "Claude Sonnet 4.5"
+
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
+    prompt = argv[argv.index("--prompt") + 1]
+    assert "Model provider: claude." in prompt
+    assert "Model: Claude Sonnet 4.5" in prompt
+
+
 def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     for ref in ["main", "refs/heads/main", "develop", "release/latest"]:
@@ -1602,7 +1793,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.5.2\n"
+        "# antigravity-for-codex-v0.5.3\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -1640,7 +1831,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.5.2\n"
+        "          echo --ref antigravity-for-codex-v0.5.3\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
@@ -1680,20 +1871,20 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     assert extra_checks["minimal-contents-permission"] is False
 
 
-def test_github_actions_model_is_not_interpolated_into_shell(tmp_path):
+def test_github_actions_rejects_invalid_shell_like_model(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    marker = tmp_path / "SHOULD_NOT_RUN"
     rendered = subprocess.run(
-        [NODE, str(runtime), "github-actions", "render", "--model", "$(echo SHOULD_NOT_RUN)"],
+        [NODE, str(runtime), "github-actions", "render", "--model", f"$(touch {marker})"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
     )
 
-    assert rendered.returncode == 0, rendered.stderr
-    run_section = rendered.stdout.split("run: |", 1)[1]
-    assert "$(echo SHOULD_NOT_RUN)" not in run_section
-    assert 'args+=(--model "$ANTIGRAVITY_FOR_CODEX_MODEL")' in run_section
-    assert 'ANTIGRAVITY_FOR_CODEX_MODEL: "$(echo SHOULD_NOT_RUN)"' in rendered.stdout
+    assert rendered.returncode == 2
+    assert "rejected model" in rendered.stderr
+    assert rendered.stdout == ""
+    assert not marker.exists()
 
 
 def test_render_review_comment_and_annotations_helper():
@@ -1830,6 +2021,7 @@ def test_release_check_passes():
     assert "PASS docs-version-aligned" in result.stdout
     assert "PASS marketplace-docs-release-ref" in result.stdout
     assert "PASS manifest-model-policy" in result.stdout
+    assert "PASS skills-natural-language-routing" in result.stdout
     assert "PASS agy-prompt-timeout-argv" in result.stdout
     assert "PASS no-print-argv" in result.stdout
     assert "PASS github-actions-template" in result.stdout

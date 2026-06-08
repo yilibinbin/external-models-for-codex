@@ -9,7 +9,11 @@ import {
   antigravityPreflight,
   antigravityModelDiagnostics,
   antigravityPrint,
-  antigravityPrintAsync
+  antigravityPrintAsync,
+  MODEL_PROVIDER_ENV,
+  MODEL_ENV,
+  normalizedModelProvider,
+  selectedModel
 } from "./lib/antigravity-runtime.mjs";
 import {
   cancelJob,
@@ -743,10 +747,16 @@ function runLeases(rawArgs) {
   process.exit(2);
 }
 
-function githubActionOptions(args) {
+function githubActionOptions(args, env = process.env) {
+  const modelProvider = normalizedModelProvider(args.modelProvider || env[MODEL_PROVIDER_ENV]);
+  const explicitModel =
+    args.model
+    || env[MODEL_ENV]
+    || "";
+  const selected = explicitModel ? selectedModel(env, { modelProvider, model: explicitModel }) : { modelProvider, model: "" };
   return {
-    modelProvider: args.modelProvider || "gemini",
-    model: args.model || "",
+    modelProvider: selected.modelProvider,
+    model: explicitModel ? selected.model : "",
     releaseRef: args.ref || RELEASE_REF,
     timeoutMinutes: args.timeoutMinutes === 0 ? undefined : args.timeoutMinutes
   };
@@ -865,15 +875,20 @@ function runReviewGate(rawArgs) {
 
   let result;
   try {
+    const preflight = antigravityPreflight(process.env, args);
+    if (!preflight.ok) {
+      warnReviewGate(`runtime unavailable; allowing stop: ${preflight.error || `missing ${preflight.missing.join(", ")}`}`);
+      return;
+    }
     const prompt = renderCommandPrompt("review-gate", {
       ROLE: "stop-gate",
       ROLE_BRIEF: "Block only concrete issues that should prevent Codex from stopping.",
       TASK: focusBlock(args),
       GIT_CONTEXT: gitContext(),
-      MODEL_PROVIDER: args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
-      MODEL: args.model || ""
+      MODEL_PROVIDER: preflight.modelProvider,
+      MODEL: preflight.model
     });
-    result = antigravityPrint(prompt, args, process.env);
+    result = antigravityPrint(prompt, { ...args, preflight }, process.env);
   } catch (error) {
     warnReviewGate(`runtime error; allowing stop: ${error.message || String(error)}`);
     return;
@@ -1046,6 +1061,77 @@ function runReleaseCheck(rawArgs) {
   const readme = readText("README.md");
   const changelog = readText("CHANGELOG.md");
   const antigravityDocs = `${readme}\n${changelog}`;
+  let naturalLanguageRoutingContract = {
+    routedModelSkills: [],
+    requiredAnchors: [],
+    requiredPolicyPhrases: [],
+    requiredMarkers: [],
+    skillMarkers: {},
+    userExamplesStart: "",
+    userExamplesEnd: "",
+    forbiddenUserExampleSubstrings: [],
+    githubActionsInitForbiddenSubstrings: [],
+    githubActionsInitForbiddenPaths: []
+  };
+  let naturalLanguageRoutingContractLoaded = false;
+  try {
+    naturalLanguageRoutingContract = JSON.parse(readText(path.join("contracts", "natural-language-routing.json")));
+    naturalLanguageRoutingContractLoaded = true;
+  } catch {
+    naturalLanguageRoutingContractLoaded = false;
+  }
+  const routedSkillDocs = (naturalLanguageRoutingContract.routedModelSkills || []).map((skillName) => ({
+    skillName,
+    text: exists(path.join("skills", skillName, "SKILL.md")) ? readText(path.join("skills", skillName, "SKILL.md")) : ""
+  }));
+  const routedSkillsHaveNaturalLanguageRouting = routedSkillDocs.every(({ text }) =>
+    (naturalLanguageRoutingContract.requiredAnchors || []).every((anchor) => text.includes(anchor))
+      && (naturalLanguageRoutingContract.requiredPolicyPhrases || []).every((phrase) => text.includes(phrase))
+      && (naturalLanguageRoutingContract.requiredMarkers || []).every((marker) => text.includes(marker))
+  );
+  const routedSkillsHaveExpectedMarkers = routedSkillDocs.every(({ skillName, text }) =>
+    ((naturalLanguageRoutingContract.skillMarkers || {})[skillName] || []).every((marker) => text.includes(marker))
+  );
+  const extractMarkdownSection = (text, startMarker, endMarker) => {
+    const start = text.indexOf(startMarker);
+    if (start === -1) {
+      return "";
+    }
+    const bodyStart = start + startMarker.length;
+    const end = text.indexOf(endMarker, bodyStart);
+    if (end === -1) {
+      return "";
+    }
+    return text.slice(bodyStart, end);
+  };
+  const routedSkillUserExamplesHideInternalFlags = routedSkillDocs.every(({ text }) => {
+    const routingStart = text.indexOf("## Natural-Language Model Routing");
+    if (routingStart === -1) {
+      return false;
+    }
+    const userExamples = extractMarkdownSection(
+      text.slice(routingStart),
+      naturalLanguageRoutingContract.userExamplesStart,
+      naturalLanguageRoutingContract.userExamplesEnd
+    );
+    return userExamples
+      && (naturalLanguageRoutingContract.forbiddenUserExampleSubstrings || []).every((forbidden) => !userExamples.includes(forbidden));
+  });
+  const repoTextIfExists = (relativePath) => {
+    try {
+      return readRepoText(relativePath);
+    } catch {
+      return "";
+    }
+  };
+  const githubActionsForbiddenPathDocs = (naturalLanguageRoutingContract.githubActionsInitForbiddenPaths || [])
+    .map((relativePath) => ({ relativePath, text: repoTextIfExists(relativePath) }));
+  const githubActionsForbiddenPathsExist = githubActionsForbiddenPathDocs.every(({ text }) => Boolean(text));
+  const githubActionsInitHidesInternalFlags = githubActionsForbiddenPathDocs
+    .every(({ text }) => {
+      return text
+        && (naturalLanguageRoutingContract.githubActionsInitForbiddenSubstrings || []).every((forbidden) => !text.includes(forbidden));
+    });
   const marketplaceInstallDocs = [
     readRepoText("README.md"),
     readRepoText(path.join("docs", "README.en.md")),
@@ -1066,6 +1152,15 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
     releaseCheckResult(manifestCapabilities.includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(
+      naturalLanguageRoutingContractLoaded
+        && routedSkillsHaveNaturalLanguageRouting
+        && routedSkillsHaveExpectedMarkers
+        && routedSkillUserExamplesHideInternalFlags
+        && githubActionsForbiddenPathsExist
+        && githubActionsInitHidesInternalFlags,
+      "skills-natural-language-routing"
+    ),
     releaseCheckResult(antigravityDocs.includes("operational maturity for plugin-managed workflows"), "docs-maturity-boundary"),
     releaseCheckResult(antigravityDocs.includes("does not claim Claude SDK, Gemini native-agent, or ultrareview parity"), "docs-no-unsupported-parity"),
     releaseCheckResult(antigravityDocs.includes("Claude-through-Antigravity is an explicit Antigravity model-provider choice"), "docs-claude-through-antigravity-boundary"),

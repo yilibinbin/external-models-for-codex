@@ -19,7 +19,7 @@ codex plugin add claude-for-codex@external-models-for-codex
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
 codex plugin add gemini-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.3
 codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 
@@ -78,6 +78,10 @@ Antigravity for Codex model selection:
 2. `ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=claude` explicitly selects a Claude model exposed by Antigravity.
 3. `ANTIGRAVITY_FOR_CODEX_MODEL`, `ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL`, `ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL`, and `--model` are validated against the selected provider. GPT/OpenAI labels are rejected.
 4. Claude-through-Antigravity is explicit and separate from `claude-for-codex`; it still invokes `agy`, not the Claude Code CLI or Claude SDK.
+
+Natural-language routing rule: users should ask for Antigravity normally, for example "Use Antigravity for a strict multi-role review." Codex maps the request to internal provider/model arguments. Gemini is the default provider; Claude-through-Antigravity is used only when the user explicitly asks for Claude through Antigravity.
+
+Workflow generation note: `github-actions init` persists the selected provider into the generated workflow. Use provider environment variables for workflow generation only when you intend that provider to be committed for the team; provider-specific model defaults remain runtime-owned unless `ANTIGRAVITY_FOR_CODEX_MODEL` is explicitly set.
 
 Legacy Gemini CLI resolution order:
 

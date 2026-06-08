@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.3 - 2026-06-08
+
+- Reframe Antigravity skills around natural-language model routing so users can ask for review, planning, rescue, and Claude-through-Antigravity without writing internal CLI flags.
+- Add release-check and pytest guards that preserve Gemini-default provider behavior, explicit Claude-through-Antigravity selection, and rejection of GPT/OpenAI model labels.
+- Keep existing `agy` invocation, model validation, hooks, workflows, and safety boundaries unchanged.
+
 ## 0.5.2 - 2026-06-08
 
 - Replace the Antigravity plugin logo and composer icon with a dual-tile Antigravity + Codex joint-brand design.
