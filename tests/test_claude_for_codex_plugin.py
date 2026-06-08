@@ -16,7 +16,7 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
 
 
-def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None):
+def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None, command="review"):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -94,7 +94,7 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(
-        ["node", str(runtime), "review", *args],
+        ["node", str(runtime), command, *args],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -103,6 +103,14 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     prompt = (capture_dir / "prompt.txt").read_text() if (capture_dir / "prompt.txt").exists() else ""
     argv = json.loads((capture_dir / "argv.json").read_text()) if (capture_dir / "argv.json").exists() else []
     return result, prompt, argv
+
+
+def run_fake_claude_plan(tmp_path, args, extra_env=None):
+    return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
+
+
+def run_fake_claude_rescue(tmp_path, args, extra_env=None):
+    return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="rescue")
 
 
 def write_semantic_provider(tmp_path, *, response=None, extra_script="", config_in_repo=None):
@@ -2320,6 +2328,125 @@ def test_multi_review_model_and_effort_apply_to_each_role(tmp_path):
     for argv in argvs:
         assert argv[argv.index("--model") + 1] == "sonnet-test"
         assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_review_quality_strong_forwards_alias_and_effort(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "strong", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+    assert "ultracode" not in argv
+    assert "ultrareview" not in argv
+
+
+def test_review_quality_max_forwards_max_effort_without_ultrareview(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert "ultrareview" not in argv
+
+
+def test_quality_preserves_explicit_model_and_effort_overrides(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--model", "sonnet", "--effort", "medium", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "medium"
+
+
+def test_quality_auto_escalates_adversarial_review(tmp_path):
+    result, _prompt, argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--quality", "auto", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_quality_auto_defaults_to_standard_for_small_review(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "auto", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_invalid_quality_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "ultracode", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid --quality "ultracode"' in result.stderr
+    assert "Valid values: auto, fast, standard, strong, max" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_invalid_effort_ultracode_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--effort", "ultracode", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid --effort "ultracode"' in result.stderr
+    assert "Valid values: low, medium, high, xhigh, max" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_quality_env_invalid_exits_2_for_manual_review(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "ultracode"},
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid CLAUDE_FOR_CODEX_QUALITY "ultracode"' in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_plan_quality_auto_defaults_to_standard(tmp_path):
+    result, _prompt, argv = run_fake_claude_plan(
+        tmp_path,
+        ["--quality", "auto", "make a plan"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_rescue_quality_auto_escalates_to_strong(tmp_path):
+    result, _prompt, argv = run_fake_claude_rescue(
+        tmp_path,
+        ["--quality", "auto", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
 
 
 def test_multi_review_scope_branch_omits_working_tree_context_in_every_prompt(tmp_path):
