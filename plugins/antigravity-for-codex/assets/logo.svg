@@ -1,27 +1,36 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">Antigravity for Codex logo</title>
-  <desc id="desc">A Codex plugin logo based on the Antigravity app arch mark with a small code badge.</desc>
+  <desc id="desc">A joint Antigravity and Codex plugin logo combining the Antigravity arch with the Codex cloud terminal mark.</desc>
   <defs>
-    <linearGradient id="antigravity-arch" x1="232" y1="720" x2="792" y2="226" gradientUnits="userSpaceOnUse">
+    <linearGradient id="antigravity-arch" x1="172" y1="720" x2="740" y2="190" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#4285F4"/>
       <stop offset=".28" stop-color="#4285F4"/>
       <stop offset=".5" stop-color="#34A853"/>
       <stop offset=".72" stop-color="#FBBC04"/>
       <stop offset="1" stop-color="#EA4335"/>
     </linearGradient>
-    <linearGradient id="badge-bg" x1="668" y1="668" x2="916" y2="916" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#111827"/>
-      <stop offset="1" stop-color="#1E293B"/>
+    <linearGradient id="codex-cloud" x1="520" y1="366" x2="842" y2="828" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B7B4FF"/>
+      <stop offset=".48" stop-color="#5A8DFF"/>
+      <stop offset="1" stop-color="#2A2DFF"/>
     </linearGradient>
-    <filter id="shadow" x="-18%" y="-18%" width="136%" height="136%">
-      <feDropShadow dx="0" dy="22" stdDeviation="24" flood-color="#111827" flood-opacity=".14"/>
+    <linearGradient id="bridge" x1="318" y1="382" x2="774" y2="718" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FBBC04"/>
+      <stop offset=".45" stop-color="#34A853"/>
+      <stop offset="1" stop-color="#5A8DFF"/>
+    </linearGradient>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="24" stdDeviation="26" flood-color="#111827" flood-opacity=".16"/>
     </filter>
   </defs>
   <rect width="1024" height="1024" rx="192" fill="#FFFFFF"/>
-  <path d="M232 716c134-98 167-284 212-413 26-74 58-120 102-120 46 0 80 49 107 126 45 130 79 311 211 407" fill="none" stroke="url(#antigravity-arch)" stroke-width="110" stroke-linecap="round" stroke-linejoin="round" filter="url(#shadow)"/>
-  <path d="M232 716c134-98 167-284 212-413 26-74 58-120 102-120 46 0 80 49 107 126 45 130 79 311 211 407" fill="none" stroke="#FFFFFF" stroke-width="18" stroke-linecap="round" opacity=".18"/>
-  <rect x="730" y="730" width="164" height="164" rx="48" fill="url(#badge-bg)" stroke="#FFFFFF" stroke-width="12"/>
-  <path d="m784 783-34 29 34 29" fill="none" stroke="#E5E7EB" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="m832 783 34 29-34 29" fill="none" stroke="#E5E7EB" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="m818 772-20 80" fill="none" stroke="#A7F3D0" stroke-width="16" stroke-linecap="round"/>
+  <path d="M174 724c128-94 160-272 203-396 28-80 66-132 118-132 54 0 94 56 122 140 43 126 78 304 207 388" fill="none" stroke="url(#antigravity-arch)" stroke-width="104" stroke-linecap="round" stroke-linejoin="round" filter="url(#soft-shadow)"/>
+  <path d="M250 724c108-86 144-223 182-332 17-49 38-76 63-76 28 0 50 32 68 85 34 100 68 224 164 302" fill="none" stroke="#FFFFFF" stroke-width="22" stroke-linecap="round" opacity=".2"/>
+  <path d="M492 514c62-45 128-60 197-47 58 11 107 39 146 84" fill="none" stroke="url(#bridge)" stroke-width="34" stroke-linecap="round" opacity=".72"/>
+  <g transform="translate(210 195) scale(.72)">
+    <path d="M796 462c-44-46-101-68-168-62-66 6-118 39-154 98-69-4-125 17-168 63-42 47-57 105-44 174 16 80 76 129 164 134h326c88-6 146-56 159-137 9-56-7-106-46-150 4-47-19-89-69-120Z" fill="url(#codex-cloud)" filter="url(#soft-shadow)"/>
+    <path d="M796 462c-44-46-101-68-168-62-66 6-118 39-154 98-69-4-125 17-168 63-42 47-57 105-44 174 16 80 76 129 164 134h326c88-6 146-56 159-137 9-56-7-106-46-150 4-47-19-89-69-120Z" fill="#FFFFFF" opacity=".1"/>
+    <path d="m478 602 50 76-50 76" fill="none" stroke="#FFFFFF" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M634 730h108" fill="none" stroke="#FFFFFF" stroke-width="46" stroke-linecap="round"/>
+  </g>
 </svg>

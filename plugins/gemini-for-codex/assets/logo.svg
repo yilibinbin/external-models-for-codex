@@ -1,33 +1,41 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">Gemini for Codex logo</title>
-  <desc id="desc">A Codex plugin logo based on the Gemini app sparkle mark with a small code badge.</desc>
+  <desc id="desc">A joint Gemini and Codex plugin logo combining the Gemini sparkle with the Codex cloud terminal mark.</desc>
   <defs>
     <clipPath id="sparkle-clip">
-      <path d="M512 118c37 155 92 246 181 307 60 41 132 67 213 87-155 37-246 92-307 181-41 60-67 132-87 213-37-155-92-246-181-307-60-41-132-67-213-87 155-37 246-92 307-181 41-60 67-132 87-213Z"/>
+      <path d="M378 150c31 132 78 210 154 262 51 35 112 57 181 74-132 31-210 78-262 154-35 51-57 112-73 181-31-132-78-210-154-262-51-35-112-57-181-73 132-31 210-78 262-154 35-51 57-112 73-182Z"/>
     </clipPath>
-    <linearGradient id="badge-bg" x1="668" y1="668" x2="916" y2="916" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#111827"/>
-      <stop offset="1" stop-color="#1E293B"/>
-    </linearGradient>
-    <filter id="color-blend" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="34"/>
+    <filter id="gemini-blend" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="30"/>
     </filter>
-    <filter id="shadow" x="-18%" y="-18%" width="136%" height="136%">
-      <feDropShadow dx="0" dy="28" stdDeviation="32" flood-color="#111827" flood-opacity=".22"/>
+    <linearGradient id="codex-cloud" x1="536" y1="292" x2="846" y2="782" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#B7B4FF"/>
+      <stop offset=".48" stop-color="#5A8DFF"/>
+      <stop offset="1" stop-color="#2A2DFF"/>
+    </linearGradient>
+    <linearGradient id="join-glow" x1="250" y1="300" x2="780" y2="730" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FBBC04"/>
+      <stop offset=".5" stop-color="#7C3AED"/>
+      <stop offset="1" stop-color="#4285F4"/>
+    </linearGradient>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="28" stdDeviation="30" flood-color="#111827" flood-opacity=".18"/>
     </filter>
   </defs>
   <rect width="1024" height="1024" rx="192" fill="#F8FAFC"/>
-  <path d="M512 118c37 155 92 246 181 307 60 41 132 67 213 87-155 37-246 92-307 181-41 60-67 132-87 213-37-155-92-246-181-307-60-41-132-67-213-87 155-37 246-92 307-181 41-60 67-132 87-213Z" fill="#4285F4" filter="url(#shadow)"/>
+  <path d="M378 150c31 132 78 210 154 262 51 35 112 57 181 74-132 31-210 78-262 154-35 51-57 112-73 181-31-132-78-210-154-262-51-35-112-57-181-73 132-31 210-78 262-154 35-51 57-112 73-182Z" fill="#4285F4" filter="url(#soft-shadow)"/>
   <g clip-path="url(#sparkle-clip)">
-    <rect x="108" y="112" width="808" height="808" fill="#4285F4"/>
-    <circle cx="510" cy="112" r="210" fill="#EA4335" filter="url(#color-blend)"/>
-    <circle cx="130" cy="512" r="260" fill="#FBBC04" filter="url(#color-blend)"/>
-    <circle cx="512" cy="848" r="300" fill="#34A853" filter="url(#color-blend)"/>
-    <circle cx="810" cy="520" r="260" fill="#4285F4" filter="url(#color-blend)"/>
-    <path d="M512 118c37 155 92 246 181 307 60 41 132 67 213 87-155 37-246 92-307 181-41 60-67 132-87 213-37-155-92-246-181-307-60-41-132-67-213-87 155-37 246-92 307-181 41-60 67-132 87-213Z" fill="#FFFFFF" opacity=".06"/>
+    <rect x="42" y="146" width="672" height="676" fill="#4285F4"/>
+    <circle cx="378" cy="146" r="178" fill="#EA4335" filter="url(#gemini-blend)"/>
+    <circle cx="66" cy="486" r="236" fill="#FBBC04" filter="url(#gemini-blend)"/>
+    <circle cx="386" cy="782" r="248" fill="#34A853" filter="url(#gemini-blend)"/>
+    <circle cx="704" cy="486" r="228" fill="#4285F4" filter="url(#gemini-blend)"/>
   </g>
-  <rect x="704" y="704" width="188" height="188" rx="54" fill="url(#badge-bg)" stroke="#FFFFFF" stroke-width="14"/>
-  <path d="m770 765-40 34 40 34" fill="none" stroke="#E5E7EB" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="m824 765 40 34-40 34" fill="none" stroke="#E5E7EB" stroke-width="21" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="m808 754-24 90" fill="none" stroke="#93C5FD" stroke-width="18" stroke-linecap="round"/>
+  <path d="M448 522c68-38 138-51 210-38 74 13 135 50 184 111" fill="none" stroke="url(#join-glow)" stroke-width="36" stroke-linecap="round" opacity=".78"/>
+  <g transform="translate(180 175) scale(.78)">
+    <path d="M802 414c-46-48-105-70-174-64-68 6-121 40-158 101-72-4-130 18-174 66-44 48-59 108-46 180 16 83 78 134 170 139h337c91-6 151-58 164-142 9-58-7-110-48-155 4-49-19-93-71-125Z" fill="url(#codex-cloud)" filter="url(#soft-shadow)"/>
+    <path d="M802 414c-46-48-105-70-174-64-68 6-121 40-158 101-72-4-130 18-174 66-44 48-59 108-46 180 16 83 78 134 170 139h337c91-6 151-58 164-142 9-58-7-110-48-155 4-49-19-93-71-125Z" fill="#FFFFFF" opacity=".1"/>
+    <path d="m470 568 54 82-54 82" fill="none" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M632 704h112" fill="none" stroke="#FFFFFF" stroke-width="48" stroke-linecap="round"/>
+  </g>
 </svg>
