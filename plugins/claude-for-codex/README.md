@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.14.1`
+- Current version: `0.14.2`
 
 Published capabilities:
 
@@ -23,6 +23,7 @@ Published capabilities:
 - Claude implementation planning for Codex to reconcile before editing.
 - Read-only Claude rescue diagnosis when Codex is stuck or validation is failing.
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
+- Adaptive `--quality auto|fast|standard|strong|max` model/effort policy using Claude Code aliases.
 - Native SDK subagent review teams with `--backend sdk --agent-team sdk-subagents`.
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Native structured output and sanitized streaming progress with `--native-structured` and `--stream-progress`.
@@ -53,6 +54,19 @@ Safety and operating model:
 - Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
 - The Stop gate reviews current git working-tree changes, not an exact previous-turn file list.
 - Generated GitHub Actions workflows use `pull_request`, avoid default `pull_request_target`, pin immutable release refs, and skip fork PR Claude/comment/annotation steps by default.
+
+Adaptive quality:
+
+- `--quality auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size.
+- `--quality fast` uses Claude Code's `sonnet` alias with low effort.
+- `--quality standard` uses `sonnet` with high effort.
+- `--quality strong` uses `opus` with xhigh effort.
+- `--quality max` uses `opus` with max effort for explicit deepest local review.
+- Explicit `--model` and `--effort` always win over `--quality`.
+- The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`, so Claude Code can map aliases to the current best available model.
+- `ultracode` is not passed as `--effort`; current noninteractive Claude Code accepts only `low`, `medium`, `high`, `xhigh`, and `max`.
+- `claude ultrareview` remains a separate explicit command requiring `--confirm-cost` and is never used by hooks or default review paths.
+- Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks and `review-gate` remain capped to `standard` unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
 
 Important routing note:
 
@@ -113,7 +127,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -213,13 +227,28 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.14.1` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.14.1` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.14.2` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.14.2` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 
 `--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
+
+## Codex subagent delegation
+
+For foreground read-only delegation, the parent Codex turn uses `subagent-command` for review commands instead of hand-building Claude invocations:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command review "$ARGUMENTS"
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command adversarial-review "$ARGUMENTS"
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command multi-review "$ARGUMENTS"
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue "$ARGUMENTS"
+```
+
+`subagent-command` prints JSON containing an absolute `workerCommand` argv array and the exact `cwd` to use. Dispatch exactly one Codex subagent to run that argv exactly once from the returned `cwd`. The child must not inspect or reinterpret the repository before execution, and must not replace the plugin call with raw `claude -p` or any other hand-built Claude CLI command.
+
+Use `reserve-job` for `--background` delegation so the plugin runtime tracks the job. `ultrareview` and every `--write` command are intentionally not delegatable.
 
 `rescue --write` requires a git repository and runs Claude Code with write permissions. The runtime writes a before/after working-tree fingerprint to stderr; Codex must inspect the resulting diff before reporting success.
 

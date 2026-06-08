@@ -1,0 +1,5 @@
+interface:
+  display_name: "Claude Subagent Review"
+  short_description: "Delegate Claude for Codex review through a safe Codex subagent command"
+  brand_color: "#4F46E5"
+  default_prompt: "Use Claude for Codex subagent review to delegate one read-only review command through the plugin runtime and report the worker exit status, stdout, and stderr."

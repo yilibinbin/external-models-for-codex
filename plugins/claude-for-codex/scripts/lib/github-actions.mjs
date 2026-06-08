@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const WORKFLOW_RELATIVE_PATH = path.join(".github", "workflows", "claude-for-codex-review.yml");
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.1";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.2";
 const DEFAULT_TIMEOUT_MINUTES = 30;
 const VALID_ROLES = new Set(["correctness", "security", "tests", "release", "adversarial", "skeptic", "architect", "minimalist"]);
 const LOCAL_PATH_PATTERN = /\/Users\/[A-Za-z0-9._/-]+|\/private\/var\/folders\/[A-Za-z0-9._/-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._\\/-]+/;
@@ -52,6 +52,8 @@ export function renderWorkflow(pluginRoot, options = {}) {
   const releaseRef = options.releaseRef ?? DEFAULT_RELEASE_REF;
   const reviewCommand = multiReview ? "multi-review" : "review";
   const roleArgs = multiReview ? `--roles ${roles.join(",")}` : "";
+  const quality = options.quality ?? "standard";
+  const qualityArgs = quality ? `--quality ${escapeYamlString(quality)}` : "";
   const semanticArgs = semanticContext && semanticContext !== "off" ? `--semantic-context ${semanticContext}` : "";
   const annotationStep = annotations ? [
     "",
@@ -105,6 +107,7 @@ export function renderWorkflow(pluginRoot, options = {}) {
     .replaceAll("{{RELEASE_REF}}", releaseRef)
     .replaceAll("{{REVIEW_COMMAND}}", reviewCommand)
     .replaceAll("{{ROLE_ARGS}}", roleArgs)
+    .replaceAll("{{QUALITY_ARGS}}", qualityArgs)
     .replaceAll("{{SEMANTIC_ARGS}}", semanticArgs)
     .replaceAll("{{ANNOTATION_STEP}}", annotationStep);
 }

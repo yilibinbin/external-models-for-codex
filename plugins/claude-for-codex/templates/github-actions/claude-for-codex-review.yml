@@ -59,7 +59,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          node plugins/claude-for-codex/scripts/claude-companion.mjs {{REVIEW_COMMAND}} --json --scope branch --base "$BASE_SHA" {{ROLE_ARGS}} {{SEMANTIC_ARGS}} > claude-for-codex-review.json
+          node plugins/claude-for-codex/scripts/claude-companion.mjs {{REVIEW_COMMAND}} --json {{QUALITY_ARGS}} --scope branch --base "$BASE_SHA" {{ROLE_ARGS}} {{SEMANTIC_ARGS}} > claude-for-codex-review.json
 
       - name: Render review comment
         if: steps.fork-safety.outputs.safe_to_review == 'true'

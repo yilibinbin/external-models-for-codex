@@ -16,7 +16,15 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
 
 
-def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None):
+def run_fake_claude_review(
+    tmp_path,
+    args,
+    commit_head=False,
+    extra_env=None,
+    command="review",
+    branch_file_count=0,
+    branch_lines_per_file=0,
+):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -55,7 +63,10 @@ def run_fake_claude_review(tmp_path, args, commit_head=False, extra_env=None):
 
     if commit_head:
         (repo / "branch.txt").write_text("base\nbranch change\n")
-        subprocess.run(["git", "add", "branch.txt"], cwd=repo, check=True, capture_output=True, text=True)
+        for index in range(branch_file_count):
+            lines = "\n".join(f"branch {index} line {line}" for line in range(branch_lines_per_file))
+            (repo / f"branch-{index}.txt").write_text(f"base\n{lines}\n")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
         subprocess.run(
             ["git", "commit", "-m", "branch change"],
             cwd=repo,
@@ -94,7 +105,7 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(
-        ["node", str(runtime), "review", *args],
+        [NODE, str(runtime), command, *args],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -103,6 +114,21 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     prompt = (capture_dir / "prompt.txt").read_text() if (capture_dir / "prompt.txt").exists() else ""
     argv = json.loads((capture_dir / "argv.json").read_text()) if (capture_dir / "argv.json").exists() else []
     return result, prompt, argv
+
+
+def env_without(*names):
+    env = os.environ.copy()
+    for name in names:
+        env.pop(name, None)
+    return env
+
+
+def run_fake_claude_plan(tmp_path, args, extra_env=None):
+    return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
+
+
+def run_fake_claude_rescue(tmp_path, args, extra_env=None):
+    return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="rescue")
 
 
 def write_semantic_provider(tmp_path, *, response=None, extra_script="", config_in_repo=None):
@@ -1101,7 +1127,7 @@ print(f"ALLOW: no blocking issue from {role}")
     return runtime, repo, capture_dir, env
 
 
-def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=None, extra_env=None):
+def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=None, extra_env=None, args=None):
     runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path, with_change=with_change)
     if extra_env:
         env.update(extra_env)
@@ -1116,7 +1142,7 @@ def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=
         assert setup.returncode == 0, setup.stderr
     input_text = json.dumps(hook_input or {"hook_event_name": "Stop", "cwd": str(repo)})
     result = subprocess.run(
-        ["node", str(runtime), "review-gate"],
+        [NODE, str(runtime), "review-gate", *(args or [])],
         cwd=repo,
         env=env,
         input=input_text,
@@ -1158,20 +1184,20 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.14.1"
+    assert data["version"] == "0.14.2"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
 
 
-def test_claude_manifest_version_is_0141():
+def test_claude_manifest_version_is_0142():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.14.1"
+    assert manifest["version"] == "0.14.2"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.14.1"
+    assert manifest["version"] == "0.14.2"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -1237,7 +1263,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job"]:
+    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job", "subagent-command"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -2295,6 +2321,110 @@ def test_review_gate_rejects_default_role_pack_but_bare_gate_still_uses_default(
     assert "not gate-compatible" in rejected.stdout
 
 
+def test_review_gate_default_quality_is_conservative(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(tmp_path)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+        assert "ultrareview" not in argv
+
+
+def test_review_gate_env_quality_max_is_capped_to_standard(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_review_gate_explicit_auto_quality_is_still_capped(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        args=["--quality", "auto"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_review_gate_explicit_max_quality_can_escalate_manual_gate(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        args=["--quality", "max"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "standard"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "opus"
+        assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_review_gate_invalid_quality_env_fails_open_without_claude(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "ultracode"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "quality policy failed; allowing stop" in result.stderr
+    assert prompts == []
+
+
+def test_review_env_quality_max_escalates_manual_review(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_quality_flag_overrides_quality_env(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "fast", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "low"
+
+
 def test_multi_review_calls_use_read_only_flags_and_prompt_last(tmp_path):
     result, prompts, argvs = run_fake_claude_multi_review(
         tmp_path,
@@ -2320,6 +2450,207 @@ def test_multi_review_model_and_effort_apply_to_each_role(tmp_path):
     for argv in argvs:
         assert argv[argv.index("--model") + 1] == "sonnet-test"
         assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_review_quality_strong_forwards_alias_and_effort(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "strong", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+    assert "ultracode" not in argv
+    assert "ultrareview" not in argv
+
+
+def test_review_quality_max_forwards_max_effort_without_ultrareview(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert {"Read", "Grep", "Glob"}.issubset(set(argv[argv.index("--tools") + 1].split(",")))
+    assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,MultiEdit,Bash"
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert "ultrareview" not in argv
+
+
+def test_quality_preserves_explicit_model_and_effort_overrides(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--model", "sonnet", "--effort", "medium", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "medium"
+
+
+def test_quality_auto_escalates_adversarial_review(tmp_path):
+    result, _prompt, argv = run_fake_claude_adversarial_review(
+        tmp_path,
+        ["--quality", "auto", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_quality_auto_defaults_to_standard_for_small_review(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "auto", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_quality_auto_branch_scope_counts_base_diff(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "auto", "--scope", "branch", "--base", "HEAD~1"],
+        commit_head=True,
+        branch_file_count=15,
+        branch_lines_per_file=100,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_invalid_quality_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "ultracode", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid --quality "ultracode"' in result.stderr
+    assert "Valid values: auto, fast, standard, strong, max" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_invalid_effort_ultracode_exits_2_without_calling_claude(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--effort", "ultracode", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid --effort "ultracode"' in result.stderr
+    assert "Valid values: low, medium, high, xhigh, max" in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_quality_env_invalid_exits_2_for_manual_review(tmp_path):
+    result, prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "ultracode"},
+    )
+
+    assert result.returncode == 2
+    assert 'Invalid CLAUDE_FOR_CODEX_QUALITY "ultracode"' in result.stderr
+    assert prompt == ""
+    assert argv == []
+
+
+def test_plan_quality_auto_defaults_to_standard(tmp_path):
+    result, _prompt, argv = run_fake_claude_plan(
+        tmp_path,
+        ["--quality", "auto", "make a plan"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert argv[argv.index("--effort") + 1] == "high"
+
+
+def test_rescue_quality_auto_escalates_to_strong(tmp_path):
+    result, _prompt, argv = run_fake_claude_rescue(
+        tmp_path,
+        ["--quality", "auto", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_quality_auto_in_non_git_directory_does_not_crash(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    fake_bin = tmp_path / "bin"
+    capture_dir = tmp_path / "capture"
+    fake_bin.mkdir()
+    capture_dir.mkdir()
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import pathlib
+import sys
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+capture = pathlib.Path(os.environ["CAPTURE_DIR"])
+(capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
+print("FAKE_CLAUDE_OK")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CAPTURE_DIR"] = str(capture_dir)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "plan", "--quality", "auto", "review non git"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads((capture_dir / "argv.json").read_text())
+    assert "--model" in argv
+    assert "--effort" in argv
+
+
+def test_multi_review_quality_auto_uses_strong_for_risky_roles(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--quality", "auto", "--roles", "correctness,security,tests,release,adversarial", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(argvs) == 5
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "opus"
+        assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_multi_review_quality_fast_can_be_requested_explicitly(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--quality", "fast", "--roles", "correctness,tests", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "low"
 
 
 def test_multi_review_scope_branch_omits_working_tree_context_in_every_prompt(tmp_path):
@@ -2545,6 +2876,25 @@ def test_setup_reports_lifecycle_hook_support_and_job_commands(tmp_path):
     assert "semanticProviders" in payload["capabilities"]
     assert payload["hooks"]["manifest"] == "hooks/hooks.json"
     assert payload["hooks"]["events"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+
+
+def test_capabilities_reports_quality_policy_metadata(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    policy = payload["qualityPolicy"]
+    assert policy["defaultQualityEnv"] == "CLAUDE_FOR_CODEX_QUALITY"
+    assert policy["qualities"] == ["auto", "fast", "standard", "strong", "max"]
+    assert policy["efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    assert policy["ultracodeEffortSupported"] is False
+    assert policy["ultrareviewAutomatic"] is False
 
 
 def test_setup_reports_hooks_and_mcp_diagnostics(tmp_path):
@@ -2900,6 +3250,20 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     assert "claude-for-codex-git" in query["mcpServers"]
 
 
+def test_sdk_backend_receives_quality_resolved_model_and_effort(tmp_path):
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout="SDK_OK")
+    result, _prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--backend", "sdk", "--quality", "strong", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(sdk_entry)},
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "opus"
+    assert query["effort"] == "xhigh"
+
+
 def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -2972,7 +3336,8 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
         assert definition["tools"] == ["Read", "Grep", "Glob"]
         assert "permissionMode" not in definition
         assert definition["maxTurns"] == 4
-        assert definition["model"] == "inherit"
+        assert definition["model"] == "opus"
+        assert definition["effort"] == query["effort"]
         assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
             set(definition["disallowedTools"])
         )
@@ -2998,6 +3363,71 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     assert "sdk-session-secret" not in serialized
     assert "correctness ok" not in serialized
     assert "security ok" not in serialized
+
+
+def test_sdk_subagents_receive_quality_resolved_opus_model(tmp_path):
+    structured = {
+        "role_results": [
+            {
+                "agent": "cfc_correctness",
+                "role": "correctness",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("correctness ok"),
+                },
+            },
+            {
+                "agent": "cfc_security",
+                "role": "security",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("security ok"),
+                },
+            },
+        ]
+    }
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout=json.dumps(structured), structured_output=structured)
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "sample.txt").write_text("base\nchange\n")
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_entry)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+            "--native-structured",
+            "--json",
+            "--roles",
+            "correctness,security",
+            "--quality",
+            "strong",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "opus"
+    assert query["effort"] == "xhigh"
+    agents = query["agents"]
+    assert agents["cfc_correctness"]["model"] == "opus"
+    assert agents["cfc_security"]["model"] == "opus"
+    assert agents["cfc_correctness"]["effort"] == "xhigh"
+    assert agents["cfc_security"]["effort"] == "xhigh"
 
 
 def test_sdk_native_structured_output_passes_schema(tmp_path):
@@ -4066,7 +4496,7 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
-def test_release_check_knows_claude_0141_native_assets():
+def test_release_check_knows_claude_0142_native_assets():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run(
         [NODE, str(runtime), "release-check"],
@@ -4079,7 +4509,7 @@ def test_release_check_knows_claude_0141_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.14.1"
+    assert checks["manifest-version"]["detail"] == "version=0.14.2"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -4087,6 +4517,10 @@ def test_release_check_knows_claude_0141_native_assets():
     assert "--agent-team sdk-subagents" in detail
     assert "--confirm-cost" in detail
     assert "@anthropic-ai/claude-agent-sdk" in detail
+    assert checks["manifest-asset-composerIcon"]["ok"] is True
+    assert checks["manifest-asset-logo"]["ok"] is True
+    assert checks["manifest-asset-screenshots.0"]["ok"] is True
+    assert checks["manifest-asset-screenshots.1"]["ok"] is True
     assert checks["native-review-helper"]["ok"] is True
     assert checks["ultrareview-skill"]["ok"] is True
     assert checks["native-cli-flags"]["ok"] is True
@@ -4105,6 +4539,56 @@ def test_release_check_knows_claude_0141_native_assets():
     assert checks["read-only-no-config-dir-relocation"]["ok"] is True
     assert checks["read-only-sdk-structured-output"]["ok"] is True
     assert checks["sdk-native-structured-review-contract"]["ok"] is True
+
+
+def test_release_check_knows_subagent_review_skill():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert "claude-subagent-review" in checks["skill-inventory"]["detail"]
+    assert checks["skill-claude-subagent-review"]["ok"] is True
+    assert checks["subagent-review-docs"]["ok"] is True
+
+
+def test_release_check_rejects_repo_root_subagent_example_late_in_section(tmp_path):
+    temp_root = tmp_path / "repo"
+    temp_plugin = temp_root / "plugins" / "claude-for-codex"
+    temp_root.mkdir()
+    shutil.copy2(ROOT / "README.md", temp_root / "README.md")
+    shutil.copytree(ROOT / "docs", temp_root / "docs")
+    temp_plugin.parent.mkdir(parents=True)
+    shutil.copytree(PLUGIN, temp_plugin)
+    readme = temp_plugin / "README.md"
+    text = readme.read_text(encoding="utf8")
+    marker = 'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue "$ARGUMENTS"'
+    assert marker in text
+    readme.write_text(
+        text.replace(
+            marker,
+            f"{marker}\nnode plugins/claude-for-codex/scripts/claude-companion.mjs subagent-command review \"$ARGUMENTS\"",
+        ),
+        encoding="utf8",
+    )
+
+    result = subprocess.run(
+        [NODE, str(temp_plugin / "scripts" / "claude-companion.mjs"), "release-check"],
+        cwd=temp_root,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["subagent-review-docs"]["ok"] is False
 
 
 def test_release_check_config_dir_negative_control_fails():
@@ -4188,7 +4672,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.14.1"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.14.2"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -4197,10 +4681,10 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.14.1"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.14.2"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.14.1"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.14.2"
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
@@ -4224,13 +4708,16 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "github.event.pull_request.base.sha" in text
     assert "fetch-depth: 0" in text
     assert "retention-days: 5" in text
     assert "github.*" not in text
     assert "/Users/fanghao" not in text
+    assert "claude-companion.mjs review --json --quality standard --scope branch" in text
+    assert "ultrareview" not in text
+    assert "--quality max" not in text
 
     run_blocks = re.findall(r"run: \|\n((?:        .+\n)+)", text)
     assert run_blocks
@@ -4264,7 +4751,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.14.1" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.14.2" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -4352,7 +4839,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.14.1", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.14.2", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -4446,7 +4933,7 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-fork-safe"]["ok"] is True
     assert checks["github-actions-immutable-ref"]["ok"] is True
     assert checks["github-actions-current-release-ref"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.14.1"
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.14.2"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
@@ -4675,6 +5162,327 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert str(runtime) in payload["workerCommand"]
     assert "run-reserved-job" in payload["workerCommand"]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+
+
+def node_exec_path():
+    result = subprocess.run(
+        [NODE, "-e", "process.stdout.write(process.execPath)"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout
+
+
+def test_subagent_command_prints_foreground_worker_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--base", "main", "--path", "file.txt"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["mode"] == "foreground"
+    assert payload["command"] == "review"
+    assert payload["cwd"] == str(repo)
+    assert payload["workerCommand"] == [
+        node_exec_path(),
+        str(runtime.resolve()),
+        "review",
+        "--base",
+        "main",
+        "--path",
+        "file.txt",
+        "--backend",
+        "cli",
+        "--quality",
+        "auto",
+    ]
+    instructions = payload["forwardingInstructions"]
+    assert "exactly one Codex subagent" in instructions
+    assert "workerCommand exactly once as argv" in instructions
+    assert "returned cwd" in instructions
+    assert "preserve argv boundaries" in instructions
+    assert "not inspect or reinterpret the repository first" in instructions
+    assert "not replace it with raw claude or claude -p" in instructions
+
+
+@pytest.mark.parametrize(
+    ("delegated_args", "expected_command"),
+    [
+        (["review", "--scope", "working-tree", "delegated smoke"], "review"),
+        (["rescue", "delegated rescue smoke"], "rescue"),
+    ],
+)
+def test_subagent_command_worker_command_executes_with_fake_claude(tmp_path, delegated_args, expected_command):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    argv_file = tmp_path / "argv.json"
+    repo.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\nchanged\n", encoding="utf8")
+
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        "const argv = process.argv.slice(2);\n"
+        "if (argv.length === 1 && argv[0] === '--version') {\n"
+        "  process.stdout.write('claude fake\\n');\n"
+        "  process.exit(0);\n"
+        "}\n"
+        f"fs.writeFileSync({json.dumps(str(argv_file))}, JSON.stringify(argv));\n"
+        "process.stdout.write('SUBAGENT CLAUDE OK\\n');\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+
+    command_result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", *delegated_args],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert command_result.returncode == 0, command_result.stderr
+    payload = json.loads(command_result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["command"] == expected_command
+    assert payload["cwd"] == str(repo)
+
+    worker_result = subprocess.run(
+        payload["workerCommand"],
+        cwd=payload["cwd"],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert worker_result.returncode == 0, worker_result.stderr
+    assert "SUBAGENT CLAUDE OK" in worker_result.stdout
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    assert argv[argv.index("--tools") + 1] == "Read,Grep,Glob"
+    assert "--strict-mcp-config" in argv
+    assert "--disable-slash-commands" in argv
+    assert "--no-session-persistence" in argv
+    assert argv[argv.index("--setting-sources") + 1] == ""
+    disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
+    for tool in ["Edit", "Write", "MultiEdit", "Bash"]:
+        assert tool in disallowed_tools
+
+
+def test_subagent_command_normalizes_relative_parent_runtime_paths(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
+
+    result = subprocess.run(
+        [NODE, "claude-companion.mjs", "subagent-command", "rescue", "fix flaky test"],
+        cwd=runtime.parent,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "rescue"
+    assert payload["workerCommand"][1] == str(runtime.resolve())
+    assert payload["workerCommand"][2:] == ["rescue", "fix flaky test", "--backend", "cli", "--quality", "auto"]
+
+
+def test_subagent_command_validates_delegated_command_not_top_level_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "status"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert 'Command "status" cannot be delegated to a Codex subagent.' in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("command_args", "stderr_marker"),
+    [
+        (
+            ["ultrareview", "--confirm-cost"],
+            'Command "ultrareview" cannot be delegated to a Codex subagent.',
+        ),
+        (
+            ["review", "--background", "--base", "main"],
+            "subagent-command is foreground-only; use reserve-job for --background delegation.",
+        ),
+        (
+            ["review", "--write", "--base", "main"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+        (
+            ["adversarial-review", "--write", "--base", "main"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+        (
+            ["multi-review", "--write", "--base", "main"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+        (
+            ["rescue", "--write", "fix flaky test"],
+            "--write cannot be delegated to a Codex subagent;",
+        ),
+    ],
+)
+def test_subagent_command_rejects_unsafe_modes(tmp_path, command_args, stderr_marker):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", *command_args],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert stderr_marker in result.stderr
+
+
+def test_subagent_command_materializes_backend_env_dependency(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_QUALITY")
+    env["CLAUDE_FOR_CODEX_BACKEND"] = "sdk"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["workerCommand"][2:] == [
+        "review",
+        "--scope",
+        "working-tree",
+        "--backend",
+        "sdk",
+        "--quality",
+        "auto",
+    ]
+
+
+def test_subagent_command_materializes_quality_env_dependency(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
+    env["CLAUDE_FOR_CODEX_QUALITY"] = "strong"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "review", "--scope", "working-tree"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["workerCommand"][2:] == [
+        "review",
+        "--scope",
+        "working-tree",
+        "--backend",
+        "cli",
+        "--quality",
+        "strong",
+    ]
+
+
+def test_subagent_command_rejects_sdk_subagents_without_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "subagent-command", "multi-review", "--agent-team", "sdk-subagents"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk." in result.stderr
+
+
+def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND", "CLAUDE_FOR_CODEX_QUALITY")
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "subagent-command",
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ready"
+    assert payload["command"] == "multi-review"
+    assert payload["workerCommand"][2:] == [
+        "multi-review",
+        "--backend",
+        "sdk",
+        "--agent-team",
+        "sdk-subagents",
+        "--quality",
+        "auto",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -5335,6 +6143,40 @@ def test_background_skills_require_forwarding_subagent_contract():
         assert "--wait` only applies to direct `--background` runtime use" in text
         assert "not part of the host-forwarded `reserve-job` path" in text
         assert re.search(r"waiting requires .*claude-result <job-id>", normalized)
+
+
+def test_claude_subagent_review_skill_documents_safe_plugin_delegation():
+    text = (PLUGIN / "skills" / "claude-subagent-review" / "SKILL.md").read_text(encoding="utf8")
+
+    required_phrases = [
+        "subagent-command",
+        "workerCommand",
+        "returned `cwd`",
+        "run `workerCommand` exactly once",
+        "must not inspect or reinterpret the repository",
+        "must not replace it with raw claude",
+        "claude -p",
+        "reserve-job",
+        "--background",
+        "--write",
+    ]
+    for phrase in required_phrases:
+        assert phrase in text
+
+
+def test_review_skills_cross_link_subagent_delegation_without_raw_claude():
+    skill_commands = {
+        "claude-review": "review",
+        "claude-adversarial-review": "adversarial-review",
+        "claude-multi-review": "multi-review",
+        "claude-rescue": "rescue",
+    }
+
+    for skill_name, command in skill_commands.items():
+        text = (PLUGIN / "skills" / skill_name / "SKILL.md").read_text(encoding="utf8")
+        assert "claude-subagent-review" in text
+        assert f'subagent-command {command} "$ARGUMENTS"' in text
+        assert "raw `claude -p`" in text
 
 
 def test_review_skills_preserve_result_handling_discipline():
@@ -6096,6 +6938,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-review-gate": "review-gate",
         "claude-review": "review",
         "claude-status": "jobs",
+        "claude-subagent-review": "subagent-command",
         "claude-ultrareview": "ultrareview",
     }
     assert {p.parent.name for p in skills} == {
@@ -6113,6 +6956,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
         "claude-review-gate",
         "claude-review",
         "claude-status",
+        "claude-subagent-review",
         "claude-ultrareview",
     }
     for skill in skills:

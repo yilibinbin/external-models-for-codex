@@ -23,7 +23,7 @@ External Models for Codex 是一个面向 Codex 的外部模型插件市场，�
 Remote install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
@@ -90,6 +90,8 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 - `antigravity-review`, `antigravity-adversarial-review`, `antigravity-plan`, `antigravity-multi-review`, `antigravity-rescue`, `antigravity-review-gate`, `antigravity-github-actions-review`: Antigravity-backed mature plugin-managed review, planning, rescue, Stop gate, and workflow-risk review with explicit Gemini or Claude model-provider selection. It uses `agy` only, does not claim Claude SDK, Gemini native-agent, or ultrareview parity, and keeps Claude-through-Antigravity separate from `claude-for-codex`.
 
 These are skills-and-hook plugins, not MCP/app tool plugins. It is expected that `tool_search` will not expose callable `claude-for-codex`, `gemini-for-codex`, or `antigravity-for-codex` tools. Codex should route through the provider skills such as `claude-for-codex:*`, `gemini-for-codex:*`, and `antigravity-for-codex:*`.
+
+Claude for Codex supports `--quality auto|fast|standard|strong|max`. The policy uses Claude Code aliases (`sonnet`, `opus`) plus valid effort values (`low`, `medium`, `high`, `xhigh`, `max`) instead of concrete model ids, so future Claude Code alias updates do not require a plugin change. Explicit `--model` and `--effort` override quality. `ultracode` is not emitted as an effort value, and `claude-ultrareview` remains explicit-cost only.
 
 ## Stop Review Gate
 

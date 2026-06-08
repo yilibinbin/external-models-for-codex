@@ -1,8 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
   <title id="title">Claude for Codex composer icon</title>
-  <desc id="desc">Two linked review nodes for the Claude for Codex plugin.</desc>
-  <rect width="64" height="64" rx="14" fill="#4F46E5"/>
-  <circle cx="23" cy="32" r="11" fill="#F9FAFB"/>
-  <circle cx="41" cy="32" r="11" fill="#F59E0B"/>
-  <path d="M26 25h12v14H26z" fill="#111827" opacity=".9"/>
+  <desc id="desc">Claude app icon assisting the Codex cloud-terminal app icon.</desc>
+  <rect width="64" height="64" rx="12" fill="#F6F7F9"/>
+  <rect x="7" y="13" width="28" height="38" rx="7" fill="#FFFFFF"/>
+  <rect x="28" y="21" width="30" height="30" rx="8" fill="#FFFFFF"/>
+  <circle cx="21" cy="32" r="11" fill="#EFE7D8"/>
+  <g fill="#D97757" transform="translate(21 32) scale(.11)">
+    <rect x="-11" y="-64" width="22" height="128" rx="11" transform="rotate(4)"/>
+    <rect x="-11" y="-64" width="22" height="128" rx="11" transform="rotate(44)"/>
+    <rect x="-11" y="-64" width="22" height="128" rx="11" transform="rotate(84)"/>
+    <rect x="-11" y="-64" width="22" height="128" rx="11" transform="rotate(124)"/>
+  </g>
+  <path d="M39 24c3-5 9-6 13-2 5 0 9 4 9 9 3 2 4 7 2 11-1 4-5 6-9 5-3 3-7 4-11 2-4 2-9 1-12-3-4 0-8-3-8-7-2-3-2-7 1-9 2-4 5-6 15-6Z" fill="#5275FF"/>
+  <path d="M38 31l4 5-4 5" fill="none" stroke="#FFFFFF" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M47 38h8" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/>
 </svg>

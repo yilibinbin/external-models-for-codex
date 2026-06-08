@@ -79,6 +79,15 @@ import {
   validateSemanticArgs
 } from "./lib/semantic-context.mjs";
 import {
+  QUALITY_ENV,
+  VALID_QUALITIES,
+  VALID_EFFORTS,
+  applyQualityPolicy,
+  assertValidQuality,
+  assertSafeModelAliasOrId,
+  assertValidEffort
+} from "./lib/quality-policy.mjs";
+import {
   StateReadError,
   canonicalWorkspaceRoot,
   currentSessionFileForCwd,
@@ -91,8 +100,9 @@ import {
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
+const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
 const POSITIVE_DECIMAL_PATTERN = /^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)$/;
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
@@ -358,6 +368,13 @@ function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
     },
     claudeSdk: sdkAvailability(),
     backend: backendCapabilities(process.env, process.cwd()),
+    qualityPolicy: {
+      defaultQualityEnv: QUALITY_ENV,
+      qualities: VALID_QUALITIES,
+      efforts: VALID_EFFORTS,
+      ultracodeEffortSupported: false,
+      ultrareviewAutomatic: false
+    },
     git: commandVersion("git"),
     githubCli: commandVersion("gh"),
     hooks: hookDiagnostics(),
@@ -403,11 +420,22 @@ function parseArgs(argv, options = {}) {
       parsed.path = path;
       index += 1;
     } else if (arg === "--model") {
-      parsed.model = readOptionValue(tokens, index, arg);
+      parsed.model = assertSafeModelAliasOrId(readOptionValue(tokens, index, arg));
       index += 1;
     } else if (arg === "--effort") {
-      parsed.effort = readOptionValue(tokens, index, arg);
+      parsed.effort = assertValidEffort(readOptionValue(tokens, index, arg));
       index += 1;
+    } else if (arg === "--quality") {
+      parsed.quality = readOptionValue(tokens, index, arg).trim().toLowerCase();
+      if (!VALID_QUALITIES.includes(parsed.quality)) {
+        throw new Error(`Invalid --quality "${parsed.quality}". Valid values: ${VALID_QUALITIES.join(", ")}.`);
+      }
+      index += 1;
+    } else if (arg.startsWith("--backend=")) {
+      parsed.backend = arg.slice("--backend=".length).trim();
+      if (!parsed.backend) {
+        throw new Error("Missing value for --backend.");
+      }
     } else if (arg === "--backend") {
       parsed.backend = readOptionValue(tokens, index, arg);
       index += 1;
@@ -568,6 +596,12 @@ function validateBackendCompatibleOptions(args) {
   }
 }
 
+function validateSdkSubagentsBackend(args) {
+  if (args.agentTeam === "sdk-subagents" && args.backend !== "sdk") {
+    throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
+  }
+}
+
 function commandHelp(command) {
   const common = [
     "--scope auto|working-tree|branch",
@@ -575,6 +609,7 @@ function commandHelp(command) {
     "--path <path>",
     "--model <model>",
     "--effort <effort>",
+    "--quality auto|fast|standard|strong|max",
     "--backend cli|sdk",
     "--json",
     "--stream-progress"
@@ -903,6 +938,45 @@ function collectGitContext(options) {
   ].filter((line) => line !== "").join("\n");
 }
 
+function qualityGitSignals(args) {
+  if (git(["rev-parse", "--is-inside-work-tree"]).status !== 0) {
+    return { changedFiles: 0, diffLines: 0 };
+  }
+  const paths = args.paths?.length ? args.paths : args.path ? [args.path] : [];
+  const pathArgs = paths.length ? ["--", ...paths] : [];
+  const branchDiff = args.scope === "branch" && args.base
+    ? git(["diff", "--numstat", `${args.base}...HEAD`, ...pathArgs])
+    : null;
+  const status = git(["status", "--short", "--untracked-files=all", ...pathArgs]);
+  const staged = git(["diff", "--cached", "--numstat", ...pathArgs]);
+  const unstaged = git(["diff", "--numstat", ...pathArgs]);
+  if (status.status !== 0 || staged.status !== 0 || unstaged.status !== 0 || (branchDiff && branchDiff.status !== 0)) {
+    return { changedFiles: 0, diffLines: 0 };
+  }
+  const files = new Set();
+  for (const line of status.stdout.split(/\r?\n/)) {
+    const file = line.slice(3).trim();
+    if (file) files.add(file);
+  }
+  let diffLines = 0;
+  for (const result of [branchDiff, staged, unstaged].filter(Boolean)) {
+    for (const line of result.stdout.split(/\r?\n/)) {
+      const [added, deleted, file] = line.split(/\t/);
+      if (file) files.add(file);
+      const addedNumber = added === "-" ? 0 : Number(added || 0);
+      const deletedNumber = deleted === "-" ? 0 : Number(deleted || 0);
+      diffLines += (Number.isFinite(addedNumber) ? addedNumber : 0) + (Number.isFinite(deletedNumber) ? deletedNumber : 0);
+    }
+  }
+  return { changedFiles: files.size, diffLines };
+}
+
+function applyCommandQualityPolicy(command, args) {
+  const requestedQuality = args.quality ?? process.env[QUALITY_ENV] ?? "auto";
+  const needsSignals = String(requestedQuality).trim().toLowerCase() === "auto";
+  return applyQualityPolicy(command, args, process.env, needsSignals ? qualityGitSignals(args) : {});
+}
+
 function buildClaudePrintInvocation(prompt, options) {
   const args = [
     "--print",
@@ -1222,6 +1296,61 @@ function handleReserveJob(rawArgs) {
     },
     workerCommand,
     forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once, must not inspect or reinterpret the repository, and must return only the command result."
+  };
+}
+
+function hasExplicitBackendArg(args) {
+  return args.some((arg) => arg === "--backend" || arg.startsWith("--backend="));
+}
+
+function hasExplicitQualityArg(args) {
+  return args.some((arg) => arg === "--quality" || arg.startsWith("--quality="));
+}
+
+function handleSubagentCommand(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const delegatedCommand = tokens[0];
+  if (!delegatedCommand) {
+    throw new Error("Missing command to delegate.");
+  }
+  if (!SUBAGENT_DELEGATABLE_COMMANDS.has(delegatedCommand)) {
+    throw new Error(`Command "${delegatedCommand}" cannot be delegated to a Codex subagent.`);
+  }
+
+  const delegatedArgs = tokens.slice(1);
+  const parsed = validateCommandNativeModeOptions(delegatedCommand, delegatedArgs);
+  if (parsed.write) {
+    throw new Error("--write cannot be delegated to a Codex subagent; run write-capable Claude commands only from the parent after reviewing the plan.");
+  }
+  if (parsed.background) {
+    throw new Error("subagent-command is foreground-only; use reserve-job for --background delegation.");
+  }
+  validateBackendArgs(parsed);
+  validateBackendCompatibleOptions(parsed);
+  validateSdkSubagentsBackend(parsed);
+
+  const materializedArgs = [...delegatedArgs];
+  if (!hasExplicitBackendArg(materializedArgs)) {
+    materializedArgs.push("--backend", parsed.backend);
+  }
+  if (!hasExplicitQualityArg(materializedArgs)) {
+    const source = parsed.quality !== undefined ? "--quality" : QUALITY_ENV;
+    const quality = assertValidQuality(parsed.quality ?? process.env[QUALITY_ENV] ?? "auto", source);
+    materializedArgs.push("--quality", quality);
+  }
+
+  return {
+    status: "ready",
+    mode: "foreground",
+    command: delegatedCommand,
+    cwd: process.cwd(),
+    workerCommand: [
+      process.execPath,
+      path.resolve(process.argv[1]),
+      delegatedCommand,
+      ...materializedArgs
+    ],
+    forwardingInstructions: "Dispatch exactly one Codex subagent. The subagent must run workerCommand exactly once as argv, must use the returned cwd, must preserve argv boundaries, must not inspect or reinterpret the repository first, and must not replace it with raw claude or claude -p."
   };
 }
 
@@ -1704,6 +1833,7 @@ function parseGithubActionsOptions(tokens) {
     roles: "correctness,security,tests",
     model: "",
     effort: "",
+    quality: "standard",
     semanticContext: "off",
     timeoutMinutes: 30,
     releaseRef: undefined,
@@ -1727,6 +1857,12 @@ function parseGithubActionsOptions(tokens) {
       index += 1;
     } else if (token === "--effort") {
       options.effort = readOptionValue(tokens, index, token);
+      index += 1;
+    } else if (token === "--quality") {
+      options.quality = readOptionValue(tokens, index, token).trim().toLowerCase();
+      if (!VALID_QUALITIES.includes(options.quality)) {
+        throw new Error(`Invalid --quality "${options.quality}". Valid values: ${VALID_QUALITIES.join(", ")}.`);
+      }
       index += 1;
     } else if (token === "--semantic-context") {
       options.semanticContext = readOptionValue(tokens, index, token);
@@ -2103,6 +2239,12 @@ async function runReviewGate(rawArgs) {
     return;
   }
   args.scope = "working-tree";
+  try {
+    applyCommandQualityPolicy("review-gate", args);
+  } catch (error) {
+    warnGate(`quality policy failed; allowing stop: ${error.message || String(error)}`);
+    return;
+  }
   args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
   try {
     attachSemanticContext(args, { reviewGate: true, command: "review-gate" });
@@ -2326,7 +2468,7 @@ async function runSdkSubagentMultiReview(args, gitContext) {
     throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
   }
   const structuredJson = Boolean(args.jsonOutput && args.nativeStructured);
-  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model, structuredJson });
+  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model, effort: args.effort, structuredJson });
   const focusText = args._.join(" ");
   const prompt = nativeReviewTeamPrompt(args.reviewRoles, gitContext, focusText, { structuredJson });
   const aggregate = await runSdkNativeReview(prompt, args, {
@@ -2462,6 +2604,12 @@ async function runClaudeTask(kind, rawArgs) {
   }
   args.scope = scope;
   try {
+    applyCommandQualityPolicy(kind, args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  try {
     attachSemanticContext(args, { allowed: ["review", "adversarial-review"].includes(kind), command: kind });
   } catch (error) {
     console.error(error.message || String(error));
@@ -2553,9 +2701,7 @@ async function runClaudeMultiReview(rawArgs) {
     args.nativeOrchestration = args.agentTeam === "sdk-subagents"
       ? { enabled: true, mode: "sdk-subagents", roleCount: args.reviewRoles.length }
       : { enabled: false };
-    if (args.agentTeam === "sdk-subagents" && args.backend !== "sdk") {
-      throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
-    }
+    validateSdkSubagentsBackend(args);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -2570,6 +2716,12 @@ async function runClaudeMultiReview(rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
+  try {
+    applyCommandQualityPolicy("multi-review", args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
   try {
     attachSemanticContext(args, { command: "multi-review" });
   } catch (error) {
@@ -2988,7 +3140,7 @@ if (maybePrintCommandHelp(command, rawArgs)) {
   process.exit(0);
 }
 
-if (command !== "reserve-job") {
+if (command !== "reserve-job" && command !== "subagent-command") {
   try {
     validateCommandNativeModeOptions(command, rawArgs);
   } catch (error) {
@@ -3061,6 +3213,14 @@ switch (command) {
   case "reserve-job":
     try {
       process.stdout.write(`${JSON.stringify(handleReserveJob(rawArgs), null, 2)}\n`);
+    } catch (error) {
+      console.error(error.message || String(error));
+      process.exit(2);
+    }
+    break;
+  case "subagent-command":
+    try {
+      process.stdout.write(`${JSON.stringify(handleSubagentCommand(rawArgs), null, 2)}\n`);
     } catch (error) {
       console.error(error.message || String(error));
       process.exit(2);

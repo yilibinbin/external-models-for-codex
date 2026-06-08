@@ -6,7 +6,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.1";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.2";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -22,6 +22,7 @@ const EXPECTED_SKILLS = [
   "claude-review-gate",
   "claude-role-packs",
   "claude-status",
+  "claude-subagent-review",
   "claude-ultrareview"
 ];
 
@@ -64,6 +65,61 @@ function result(ok, name, detail = "") {
   return { ok, name, detail };
 }
 
+function markdownSection(text, heading) {
+  const lines = text.split(/\r?\n/);
+  const headingLine = `## ${heading}`;
+  const start = lines.findIndex((line) => line.trim() === headingLine);
+  if (start === -1) {
+    return "";
+  }
+  const end = lines.findIndex((line, index) => index > start && /^##\s/.test(line.trim()));
+  const sectionLines = lines.slice(start + 1, end === -1 ? undefined : end);
+  return sectionLines.join("\n");
+}
+
+function sourceArrayIncludes(text, exportName, values) {
+  const match = new RegExp(`${exportName}\\s*=\\s*Object\\.freeze\\(\\s*\\[([^\\]]+)\\]\\s*\\)`).exec(text);
+  if (!match) return false;
+  const found = new Set([...match[1].matchAll(/["']([^"']+)["']/g)].map((entry) => entry[1]));
+  return values.every((value) => found.has(value));
+}
+
+function sourceHasAliasProfile(text, alias, effort) {
+  return new RegExp(`model\\s*:\\s*["']${alias}["'][\\s\\S]{0,80}effort\\s*:\\s*["']${effort}["']`).test(text);
+}
+
+function normalizedWhitespace(text) {
+  return String(text ?? "").replace(/\s+/g, " ").trim();
+}
+
+function workflowCommandPinsStandardQuality(text) {
+  const normalized = normalizedWhitespace(text);
+  return /claude-companion\.mjs\s+review\b/.test(normalized)
+    && /--json\b/.test(normalized)
+    && /--quality\s+standard\b/.test(normalized)
+    && /--scope\s+branch\b/.test(normalized);
+}
+
+function githubActionsDefaultsToStandardQuality(text) {
+  return /quality\s*:\s*["']standard["']/.test(text)
+    || /const\s+quality\s*=\s*options\.quality\s*\?\?\s*["']standard["']/.test(text);
+}
+
+function manifestAssetChecks(pluginRoot) {
+  const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+  const iface = manifest.interface ?? {};
+  const assetSpecs = [
+    ["composerIcon", iface.composerIcon],
+    ["logo", iface.logo],
+    ...((iface.screenshots ?? []).map((value, index) => [`screenshots.${index}`, value]))
+  ];
+  return assetSpecs.map(([label, value]) => {
+    const relativePath = String(value ?? "");
+    const safeRelative = relativePath && !path.isAbsolute(relativePath) && !relativePath.split(/[\\/]/).includes("..");
+    return result(Boolean(safeRelative && fs.existsSync(path.join(pluginRoot, relativePath))), `manifest-asset-${label}`, relativePath);
+  });
+}
+
 function resolveLayout(root) {
   const repoPluginRoot = path.join(root, "plugins", "claude-for-codex");
   if (fs.existsSync(path.join(repoPluginRoot, ".codex-plugin", "plugin.json"))) {
@@ -84,12 +140,11 @@ function checkManifest(root) {
   const { pluginRoot } = resolveLayout(root);
   const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
-  const unreleased = changelog.match(/^## Unreleased\s*([\s\S]*?)(?=^##\s|\Z)/m);
-  const unreleasedBody = unreleased ? unreleased[1].trim() : "";
+  const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.14.1", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.14.1"), "changelog-version", "CHANGELOG contains 0.14.1"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.14.1`"), "readme-current-version", "README current version is 0.14.1"),
+    result(manifest.version === "0.14.2", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.14.2"), "changelog-version", "CHANGELOG contains 0.14.2"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.14.2`"), "readme-current-version", "README current version is 0.14.2"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -161,6 +216,8 @@ function checkNativeReleaseAssets(root) {
   const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
   const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
+  const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
+  const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
   const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
@@ -191,6 +248,7 @@ function checkNativeReleaseAssets(root) {
   const ultrareviewNotDefaultDocsOk = docsJoined.includes("not used by hooks or default review paths") && docsJoined.includes("never used by hooks or default review paths");
   const detail = "claude-ultrareview; native assets/docs include --agent-team sdk-subagents, --confirm-cost, @anthropic-ai/claude-agent-sdk";
   return [
+    ...manifestAssetChecks(pluginRoot),
     result(fs.existsSync(nativeHelper), "native-review-helper", path.relative(pluginRoot, nativeHelper)),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
     result(
@@ -239,6 +297,48 @@ function checkNativeReleaseAssets(root) {
         ultrareviewNotDefaultDocsOk,
       "ultrareview-not-hook-default",
       "hooks call review-gate; generated workflow calls review"
+    ),
+    result(
+      fs.existsSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs")) &&
+        sourceArrayIncludes(qualityPolicy, "VALID_QUALITIES", ["auto", "fast", "standard", "strong", "max"]) &&
+        sourceArrayIncludes(qualityPolicy, "VALID_EFFORTS", ["low", "medium", "high", "xhigh", "max"]) &&
+        companion.includes("--quality auto|fast|standard|strong|max"),
+      "quality-policy-assets",
+      "--quality auto|fast|standard|strong|max"
+    ),
+    result(
+      !qualityPolicy.includes("ultracode") &&
+        !companion.includes("--effort\", \"ultracode") &&
+        !defaultWorkflow.includes("ultracode") &&
+        !hooks.includes("ultracode"),
+      "quality-no-ultracode-effort",
+      "ultracode is not a CLI effort value"
+    ),
+    result(
+      !hooks.includes("--quality strong") &&
+        !hooks.includes("--quality max") &&
+        !hooks.includes("--backend sdk") &&
+        !hooks.includes("ultrareview") &&
+        !hookWrapper.includes("--quality strong") &&
+        !hookWrapper.includes("--quality max") &&
+        !hookWrapper.includes("ultrareview"),
+      "quality-hook-conservative",
+      "installed hooks do not force expensive quality paths"
+    ),
+    result(
+      workflowCommandPinsStandardQuality(defaultWorkflow) &&
+        githubActionsDefaultsToStandardQuality(githubActions) &&
+        !defaultWorkflow.includes("--quality max") &&
+        !defaultWorkflow.includes("ultrareview"),
+      "quality-ci-default-standard",
+      "default GitHub Actions workflow pins --quality standard"
+    ),
+    result(
+      !/claude-(opus|sonnet|haiku)-\d/i.test(qualityPolicy) &&
+        sourceHasAliasProfile(qualityPolicy, "opus", "xhigh") &&
+        sourceHasAliasProfile(qualityPolicy, "sonnet", "high"),
+      "quality-no-concrete-model-defaults",
+      "policy uses Claude Code aliases"
     )
   ];
 }
@@ -358,6 +458,36 @@ function checkSkills(root) {
     })
   ];
 }
+
+function checkSubagentReviewDocs(root) {
+  const { pluginRoot } = resolveLayout(root);
+  const skill = fs.readFileSync(path.join(pluginRoot, "skills", "claude-subagent-review", "SKILL.md"), "utf8");
+  const readme = fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8");
+  const subagentSection = markdownSection(readme, "Codex subagent delegation");
+  const skillMarkers = [
+    "subagent-command",
+    "workerCommand",
+    "must not replace it with raw claude",
+    "claude -p",
+    "reserve-job"
+  ];
+  const readmeMarkers = [
+    "Codex subagent delegation",
+    "subagent-command",
+    'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command',
+    'node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" subagent-command rescue "$ARGUMENTS"'
+  ];
+  return [
+    result(
+      skillMarkers.every((marker) => skill.includes(marker)) &&
+        readmeMarkers.every((marker) => readme.includes(marker)) &&
+        !subagentSection.includes("node plugins/claude-for-codex/scripts/claude-companion.mjs"),
+      "subagent-review-docs",
+      "claude-subagent-review and README document safe subagent-command delegation"
+    )
+  ];
+}
+
 function checkGithubActionsCi(root) {
   const { pluginRoot } = resolveLayout(root);
   const defaultWorkflow = renderWorkflow(pluginRoot);
@@ -447,6 +577,7 @@ export function runReleaseCheck(root, options = {}) {
     ...checkReadOnlyIsolation(root),
     ...checkSecrets(root),
     ...checkSkills(root),
+    ...checkSubagentReviewDocs(root),
     ...checkRolePacks(),
     ...checkMailboxLeaseSupport(root),
     ...checkPrompts(root),

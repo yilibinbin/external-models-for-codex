@@ -18,6 +18,8 @@ Rules:
 - Reconcile Claude's plan with Codex's local repo evidence before editing.
 - Keep the final Codex plan in local planning files when the task uses file-backed planning.
 - Do not let Claude's plan override explicit user instructions.
+- Use `--quality strong` for a deeper local Claude planning pass without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude pass.
+- Do not substitute `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview requires the `claude-ultrareview` skill and explicit cost confirmation.
 
 Output usage:
 - Extract observed facts.

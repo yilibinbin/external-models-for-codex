@@ -25,6 +25,13 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job multi-revie
 - The child runs `run-reserved-job` once through `workerCommand`; it must not inspect or reinterpret the repository.
 - The parent returns the job id immediately and tells the user to use `claude-result <job-id>`.
 
+Codex subagent delegation:
+- Use `claude-subagent-review` when a Codex parent wants a general-purpose Codex subagent to run the review/rescue.
+- Parent calls concrete `subagent-command multi-review "$ARGUMENTS"` before starting the child.
+- Pass the returned `workerCommand` JSON argv to exactly one child.
+- Pass the returned `cwd`; the child runs from that exact working directory.
+- Do not replace Claude for Codex with raw `claude -p`; it bypasses plugin read-only isolation, Git MCP, reports, and compatibility handling.
+
 Rules:
 - This is read-only.
 - Claude must not edit files or apply fixes.
@@ -56,6 +63,7 @@ Arguments:
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
 - `--path <path>` or `--paths <path>` filters git context to one path; repeat it for multiple paths.
+- `--quality auto|fast|standard|strong|max` selects adaptive Claude Code aliases and effort. Use `--quality strong` when the user asks for a deeper local Claude pass without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude review.
 - `--model <model>` and `--effort <level>` are passed to each Claude CLI invocation.
 - `--json` asks every role for a normalized review object and returns one role-tagged aggregate object.
 - `--semantic-context <provider>` is optional and off by default. The provider context is fetched once per command and shared across role prompts as advisory context.
@@ -63,6 +71,7 @@ Arguments:
 - `--sequential` runs roles one at a time for debugging or rate-limit-sensitive environments.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
+- Do not substitute `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview requires the `claude-ultrareview` skill and explicit cost confirmation.
 
 Examples:
 - `--base main`

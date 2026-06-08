@@ -13,7 +13,7 @@ Included plugins:
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.2
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
@@ -165,6 +165,8 @@ Read-only Claude review receives a strict MCP config for bounded Git inspection.
 Claude native SDK mode is explicit and experimental until live SDK subagent smoke tests are stable. Use `multi-review --backend sdk --agent-team sdk-subagents` to create native SDK subagents for the selected review roles; plugin-managed CLI `multi-review` remains the default. The runtime resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. SDK read-only review disables settings sources, skills, hooks, plugins, and session persistence while preserving normal Claude authentication. Combine `--json --native-structured` for SDK schema-backed aggregate output where `role_results[].result.review` is a full per-role review JSON object validated locally by the plugin. Raw role text and raw SDK `structured_output` are not stored in reports. Add `--stream-progress` for sanitized streaming progress without printing raw SDK chunks or storing raw SDK messages in reports.
 
 SDK native subagent structured reviews use nested per-role review objects and remain an explicit opt-in path. The default review backend is unchanged.
+
+Claude for Codex supports `--quality auto|fast|standard|strong|max`. `auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size. `fast` maps to `sonnet` plus low effort, `standard` maps to `sonnet` plus high effort, `strong` maps to `opus` plus xhigh effort, and `max` maps to `opus` plus max effort. Explicit `--model` and `--effort` always win. The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`; `ultracode` is not passed as `--effort`, and `ultrareview` remains a separate explicit-cost command. `review-gate` remains capped to `standard` unless manually run with explicit `--quality strong|max`.
 
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is not used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because it may use remote/cloud execution and usage-credit billing.
 

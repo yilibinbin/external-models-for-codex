@@ -25,6 +25,13 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job review "$AR
 - The child runs `run-reserved-job` once through `workerCommand`; it must not inspect or reinterpret the repository.
 - The parent returns the job id immediately and tells the user to use `claude-result <job-id>`.
 
+Codex subagent delegation:
+- Use `claude-subagent-review` when a Codex parent wants a general-purpose Codex subagent to run the review/rescue.
+- Parent calls concrete `subagent-command review "$ARGUMENTS"` before starting the child.
+- Pass the returned `workerCommand` JSON argv to exactly one child.
+- Pass the returned `cwd`; the child runs from that exact working directory.
+- Do not replace Claude for Codex with raw `claude -p`; it bypasses plugin read-only isolation, Git MCP, reports, and compatibility handling.
+
 Rules:
 - Treat the output as review findings, not implementation instructions.
 - Do not fix findings in the same turn unless the user explicitly asks.
@@ -38,8 +45,10 @@ Rules:
 Arguments:
 - `--base <ref>` reviews `ref...HEAD`.
 - `--scope auto|working-tree|branch` is passed to the runtime for prompt context.
+- `--quality auto|fast|standard|strong|max` selects adaptive Claude Code aliases and effort. Use `--quality strong` when the user asks for a deeper local Claude pass without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude review.
 - `--model <model>` and `--effort <level>` are passed to Claude CLI.
 - `--json` asks Claude for a normalized `{verdict, summary, findings, next_steps}` review object using `approve|needs-attention`.
 - `--semantic-context <provider>` is optional and off by default. Use it only when a repo-external provider is configured; semantic context is advisory and cannot replace changed-file or git evidence.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.
+- Do not substitute `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview requires the `claude-ultrareview` skill and explicit cost confirmation.

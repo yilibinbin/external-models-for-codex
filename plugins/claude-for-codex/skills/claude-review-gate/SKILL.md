@@ -31,10 +31,17 @@ Manual gate run:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review-gate
 ```
 
+Manual deep gate debugging:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" review-gate --quality strong
+```
+
 Rules:
 - The hook is opt-in. Installing the plugin does not enable blocking behavior.
 - The gate reviews current git working-tree changes, not an exact per-turn edit set.
 - The enabled gate uses the default multi-role review set: correctness, security, tests, release, adversarial.
+- The installed Stop hook does not force `--quality strong` or `--quality max`; it stays conservative unless a user manually runs `review-gate --quality strong|max`.
 - Explicit `review-gate --role-pack <pack>` is allowed only for gate-compatible built-in packs. `review-gate --role-pack default` is rejected because the gate accepts only gate-compatible packs; bare `review-gate` keeps the existing default set.
 - Only explicit `BLOCK:` verdicts from Claude block Stop.
 - Semantic context is off by default for the gate and never implicitly uses `auto`. If explicitly enabled and unavailable, the gate records degraded metadata such as `DEGRADED_PASS` and still blocks only on explicit Claude `BLOCK:`.
@@ -42,5 +49,6 @@ Rules:
 - Export `CLAUDE_FOR_CODEX_REVIEW_GATE=off` in the environment that launches Codex hooks to bypass the gate immediately.
 - Unchanged diffs that already received an all-`ALLOW:` gate result are skipped until the working-tree diff changes.
 - Do not add a `hooks` field to `.codex-plugin/plugin.json`; the standard `hooks/hooks.json` file is auto-discovered by the plugin runtime.
+- Do not substitute manual `--quality strong` or `--quality max` with `claude ultrareview`; ultrareview requires the `claude-ultrareview` skill and explicit cost confirmation.
 
 After install or upgrade, check Codex Settings > Hooks and trust or enable the `Claude for codex` Stop hook if prompted.
