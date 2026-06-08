@@ -1,0 +1,50 @@
+{
+  "routedModelSkills": [
+    "antigravity-review",
+    "antigravity-adversarial-review",
+    "antigravity-multi-review",
+    "antigravity-plan",
+    "antigravity-rescue",
+    "antigravity-github-actions-review",
+    "antigravity-role-packs",
+    "antigravity-collaboration-loop",
+    "antigravity-review-gate"
+  ],
+  "requiredAnchors": [
+    "## Natural-Language Model Routing",
+    "\nUser-facing examples:",
+    "\nInternal routing procedure:"
+  ],
+  "requiredPolicyPhrases": [
+    "Default to the Gemini provider by omitting provider overrides and relying on the runtime default when no provider is explicit.",
+    "Reject GPT/OpenAI model requests as unsupported for this plugin instead of mapping them to Antigravity."
+  ],
+  "requiredMarkers": [],
+  "skillMarkers": {
+    "antigravity-review": ["routing:strict-only-single-review", "routing:multi-agent-to-multi-review"],
+    "antigravity-multi-review": ["routing:strict-only-to-single-review", "routing:multi-review-fanout-background", "routing:multi-review-roles-syntax", "routing:multi-review-background-syntax"],
+    "antigravity-adversarial-review": ["routing:adversarial-review"],
+    "antigravity-plan": ["routing:plan"],
+    "antigravity-rescue": ["routing:rescue"],
+    "antigravity-github-actions-review": ["routing:github-actions-review", "routing:github-actions-prefix-dedup"],
+    "antigravity-role-packs": ["routing:role-packs", "routing:multi-review-roles-syntax"],
+    "antigravity-collaboration-loop": ["routing:collaboration-loop", "routing:multi-review-background-syntax"],
+    "antigravity-review-gate": ["routing:review-gate"]
+  },
+  "userExamplesStart": "\nUser-facing examples:",
+  "userExamplesEnd": "\nInternal routing procedure:",
+  "forbiddenUserExampleSubstrings": [
+    "--model",
+    "ANTIGRAVITY_FOR_CODEX_MODEL",
+    "ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL",
+    "ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL"
+  ],
+  "githubActionsInitForbiddenSubstrings": ["github-actions init --model"],
+  "githubActionsInitForbiddenPaths": [
+    "plugins/antigravity-for-codex/skills/antigravity-github-actions-review/SKILL.md",
+    "plugins/antigravity-for-codex/README.md",
+    "README.md",
+    "docs/README.en.md",
+    "docs/README.zh-CN.md"
+  ]
+}

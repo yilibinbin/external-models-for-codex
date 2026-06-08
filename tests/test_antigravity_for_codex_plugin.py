@@ -147,6 +147,40 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         assert "gemini-companion.mjs" not in text
         assert "claude-companion.mjs" not in text
 
+
+def test_antigravity_skills_encode_natural_language_model_routing():
+    contract = json.loads((PLUGIN / "contracts" / "natural-language-routing.json").read_text(encoding="utf8"))
+
+    def markdown_section(text, start_marker, end_marker, label):
+        routing_start = text.find("## Natural-Language Model Routing")
+        assert routing_start >= 0, f"routing section missing from {label}"
+        start = text.find(start_marker, routing_start)
+        assert start >= 0, f"{start_marker!r} missing from {label}"
+        body_start = start + len(start_marker)
+        end = text.find(end_marker, body_start)
+        assert end >= 0, f"{end_marker!r} missing after {start_marker!r} in {label}"
+        return text[body_start:end]
+
+    for skill in contract["routedModelSkills"]:
+        text = (PLUGIN / "skills" / skill / "SKILL.md").read_text(encoding="utf8")
+        for anchor in contract["requiredAnchors"]:
+            assert anchor in text, f"{anchor!r} missing from {skill}"
+        for phrase in contract["requiredPolicyPhrases"]:
+            assert phrase in text, f"{phrase!r} missing from {skill}"
+        for marker in contract["requiredMarkers"]:
+            assert marker in text, f"{marker!r} missing from {skill}"
+        for marker in contract["skillMarkers"].get(skill, []):
+            assert marker in text, f"{marker!r} missing from {skill}"
+        user_examples = markdown_section(text, contract["userExamplesStart"], contract["userExamplesEnd"], skill)
+        for forbidden in contract["forbiddenUserExampleSubstrings"]:
+            assert forbidden not in user_examples
+
+    for relative in contract["githubActionsInitForbiddenPaths"]:
+        text = (ROOT / relative).read_text(encoding="utf8")
+        for forbidden in contract["githubActionsInitForbiddenSubstrings"]:
+            assert forbidden not in text, f"{forbidden!r} leaked into {relative}"
+
+
 def test_antigravity_hooks_use_antigravity_env_names():
     hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf8"))
     text = json.dumps(hooks)
@@ -684,8 +718,7 @@ def test_review_invokes_agy_with_prompt_model_and_no_dangerous_permissions(tmp_p
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
     (repo / "sample.txt").write_text("after\n", encoding="utf8")
     agy = fake_agy(tmp_path, response="AGY_REVIEW_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
 
@@ -716,8 +749,7 @@ def test_review_includes_untracked_text_file_excerpt(tmp_path):
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
     (repo / "new-note.txt").write_text(f"{unique}\n", encoding="utf8")
     agy = fake_agy(tmp_path, response="AGY_REVIEW_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
 
@@ -738,8 +770,7 @@ def test_github_actions_review_skill_focus_invokes_agy(tmp_path):
     workflow.parent.mkdir(parents=True)
     workflow.write_text("name: CI\non: [pull_request]\n", encoding="utf8")
     agy = fake_agy(tmp_path, response="AGY_GHA_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([
         NODE,
@@ -768,8 +799,7 @@ def test_review_from_subdirectory_includes_root_relative_untracked_excerpt(tmp_p
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
     (subdir / "new.txt").write_text(f"{unique}\n", encoding="utf8")
     agy = fake_agy(tmp_path, response="AGY_REVIEW_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=subdir, env=env, capture_output=True, text=True)
 
@@ -793,8 +823,7 @@ def test_review_from_subdirectory_includes_root_tracked_diff(tmp_path):
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
     (repo / "tracked.txt").write_text(f"before\n{unique}\n", encoding="utf8")
     agy = fake_agy(tmp_path, response="AGY_REVIEW_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=subdir, env=env, capture_output=True, text=True)
 
@@ -816,8 +845,7 @@ def test_review_marks_large_git_diff_as_truncated(tmp_path):
     subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True, text=True)
     (repo / "large.txt").write_text("x" * (3 * 1024 * 1024), encoding="utf8")
     agy = fake_agy(tmp_path, response="AGY_REVIEW_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
 
@@ -834,8 +862,7 @@ def test_review_can_use_explicit_claude_provider(tmp_path):
     repo.mkdir()
     init_git_repo(repo)
     agy = fake_agy(tmp_path, response="CLAUDE_AGY_REVIEW_OK", capture_argv=argv_file)
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(agy)
+    env = companion_env(tmp_path, agy)
 
     result = subprocess.run([NODE, str(runtime), "review", "--model-provider", "claude", "focus"], cwd=repo, env=env, capture_output=True, text=True)
 
@@ -844,10 +871,28 @@ def test_review_can_use_explicit_claude_provider(tmp_path):
     assert argv[argv.index("--model") + 1].startswith("Claude ")
 
 
+def test_review_uses_claude_provider_from_environment(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "agy-argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+    agy = fake_agy(tmp_path, response="CLAUDE_AGY_REVIEW_OK", capture_argv=argv_file)
+    env = companion_env(tmp_path, agy)
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus with spaces"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
+    assert argv[argv.index("--model") + 1].startswith("Claude ")
+    prompt = argv[argv.index("--prompt") + 1]
+    assert "focus with spaces" in prompt
+
+
 def test_invalid_model_provider_exits_2(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
-    env = os.environ.copy()
-    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path))
+    env = companion_env(tmp_path, fake_agy(tmp_path))
 
     result = subprocess.run([NODE, str(runtime), "review", "--model-provider", "openai", "focus"], env=env, capture_output=True, text=True)
 
