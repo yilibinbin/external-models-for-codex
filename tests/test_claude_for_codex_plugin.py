@@ -2674,6 +2674,25 @@ def test_setup_reports_lifecycle_hook_support_and_job_commands(tmp_path):
     assert payload["hooks"]["events"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
 
 
+def test_capabilities_reports_quality_policy_metadata(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    policy = payload["qualityPolicy"]
+    assert policy["defaultQualityEnv"] == "CLAUDE_FOR_CODEX_QUALITY"
+    assert policy["qualities"] == ["auto", "fast", "standard", "strong", "max"]
+    assert policy["efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    assert policy["ultracodeEffortSupported"] is False
+    assert policy["ultrareviewAutomatic"] is False
+
+
 def test_setup_reports_hooks_and_mcp_diagnostics(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"

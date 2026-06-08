@@ -79,6 +79,14 @@ import {
   validateSemanticArgs
 } from "./lib/semantic-context.mjs";
 import {
+  QUALITY_ENV,
+  VALID_QUALITIES,
+  VALID_EFFORTS,
+  applyQualityPolicy,
+  assertSafeModelAliasOrId,
+  assertValidEffort
+} from "./lib/quality-policy.mjs";
+import {
   StateReadError,
   canonicalWorkspaceRoot,
   currentSessionFileForCwd,
@@ -359,6 +367,13 @@ function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
     },
     claudeSdk: sdkAvailability(),
     backend: backendCapabilities(process.env, process.cwd()),
+    qualityPolicy: {
+      defaultQualityEnv: QUALITY_ENV,
+      qualities: VALID_QUALITIES,
+      efforts: VALID_EFFORTS,
+      ultracodeEffortSupported: false,
+      ultrareviewAutomatic: false
+    },
     git: commandVersion("git"),
     githubCli: commandVersion("gh"),
     hooks: hookDiagnostics(),
@@ -404,10 +419,16 @@ function parseArgs(argv, options = {}) {
       parsed.path = path;
       index += 1;
     } else if (arg === "--model") {
-      parsed.model = readOptionValue(tokens, index, arg);
+      parsed.model = assertSafeModelAliasOrId(readOptionValue(tokens, index, arg));
       index += 1;
     } else if (arg === "--effort") {
-      parsed.effort = readOptionValue(tokens, index, arg);
+      parsed.effort = assertValidEffort(readOptionValue(tokens, index, arg));
+      index += 1;
+    } else if (arg === "--quality") {
+      parsed.quality = readOptionValue(tokens, index, arg).trim().toLowerCase();
+      if (!VALID_QUALITIES.includes(parsed.quality)) {
+        throw new Error(`Invalid --quality "${parsed.quality}". Valid values: ${VALID_QUALITIES.join(", ")}.`);
+      }
       index += 1;
     } else if (arg.startsWith("--backend=")) {
       parsed.backend = arg.slice("--backend=".length).trim();
@@ -587,6 +608,7 @@ function commandHelp(command) {
     "--path <path>",
     "--model <model>",
     "--effort <effort>",
+    "--quality auto|fast|standard|strong|max",
     "--backend cli|sdk",
     "--json",
     "--stream-progress"
@@ -913,6 +935,42 @@ function collectGitContext(options) {
       : "",
     "</git_context>"
   ].filter((line) => line !== "").join("\n");
+}
+
+function qualityGitSignals(args) {
+  if (git(["rev-parse", "--is-inside-work-tree"]).status !== 0) {
+    return { changedFiles: 0, diffLines: 0 };
+  }
+  const paths = args.paths?.length ? args.paths : args.path ? [args.path] : [];
+  const pathArgs = paths.length ? ["--", ...paths] : [];
+  const status = git(["status", "--short", "--untracked-files=all", ...pathArgs]);
+  const staged = git(["diff", "--cached", "--numstat", ...pathArgs]);
+  const unstaged = git(["diff", "--numstat", ...pathArgs]);
+  if (status.status !== 0 || staged.status !== 0 || unstaged.status !== 0) {
+    return { changedFiles: 0, diffLines: 0 };
+  }
+  const files = new Set();
+  for (const line of status.stdout.split(/\r?\n/)) {
+    const file = line.slice(3).trim();
+    if (file) files.add(file);
+  }
+  let diffLines = 0;
+  for (const result of [staged, unstaged]) {
+    for (const line of result.stdout.split(/\r?\n/)) {
+      const [added, deleted, file] = line.split(/\t/);
+      if (file) files.add(file);
+      const addedNumber = added === "-" ? 0 : Number(added || 0);
+      const deletedNumber = deleted === "-" ? 0 : Number(deleted || 0);
+      diffLines += (Number.isFinite(addedNumber) ? addedNumber : 0) + (Number.isFinite(deletedNumber) ? deletedNumber : 0);
+    }
+  }
+  return { changedFiles: files.size, diffLines };
+}
+
+function applyCommandQualityPolicy(command, args) {
+  const requestedQuality = args.quality ?? process.env[QUALITY_ENV] ?? "auto";
+  const needsSignals = String(requestedQuality).trim().toLowerCase() === "auto";
+  return applyQualityPolicy(command, args, process.env, needsSignals ? qualityGitSignals(args) : {});
 }
 
 function buildClaudePrintInvocation(prompt, options) {
@@ -2161,6 +2219,12 @@ async function runReviewGate(rawArgs) {
     return;
   }
   args.scope = "working-tree";
+  try {
+    applyCommandQualityPolicy("review-gate", args);
+  } catch (error) {
+    warnGate(`quality policy failed; allowing stop: ${error.message || String(error)}`);
+    return;
+  }
   args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
   try {
     attachSemanticContext(args, { reviewGate: true, command: "review-gate" });
@@ -2520,6 +2584,12 @@ async function runClaudeTask(kind, rawArgs) {
   }
   args.scope = scope;
   try {
+    applyCommandQualityPolicy(kind, args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  try {
     attachSemanticContext(args, { allowed: ["review", "adversarial-review"].includes(kind), command: kind });
   } catch (error) {
     console.error(error.message || String(error));
@@ -2626,6 +2696,12 @@ async function runClaudeMultiReview(rawArgs) {
     process.exit(2);
   }
   args.scope = scope;
+  try {
+    applyCommandQualityPolicy("multi-review", args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
   try {
     attachSemanticContext(args, { command: "multi-review" });
   } catch (error) {
