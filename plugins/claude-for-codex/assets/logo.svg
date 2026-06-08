@@ -1,15 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
   <title id="title">Claude for Codex logo</title>
-  <desc id="desc">A rounded square plugin logo showing Codex and Claude collaboration with a Claude-inspired mark.</desc>
+  <desc id="desc">A rounded square plugin logo showing Codex and Claude app icons linked as a collaboration pair.</desc>
   <rect width="1024" height="1024" rx="192" fill="#111827"/>
-  <circle cx="340" cy="512" r="168" fill="#4F46E5"/>
-  <circle cx="684" cy="512" r="210" fill="#3A2D31"/>
-  <circle cx="684" cy="512" r="168" fill="#EFE7D8"/>
-  <path d="M414 512c0-62 50-112 112-112s112 50 112 112-50 112-112 112-112-50-112-112Z" fill="#F9FAFB"/>
-  <path d="M300 430h92v52h-92c-17 0-30 13-30 30s13 30 30 30h92v52h-92c-46 0-82-36-82-82s36-82 82-82Z" fill="#F9FAFB"/>
-  <path d="M632 430h92c46 0 82 36 82 82s-36 82-82 82h-92v-52h92c17 0 30-13 30-30s-13-30-30-30h-92v-52Z" fill="#D97757"/>
-  <path d="M516 463l53 49-53 49-35-35 16-14-16-14 35-35Z" fill="#111827"/>
-  <g fill="#D97757" transform="translate(684 512)">
+  <circle cx="338" cy="512" r="285" fill="#67E8F9" opacity=".12"/>
+  <circle cx="686" cy="512" r="285" fill="#D97757" opacity=".13"/>
+  <rect x="310" y="402" width="404" height="220" rx="110" fill="#F9FAFB" opacity=".92"/>
+  <path d="M512 430l76 82-76 82-48-48 32-34-32-34 48-48Z" fill="#D97757"/>
+  <circle cx="338" cy="512" r="164" fill="#2B2F3F"/>
+  <circle cx="338" cy="512" r="154" fill="none" stroke="#D8DEE9" stroke-width="4"/>
+  <g fill="none" stroke="#CFF7FF" stroke-width="26" stroke-linecap="round" transform="translate(338 512)">
+    <path d="M-86 38c54 61 143 83 222 54"/>
+    <path d="M-78-46c65-15 138-4 199 30"/>
+    <path d="M30-117c75 73 87 192 32 282"/>
+    <path d="M-50 88c30 75 95 86 132 22"/>
+    <circle cx="-82" cy="78" r="18"/>
+    <circle cx="0" cy="-88" r="18"/>
+    <circle cx="82" cy="78" r="18"/>
+  </g>
+  <circle cx="686" cy="512" r="164" fill="#EFE7D8"/>
+  <circle cx="686" cy="512" r="154" fill="none" stroke="#FFF8EA" stroke-width="4"/>
+  <g fill="#D97757" transform="translate(686 512)">
     <rect x="-15" y="-96" width="30" height="192" rx="15" transform="rotate(4)"/>
     <rect x="-15" y="-96" width="30" height="192" rx="15" transform="rotate(34)"/>
     <rect x="-15" y="-96" width="30" height="192" rx="15" transform="rotate(64)"/>
@@ -17,4 +27,10 @@
     <rect x="-15" y="-96" width="30" height="192" rx="15" transform="rotate(124)"/>
     <rect x="-15" y="-96" width="30" height="192" rx="15" transform="rotate(154)"/>
   </g>
+  <circle cx="432" cy="374" r="20" fill="#67E8F9"/>
+  <circle cx="592" cy="374" r="20" fill="#D97757"/>
+  <rect x="456" y="362" width="112" height="24" rx="12" fill="#F9FAFB"/>
+  <circle cx="432" cy="650" r="20" fill="#67E8F9"/>
+  <circle cx="592" cy="650" r="20" fill="#D97757"/>
+  <rect x="456" y="638" width="112" height="24" rx="12" fill="#F9FAFB"/>
 </svg>

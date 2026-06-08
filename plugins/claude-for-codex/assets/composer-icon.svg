@@ -1,11 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
   <title id="title">Claude for Codex composer icon</title>
-  <desc id="desc">Linked Codex and Claude review nodes for the Claude for Codex plugin.</desc>
+  <desc id="desc">Linked Codex and Claude app icons for the Claude for Codex plugin.</desc>
   <rect width="64" height="64" rx="14" fill="#111827"/>
-  <circle cx="23" cy="32" r="12" fill="#4F46E5"/>
+  <rect x="21" y="25" width="22" height="14" rx="7" fill="#F9FAFB"/>
+  <path d="M32 26l7 6-7 6-4-4 2-2-2-2 4-4Z" fill="#D97757"/>
+  <circle cx="23" cy="32" r="13" fill="#2B2F3F"/>
+  <g fill="none" stroke="#CFF7FF" stroke-width="2.5" stroke-linecap="round" transform="translate(23 32)">
+    <path d="M-8 4c6 6 15 8 22 5"/>
+    <path d="M-8-4c7-2 14-1 20 3"/>
+    <path d="M3-11c7 8 8 19 3 27"/>
+    <circle cx="-8" cy="8" r="1.8"/>
+    <circle cx="0" cy="-9" r="1.8"/>
+    <circle cx="9" cy="8" r="1.8"/>
+  </g>
   <circle cx="42" cy="32" r="13" fill="#EFE7D8"/>
-  <path d="M27 27h13v10H27z" fill="#F9FAFB"/>
-  <path d="M38 26l8 6-8 6-4-4 2-2-2-2 4-4Z" fill="#111827"/>
   <g fill="#D97757" transform="translate(42 32) scale(.12)">
     <rect x="-11" y="-64" width="22" height="128" rx="11" transform="rotate(4)"/>
     <rect x="-11" y="-64" width="22" height="128" rx="11" transform="rotate(44)"/>
