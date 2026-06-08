@@ -3,6 +3,7 @@ task_plan.md
 findings.md
 progress.md
 docs/superpowers/
+.worktrees/
 
 # Local caches
 .mypy_cache/
@@ -10,4 +11,3 @@ docs/superpowers/
 .ruff_cache/
 __pycache__/
 *.pyc
-

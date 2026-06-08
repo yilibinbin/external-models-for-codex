@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.0 - 2026-06-07
+
+- Restore Gemini for Codex as a Gemini CLI-only plugin.
+- Move Antigravity CLI workflows to the separate Antigravity for Codex plugin.
+- Keep existing Gemini CLI review, native-agent, real-smoke, hook, and GitHub Actions behavior unchanged.
+
 ## 0.10.2 - 2026-06-07
 
 - Fix command help handling so `multi-review --help` and other command help requests return usage without invoking Gemini.

@@ -5,7 +5,8 @@ External Models for Codex is a Codex plugin marketplace for external model CLI w
 Included plugins:
 
 - Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates.
-- Gemini for Codex lets Codex call the local Gemini CLI for independent read-only review and planning. It uses Gemini plan mode, bounded inline git context, schema-backed structured review, and capability-gated Gemini session flags.
+- Gemini for Codex lets Codex call the legacy Gemini CLI (`gemini`) for Gemini-only read-only review, planning, rescue diagnosis, structured review output, and Gemini CLI-native session capability checks.
+- Antigravity for Codex lets Codex call Google Antigravity CLI (`agy`) for mature plugin-managed review workflows: read-only review, adversarial critique, planning, rescue diagnosis, multi-role review, structured reports, role packs, background jobs, mailbox/leases, lifecycle hooks, GitHub Actions workflow rendering, release checks, opt-in real smoke, and an opt-in Stop hook gate with explicit Gemini or Claude model-provider selection.
 
 ## Installation
 
@@ -15,8 +16,11 @@ Install from GitHub:
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
 codex plugin add claude-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.10.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.0
 codex plugin add gemini-for-codex@external-models-for-codex
+
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.0
+codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 
 Use the provider-specific immutable release ref for the plugin you want to install. Use `main` only for development snapshots.
@@ -27,6 +31,10 @@ Upgrade an existing installation:
 codex plugin marketplace upgrade external-models-for-codex
 codex plugin remove claude-for-codex
 codex plugin add claude-for-codex@external-models-for-codex
+codex plugin remove gemini-for-codex
+codex plugin add gemini-for-codex@external-models-for-codex
+codex plugin remove antigravity-for-codex
+codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 
 Rollback from `0.4.0`: disable the review gate with `setup --disable-review-gate`, remove or downgrade the plugin, then remove stale trusted hook entries for `SessionStart`, `SessionEnd`, `UserPromptSubmit`, or `Stop` if Codex Settings still points at missing files.
@@ -37,6 +45,7 @@ Install from a local checkout:
 codex plugin marketplace add .
 codex plugin add claude-for-codex@external-models-for-codex
 codex plugin add gemini-for-codex@external-models-for-codex
+codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 
 ## Requirements
@@ -44,7 +53,8 @@ codex plugin add gemini-for-codex@external-models-for-codex
 - Codex CLI with plugin support
 - Claude Code CLI available as `claude`, configured with `CLAUDE_CODE_PATH`, or installed at `~/.local/bin/claude`
 - Optional `@anthropic-ai/claude-agent-sdk` package for Claude SDK native subagent mode; `@anthropic-ai/claude-code` remains supported as a compatibility fallback
-- Gemini CLI available as `gemini`, or configured with `GEMINI_CLI_PATH`, for Gemini for Codex
+- Gemini CLI available as `gemini` or `GEMINI_CLI_PATH` for Gemini for Codex
+- Google Antigravity CLI available as `agy`, configured with `AGY_CLI_PATH` or `ANTIGRAVITY_CLI_PATH`, for Antigravity for Codex
 - Node.js 20 or newer
 - A Git repository for review context collection
 
@@ -62,7 +72,14 @@ Claude CLI resolution order:
 
 If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set `CLAUDE_CODE_PATH` to the absolute executable path.
 
-Gemini CLI resolution order:
+Antigravity for Codex model selection:
+
+1. `ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini` is the default.
+2. `ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=claude` explicitly selects a Claude model exposed by Antigravity.
+3. `ANTIGRAVITY_FOR_CODEX_MODEL`, `ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL`, `ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL`, and `--model` are validated against the selected provider. GPT/OpenAI labels are rejected.
+4. Claude-through-Antigravity is explicit and separate from `claude-for-codex`; it still invokes `agy`, not the Claude Code CLI or Claude SDK.
+
+Legacy Gemini CLI resolution order:
 
 1. `GEMINI_CLI_PATH` when it points to an executable file.
 2. `gemini` from the current `PATH`.
@@ -82,8 +99,9 @@ Gemini CLI resolution order:
 - `claude-review-gate`: configure the optional Stop hook review gate.
 - `claude-github-actions-review`: generate or validate a fork-safe GitHub Actions PR review workflow.
 - `claude-collaboration-loop`: run a Codex-Claude plan, reconcile, implement, review, and report workflow.
-- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI equivalents for Codex-side multi-model review. Gemini rescue is read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out and supports `--native-agents`, and Gemini-native session flags are capability-gated from the installed CLI.
+- `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI-backed equivalents for Codex-side review. Gemini rescue is read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out, and Gemini CLI-only native agent/session flags are capability-gated from the installed CLI.
 - `gemini-mailbox`, `gemini-leases`: inspect sanitized Gemini coordination summaries and advisory path-attention leases.
+- `antigravity-review`, `antigravity-adversarial-review`, `antigravity-plan`, `antigravity-multi-review`, `antigravity-rescue`, `antigravity-review-gate`, `antigravity-github-actions-review`: Antigravity-backed mature plugin-managed review, planning, rescue, Stop gate, and workflow-risk review with explicit Gemini or Claude model-provider selection. Antigravity for Codex uses `agy` only, does not claim Claude SDK, Gemini native-agent, or ultrareview parity, and keeps Claude-through-Antigravity separate from `claude-for-codex`.
 
 ## Gemini for Codex
 
@@ -94,13 +112,13 @@ codex plugin marketplace add .
 codex plugin add gemini-for-codex@external-models-for-codex
 ```
 
-Gemini review runs in headless JSON mode with `gemini --approval-mode=plan --output-format=json --prompt`. It uses bounded inline git context and does not depend on Gemini MCP or a Gemini extension.
+Gemini review is Gemini CLI-only and uses legacy Gemini CLI headless JSON mode (`gemini --approval-mode=plan --output-format=json --prompt`). It uses bounded inline git context and does not depend on Antigravity, Gemini MCP, or a Gemini extension.
 
-`gemini-multi-review` has two multi-agent modes. By default it starts one Gemini CLI role reviewer per selected role in parallel and aggregates the outputs. With `--native-agents`, it creates temporary Gemini subagent definitions and asks Gemini CLI to dispatch `@gfc_<role>` native subagents for the requested review roles.
+`gemini-multi-review` has two multi-agent modes. By default it starts one Gemini CLI review process per selected role in parallel and aggregates the outputs. With `--native-agents`, it creates temporary Gemini subagent definitions and asks Gemini CLI to dispatch `@gfc_<role>` native subagents for the requested review roles.
 
 Gemini for Codex now also registers SessionStart, SessionEnd, UserPromptSubmit, and Stop hooks. Session hooks track the active Codex session, record turn baselines, remind about unread Gemini job results, and only clean up queued/running jobs with an explicit matching session id.
 
-Use `gemini-review --structured` for schema-validated review output. Use `recommend-execution-mode` for noninteractive foreground/background sizing guidance. `setup` reports whether the current Gemini CLI supports `--resume`, `--session-id`, `--session-file`, `--list-sessions`, and `--worktree`; unsupported requested flags fail before Gemini invocation.
+Use `gemini-review --structured` for schema-validated review output. Use `recommend-execution-mode` for noninteractive foreground/background sizing guidance. `setup` reports whether the local Gemini CLI supports `--resume`, `--session-id`, `--session-file`, `--list-sessions`, and `--worktree`; unsupported requested flags fail before Gemini invocation.
 
 ## Enhanced Adversarial Review
 
