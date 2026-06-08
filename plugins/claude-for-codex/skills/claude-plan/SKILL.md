@@ -13,6 +13,31 @@ Run:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" plan "$ARGUMENTS"
 ```
 
+## Natural-Language Claude Routing
+
+<!--
+routing:plan
+routing:codex-owns-final-plan
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default.
+- Use `--quality strong` for deep, strict, high-risk, migration, release, or difficult diagnosis/planning requests.
+- Use `--quality max` only when the user explicitly asks for the strongest local Claude pass.
+- If the user names a concrete Claude model or effort, pass it as explicit argv tokens outside quoted `$ARGUMENTS`.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "Ask Claude to make an independent implementation plan."
+- "Use Claude for a strict migration plan review."
+- "Use the strongest local Claude planning pass before we edit."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Route implementation decomposition, test ordering, migration planning, and risk sequencing to `plan`.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Rules:
 - Treat Claude's plan as a competing design artifact, not an authority.
 - Reconcile Claude's plan with Codex's local repo evidence before editing.

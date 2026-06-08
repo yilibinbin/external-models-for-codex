@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 const WORKFLOW_RELATIVE_PATH = path.join(".github", "workflows", "claude-for-codex-review.yml");
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.14.2";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.15.0";
 const DEFAULT_TIMEOUT_MINUTES = 30;
 const VALID_ROLES = new Set(["correctness", "security", "tests", "release", "adversarial", "skeptic", "architect", "minimalist"]);
 const LOCAL_PATH_PATTERN = /\/Users\/[A-Za-z0-9._/-]+|\/private\/var\/folders\/[A-Za-z0-9._/-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._\\/-]+/;
@@ -62,7 +62,7 @@ export function renderWorkflow(pluginRoot, options = {}) {
     "        shell: bash",
     "        run: |",
     "          set -euo pipefail",
-    "          node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions render-annotations --input claude-for-codex-review.json > claude-for-codex-annotations.json",
+    "          node \"$CLAUDE_PLUGIN_ROOT/scripts/claude-companion.mjs\" github-actions render-annotations --input claude-for-codex-review.json > claude-for-codex-annotations.json",
     "",
     "      - name: Publish Checks annotations",
     "        if: steps.fork-safety.outputs.safe_to_review == 'true'",
@@ -145,6 +145,8 @@ export function validateWorkflow(text, options = {}) {
     result(!options.annotations || body.includes("checks: write"), "checks-permission-when-annotations"),
     result(body.includes("codex plugin marketplace add yilibinbin/external-models-for-codex"), "marketplace-install"),
     result(body.includes("codex plugin add claude-for-codex@external-models-for-codex"), "plugin-install"),
+    result(body.includes("codex plugin list --json") && body.includes("CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT"), "plugin-root-resolved"),
+    result(!body.includes("node plugins/claude-for-codex/scripts/"), "no-repo-relative-runtime-path"),
     result(/--ref\s+(?!main\b)[A-Za-z0-9._/-]+/.test(body), "immutable-release-ref"),
     result(!LOCAL_PATH_PATTERN.test(body), "no-local-absolute-paths"),
     result(body.includes("BASE_SHA: ${{ github.event.pull_request.base.sha }}"), "base-sha-env-mapping"),
@@ -155,6 +157,10 @@ export function validateWorkflow(text, options = {}) {
     result(body.includes("actions/upload-artifact@v4") && body.includes("retention-days: 5"), "structured-artifact"),
     result(runBlocks.length > 0 && runBlocks.every((block) => !block.includes("${{ github.")), "no-github-context-in-run"),
     result(body.includes('"$BASE_SHA"') && body.includes('"$HEAD_REPO"') && body.includes('"$BASE_REPO"'), "quoted-shell-vars"),
+    result(body.includes("MODEL_ARGS=()"), "model-effort-args-array"),
+    result(body.includes('MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")'), "model-env-forwarded"),
+    result(body.includes('MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")'), "effort-env-forwarded"),
+    result(body.includes('${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}'), "model-effort-shell-quoted"),
     result(!body.includes("rescue --write"), "no-write-rescue")
   ];
   return {

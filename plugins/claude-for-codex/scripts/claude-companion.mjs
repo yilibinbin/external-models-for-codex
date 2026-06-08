@@ -944,7 +944,8 @@ function qualityGitSignals(args) {
   }
   const paths = args.paths?.length ? args.paths : args.path ? [args.path] : [];
   const pathArgs = paths.length ? ["--", ...paths] : [];
-  const branchDiff = args.scope === "branch" && args.base
+  const scope = args.scope ?? "auto";
+  const branchDiff = (scope === "auto" || scope === "branch") && args.base
     ? git(["diff", "--numstat", `${args.base}...HEAD`, ...pathArgs])
     : null;
   const status = git(["status", "--short", "--untracked-files=all", ...pathArgs]);
@@ -1853,10 +1854,10 @@ function parseGithubActionsOptions(tokens) {
       options.roles = readOptionValue(tokens, index, token);
       index += 1;
     } else if (token === "--model") {
-      options.model = readOptionValue(tokens, index, token);
+      options.model = assertSafeModelAliasOrId(readOptionValue(tokens, index, token));
       index += 1;
     } else if (token === "--effort") {
-      options.effort = readOptionValue(tokens, index, token);
+      options.effort = assertValidEffort(readOptionValue(tokens, index, token));
       index += 1;
     } else if (token === "--quality") {
       options.quality = readOptionValue(tokens, index, token).trim().toLowerCase();

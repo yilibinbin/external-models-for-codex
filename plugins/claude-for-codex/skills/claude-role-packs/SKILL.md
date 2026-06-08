@@ -31,6 +31,30 @@ Run a built-in pack:
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review --role-pack "$ARGUMENTS"
 ```
 
+## Natural-Language Claude Routing
+
+<!--
+routing:role-packs
+routing:role-pack-executable-builtins-only
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Keep Codex responsible for reconciling Claude output before edits.
+- Route named reviewer-team requests to built-in role packs when an existing pack matches the intent.
+- Keep user-authored role packs validate/inspect-only; do not execute them.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "List the Claude reviewer teams."
+- "Use the release reviewer team for this branch."
+- "Validate this custom reviewer pack."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Use `roles list` or `roles inspect` for discovery, `roles validate` for user-authored files, and `multi-review --role-pack` only for built-in executable packs.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Rules:
 - Built-in role packs are executable.
 - User-authored role packs are validate/inspect-only; do not execute them.

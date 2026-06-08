@@ -34,6 +34,30 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review "$AR
    - Claude findings rejected,
    - residual risk.
 
+## Natural-Language Claude Routing
+
+<!--
+routing:collaboration-loop
+routing:codex-reconciles-claude
+-->
+
+- Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+- Keep Codex responsible for reconciling Claude output before edits.
+- Use this workflow when the user wants Codex and Claude to plan, implement, review, and reconcile together.
+- Keep Claude findings advisory until Codex verifies them against local evidence.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+User-facing examples:
+- "Run a Codex-Claude collaboration loop on this feature."
+- "Have Claude plan first, then Codex reconcile and implement."
+- "Use Claude to review after Codex completes the plan."
+
+Internal routing procedure:
+- Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- Use this skill only when the user asks for a full collaboration loop, not for a single review or plan.
+- Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
+- Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.
+
 Hard boundaries:
 - Claude review output is not self-executing.
 - Codex must not claim a Claude finding is fixed unless it applied and verified the fix.

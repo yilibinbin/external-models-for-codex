@@ -1,6 +1,6 @@
 ---
 name: claude-multi-review
-description: Opt in to plugin-managed role fan-out Claude review from Codex for high-risk changes that need multiple read-only perspectives.
+description: Run plugin-managed Claude role fan-out review when the user asks for multiple perspectives, named review roles, multi-agent or multi-role review, SDK subagents, or high-risk multi-role review; do not use this skill for strict-only single review.
 ---
 
 # Claude Multi Review
@@ -12,6 +12,47 @@ Run:
 ```bash
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review "$ARGUMENTS"
 ```
+
+## Natural-Language Claude Routing
+
+Codex should let the user ask for Claude multi-role review in normal language. Do not ask the user to write `--quality`, `--model`, or `--effort` unless troubleshooting the plugin itself.
+
+When converting the user's request to companion invocation:
+- Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default.
+- Use this skill when the user asks for multiple perspectives, named review roles, multi-agent review, role fan-out, SDK subagents, or a named reviewer team.
+- Treat "strict" alone as review strength, not role fan-out. Strict-only single review belongs to `claude-review`.
+- Use `--quality strong` for high-risk, security, release, migration, or adversarial multi-role review when the user does not name a concrete model.
+- Use `--quality max` only when the user explicitly asks for the strongest local multi-role Claude review.
+- Use `--agent-team sdk-subagents --backend sdk` only when the user explicitly asks for native Claude SDK subagents or native subagent orchestration.
+- Use `--background` for more than three roles, large diffs, slow providers, or broad scope.
+- Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
+
+Internal invocation examples, not for users:
+- Role fan-out: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review --roles correctness,security "$ARGUMENTS"`.
+- Native SDK subagents: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review --backend sdk --agent-team sdk-subagents "$ARGUMENTS"`.
+- Background role fan-out: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" reserve-job multi-review --background "$ARGUMENTS"`.
+- Strongest local quality: `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" multi-review --quality max "$ARGUMENTS"`.
+- Model, effort, quality, backend, roles, role-pack, agent-team, and background flags are added outside quoted `$ARGUMENTS`; `$ARGUMENTS` carries only natural-language focus text.
+
+<!--
+routing:multi-review
+routing:strict-only-to-single-review
+routing:role-fanout
+routing:sdk-subagents-explicit
+routing:background-for-broad-review
+-->
+
+User-facing examples:
+- "Use Claude for a multi-role release and security review."
+- "Use Claude native SDK subagents to review this change."
+- "Use the strongest local Claude multi-agent review for this migration."
+
+Internal routing procedure:
+- Classify the request as multi-review when the user asks for multiple perspectives, named roles, role fan-out, multi-agent review, native SDK subagents, or reviewer teams.
+- If the request is only strict review with no multi-role signal, use `claude-review`.
+- Select roles from requested dimensions when named; otherwise use the documented default role set.
+- Use SDK subagents only for explicit native subagent requests, and keep plugin-managed parallel CLI fan-out as the default.
+- Add `--quality`, `--model`, `--effort`, `--roles`, `--role-pack`, `--backend`, `--agent-team`, and `--background` only as explicit argv tokens when the request calls for them.
 
 Background routing:
 - Foreground use runs the normal command above.
