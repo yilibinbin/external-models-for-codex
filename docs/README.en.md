@@ -16,10 +16,10 @@ Install from GitHub:
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.14.1
 codex plugin add claude-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.1
 codex plugin add gemini-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.1
 codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 

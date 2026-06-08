@@ -1,8 +1,17 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
   <title id="title">Antigravity for Codex composer icon</title>
-  <desc id="desc">Two linked review nodes for the Antigravity for Codex plugin.</desc>
-  <rect width="64" height="64" rx="14" fill="#4F46E5"/>
-  <circle cx="23" cy="32" r="11" fill="#F9FAFB"/>
-  <circle cx="41" cy="32" r="11" fill="#F59E0B"/>
-  <path d="M26 25h12v14H26z" fill="#111827" opacity=".9"/>
+  <desc id="desc">Antigravity app arch mark with a compact Codex badge.</desc>
+  <defs>
+    <linearGradient id="antigravity-arch" x1="10" y1="46" x2="52" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4285F4"/>
+      <stop offset=".35" stop-color="#4285F4"/>
+      <stop offset=".55" stop-color="#34A853"/>
+      <stop offset=".76" stop-color="#FBBC04"/>
+      <stop offset="1" stop-color="#EA4335"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#FFFFFF"/>
+  <path d="M10 45c8.6-6.3 10.9-18.2 13.8-26.5 1.8-4.8 4-7.7 7-7.7s5.3 3.1 7.1 8c2.9 8.4 5.2 20 13.9 26.2" fill="none" stroke="url(#antigravity-arch)" stroke-width="8.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="42" y="42" width="17" height="17" rx="5" fill="#111827" stroke="#FFFFFF" stroke-width="2"/>
+  <path d="m48.5 47.5-3 2.5 3 2.5M52.5 47.5l3 2.5-3 2.5" fill="none" stroke="#E5E7EB" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

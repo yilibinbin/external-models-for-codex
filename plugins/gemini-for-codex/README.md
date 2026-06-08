@@ -183,7 +183,7 @@ Write the default workflow only when requested:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
 ```
 
-The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.11.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.11.1`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
 
 ## Stop Hook
 

@@ -14,7 +14,7 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.5.0"
+    assert manifest["version"] == "0.5.1"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
@@ -1557,7 +1557,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.5.0\n"
+        "# antigravity-for-codex-v0.5.1\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -1595,7 +1595,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.5.0\n"
+        "          echo --ref antigravity-for-codex-v0.5.1\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
