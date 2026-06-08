@@ -19,7 +19,7 @@ codex plugin add claude-for-codex@external-models-for-codex
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
 codex plugin add gemini-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.3
 codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 
@@ -78,6 +78,10 @@ Antigravity for Codex 模型选择：
 2. `ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=claude` 会显式选择 Antigravity 暴露的 Claude 模型。
 3. `ANTIGRAVITY_FOR_CODEX_MODEL`、`ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL`、`ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL` 和 `--model` 会按所选 provider 校验。GPT/OpenAI 标签会被拒绝。
 4. Claude-through-Antigravity 是显式 Antigravity provider 选择，并且和 `claude-for-codex` 分离；它仍然调用 `agy`，不调用 Claude Code CLI 或 Claude SDK。
+
+自然语言路由规则：用户只需要正常表达“用 Antigravity 严格多角色审阅”这类意图，Codex 负责映射到内部 provider/model 参数。默认使用 Gemini provider；只有用户明确要求“Antigravity 使用 Claude”或“Claude through Antigravity”时，才切换到 Claude provider。
+
+工作流生成说明：`github-actions init` 会把所选 provider 持久化写入生成的 workflow。只有在你明确希望把该 provider 提交给团队共用时，才在生成 workflow 时使用 provider 环境变量；provider-specific model 默认值仍归运行时管理，除非显式设置 `ANTIGRAVITY_FOR_CODEX_MODEL`。
 
 Legacy Gemini CLI 查找顺序：
 
