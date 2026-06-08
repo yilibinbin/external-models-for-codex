@@ -70,7 +70,7 @@ function nativeAgentPrompt(role, { structuredJson = false } = {}) {
   ].join("\n");
 }
 
-export function buildNativeReviewAgents(roles, { model, structuredJson = false, disallowedTools } = {}) {
+export function buildNativeReviewAgents(roles, { model, effort, structuredJson = false, disallowedTools } = {}) {
   const writeDenyTools = disallowedTools ?? configuredWriteDenyTools(process.env);
   const agents = {};
   for (const role of roles || []) {
@@ -83,6 +83,9 @@ export function buildNativeReviewAgents(roles, { model, structuredJson = false, 
       model: nativeAgentModel(model),
       maxTurns: 4
     };
+    if (effort) {
+      definition.effort = effort;
+    }
     agents[name] = definition;
   }
   return agents;

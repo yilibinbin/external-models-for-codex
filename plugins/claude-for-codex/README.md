@@ -57,7 +57,7 @@ Safety and operating model:
 
 Adaptive quality:
 
-- `--quality auto` is the default and scores command type, role count, risky roles, backend, semantic context, and diff size.
+- `--quality auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size.
 - `--quality fast` uses Claude Code's `sonnet` alias with low effort.
 - `--quality standard` uses `sonnet` with high effort.
 - `--quality strong` uses `opus` with xhigh effort.
@@ -66,7 +66,7 @@ Adaptive quality:
 - The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`, so Claude Code can map aliases to the current best available model.
 - `ultracode` is not passed as `--effort`; current noninteractive Claude Code accepts only `low`, `medium`, `high`, `xhigh`, and `max`.
 - `claude ultrareview` remains a separate explicit command requiring `--confirm-cost` and is never used by hooks or default review paths.
-- Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks remain conservative unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
+- Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks and `review-gate` remain capped to `standard` unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
 
 Important routing note:
 

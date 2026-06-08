@@ -2353,6 +2353,24 @@ def test_review_gate_explicit_auto_quality_is_still_capped(tmp_path):
         assert argv[argv.index("--effort") + 1] == "high"
 
 
+def test_review_gate_explicit_max_quality_can_escalate_manual_gate(tmp_path):
+    result, prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        args=["--quality", "max"],
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "standard"},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert prompts
+    argv_files = sorted(capture_dir.glob("argv-*.json"))
+    assert argv_files
+    for argv_file in argv_files:
+        argv = json.loads(argv_file.read_text())
+        assert argv[argv.index("--model") + 1] == "opus"
+        assert argv[argv.index("--effort") + 1] == "max"
+
+
 def test_review_gate_invalid_quality_env_fails_open_without_claude(tmp_path):
     result, prompts, _capture_dir = run_fake_review_gate(
         tmp_path,
@@ -2436,6 +2454,9 @@ def test_review_quality_max_forwards_max_effort_without_ultrareview(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--permission-mode") + 1] == "dontAsk"
+    assert {"Read", "Grep", "Glob"}.issubset(set(argv[argv.index("--tools") + 1].split(",")))
+    assert argv[argv.index("--disallowedTools") + 1] == "Edit,Write,MultiEdit,Bash"
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "max"
     assert "ultrareview" not in argv
@@ -3284,6 +3305,7 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
         assert "permissionMode" not in definition
         assert definition["maxTurns"] == 4
         assert definition["model"] == "opus"
+        assert definition["effort"] == query["effort"]
         assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
             set(definition["disallowedTools"])
         )
@@ -3372,6 +3394,8 @@ def test_sdk_subagents_receive_quality_resolved_opus_model(tmp_path):
     agents = query["agents"]
     assert agents["cfc_correctness"]["model"] == "opus"
     assert agents["cfc_security"]["model"] == "opus"
+    assert agents["cfc_correctness"]["effort"] == "xhigh"
+    assert agents["cfc_security"]["effort"] == "xhigh"
 
 
 def test_sdk_native_structured_output_passes_schema(tmp_path):

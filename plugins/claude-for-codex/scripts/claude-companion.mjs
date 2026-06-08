@@ -2455,7 +2455,7 @@ async function runSdkSubagentMultiReview(args, gitContext) {
     throw new Error("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.");
   }
   const structuredJson = Boolean(args.jsonOutput && args.nativeStructured);
-  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model, structuredJson });
+  const agents = buildNativeReviewAgents(args.reviewRoles, { model: args.model, effort: args.effort, structuredJson });
   const focusText = args._.join(" ");
   const prompt = nativeReviewTeamPrompt(args.reviewRoles, gitContext, focusText, { structuredJson });
   const aggregate = await runSdkNativeReview(prompt, args, {

@@ -161,7 +161,7 @@ Claude 原生 SDK 模式必须显式开启，并且在真实 SDK subagent smoke 
 
 SDK native subagent 结构化审阅使用嵌套的逐角色 review 对象，并且仍然是显式启用路径。默认审阅后端不变。
 
-Claude for Codex 支持 `--quality auto|fast|standard|strong|max`。`auto` 是默认策略，会根据命令类型、角色数量、风险角色、backend、语义上下文和 diff 大小评分。`fast` 映射到 `sonnet` 加 low effort，`standard` 映射到 `sonnet` 加 high effort，`strong` 映射到 `opus` 加 xhigh effort，`max` 映射到 `opus` 加 max effort。显式传入的 `--model` 和 `--effort` 永远优先。策略使用 Claude Code alias，而不是 `claude-opus-4-8` 这类具体模型 id；不会把 `ultracode` 作为 `--effort` 传出，`ultrareview` 仍然是单独的显式费用确认命令。
+Claude for Codex 支持 `--quality auto|fast|standard|strong|max`。`auto` 是默认策略，会根据命令类型、JSON 输出、角色数量、风险角色、backend、SDK subagent team、语义上下文和 diff 大小评分。`fast` 映射到 `sonnet` 加 low effort，`standard` 映射到 `sonnet` 加 high effort，`strong` 映射到 `opus` 加 xhigh effort，`max` 映射到 `opus` 加 max effort。显式传入的 `--model` 和 `--effort` 永远优先。策略使用 Claude Code alias，而不是 `claude-opus-4-8` 这类具体模型 id；不会把 `ultracode` 作为 `--effort` 传出，`ultrareview` 仍然是单独的显式费用确认命令。`review-gate` 默认最高保持 `standard`，除非用户手动显式运行 `review-gate --quality strong|max`。
 
 `ultrareview` 会转发到 Claude 原生 cloud ultrareview 命令。它不会被 hooks 或默认审阅路径自动调用；因为可能使用远端/cloud 执行并消耗 usage credits，所以必须传 `--confirm-cost`，或设置 `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1`，否则运行时会拒绝执行。
 

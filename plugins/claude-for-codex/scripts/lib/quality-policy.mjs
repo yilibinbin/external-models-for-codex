@@ -85,26 +85,23 @@ export function scoreQuality(command, args = {}, signals = {}) {
   return score;
 }
 
-export function tierForScore(score, { command, explicitQuality = false } = {}) {
-  let tier = score >= 8 ? "max" : score >= 5 ? "strong" : "standard";
-  if (command === "review-gate" && !explicitQuality) {
-    tier = "standard";
-  }
-  return tier;
+export function tierForScore(score) {
+  return score >= 8 ? "max" : score >= 5 ? "strong" : "standard";
 }
 
 export function profileForQuality(quality, context = {}) {
   const resolvedQuality = quality === "auto"
-    ? tierForScore(scoreQuality(context.command, context.args, context.signals), {
-        ...context,
-        explicitQuality: context.explicitQuality && (quality === "strong" || quality === "max")
-      })
+    ? tierForScore(scoreQuality(context.command, context.args, context.signals))
     : quality;
   const explicitReviewGateEscalation = context.command === "review-gate" && context.explicitQuality && (quality === "strong" || quality === "max");
   const cappedQuality = context.command === "review-gate" && !explicitReviewGateEscalation && (resolvedQuality === "strong" || resolvedQuality === "max")
     ? "standard"
     : resolvedQuality;
-  return QUALITY_PROFILES[cappedQuality];
+  const profile = QUALITY_PROFILES[cappedQuality];
+  if (!profile) {
+    throw new Error(`Quality profile "${cappedQuality}" is not configured.`);
+  }
+  return profile;
 }
 
 export function resolveQualityPolicy(command, args = {}, env = process.env, signals = {}) {
