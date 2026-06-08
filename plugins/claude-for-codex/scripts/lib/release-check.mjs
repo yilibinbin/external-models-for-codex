@@ -105,6 +105,21 @@ function githubActionsDefaultsToStandardQuality(text) {
     || /const\s+quality\s*=\s*options\.quality\s*\?\?\s*["']standard["']/.test(text);
 }
 
+function manifestAssetChecks(pluginRoot) {
+  const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+  const iface = manifest.interface ?? {};
+  const assetSpecs = [
+    ["composerIcon", iface.composerIcon],
+    ["logo", iface.logo],
+    ...((iface.screenshots ?? []).map((value, index) => [`screenshots.${index}`, value]))
+  ];
+  return assetSpecs.map(([label, value]) => {
+    const relativePath = String(value ?? "");
+    const safeRelative = relativePath && !path.isAbsolute(relativePath) && !relativePath.split(/[\\/]/).includes("..");
+    return result(Boolean(safeRelative && fs.existsSync(path.join(pluginRoot, relativePath))), `manifest-asset-${label}`, relativePath);
+  });
+}
+
 function resolveLayout(root) {
   const repoPluginRoot = path.join(root, "plugins", "claude-for-codex");
   if (fs.existsSync(path.join(repoPluginRoot, ".codex-plugin", "plugin.json"))) {
@@ -233,6 +248,7 @@ function checkNativeReleaseAssets(root) {
   const ultrareviewNotDefaultDocsOk = docsJoined.includes("not used by hooks or default review paths") && docsJoined.includes("never used by hooks or default review paths");
   const detail = "claude-ultrareview; native assets/docs include --agent-team sdk-subagents, --confirm-cost, @anthropic-ai/claude-agent-sdk";
   return [
+    ...manifestAssetChecks(pluginRoot),
     result(fs.existsSync(nativeHelper), "native-review-helper", path.relative(pluginRoot, nativeHelper)),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
     result(

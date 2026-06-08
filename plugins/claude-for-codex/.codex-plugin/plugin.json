@@ -64,8 +64,8 @@
     ],
     "websiteURL": "https://github.com/yilibinbin/external-models-for-codex",
     "brandColor": "#4F46E5",
-    "composerIcon": "assets/composer-icon.svg",
-    "logo": "assets/logo.svg",
+    "composerIcon": "assets/composer-icon.png",
+    "logo": "assets/logo.png",
     "screenshots": [
       "assets/review-workflow.svg",
       "assets/stop-gate.svg"

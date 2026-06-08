@@ -4485,6 +4485,10 @@ def test_release_check_knows_claude_0141_native_assets():
     assert "--agent-team sdk-subagents" in detail
     assert "--confirm-cost" in detail
     assert "@anthropic-ai/claude-agent-sdk" in detail
+    assert checks["manifest-asset-composerIcon"]["ok"] is True
+    assert checks["manifest-asset-logo"]["ok"] is True
+    assert checks["manifest-asset-screenshots.0"]["ok"] is True
+    assert checks["manifest-asset-screenshots.1"]["ok"] is True
     assert checks["native-review-helper"]["ok"] is True
     assert checks["ultrareview-skill"]["ok"] is True
     assert checks["native-cli-flags"]["ok"] is True
