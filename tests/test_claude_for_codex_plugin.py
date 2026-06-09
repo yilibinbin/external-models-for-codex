@@ -16,6 +16,17 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/C
 DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
 
 
+def process_is_running(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "pid=", "-o", "stat="], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    parts = result.stdout.strip().split(None, 1)
+    if not parts or parts[0] != str(pid):
+        return False
+    stat = parts[1] if len(parts) > 1 else ""
+    return not stat.startswith("Z")
+
+
 def run_fake_claude_review(
     tmp_path,
     args,
@@ -210,6 +221,7 @@ import {{
   recordJobProgress,
   finishJob,
   readJob,
+  updateJob,
   updateJobUnlessTerminal
 }} from {json.dumps(jobs.as_uri())};
 
@@ -219,6 +231,11 @@ const job = createJob(cwd, {{ command: "review", args: ["x"], cwd }}, env);
 const claim = claimJobForRun(cwd, job.id, process.pid, env);
 recordJobHeartbeat(cwd, job.id, {{ phase: "reviewing" }}, env);
 recordJobProgress(cwd, job.id, {{ phase: "sdk-result", message: "path " + cwd + " {secret}", role: "security " + cwd }}, env);
+const returnedUpdate = updateJob(cwd, job.id, {{
+  cancelIdentity: {{ pid: 123, command: "node " + cwd + "/scripts/claude-companion.mjs __run-job " + job.id }},
+  cancelChildIdentity: {{ pid: 124, command: "node " + cwd + "/scripts/claude-companion.mjs review" }},
+  cancelWorkerIdentity: {{ pid: 123, command: "node " + cwd + "/scripts/claude-companion.mjs __run-job " + job.id }}
+}}, env);
 updateJobUnlessTerminal(cwd, job.id, {{ cancelFailureReason: "cancel path " + cwd + " {secret}" }}, env);
 finishJob(cwd, job.id, {{
   status: 0,
@@ -227,13 +244,16 @@ finishJob(cwd, job.id, {{
   error: "error {secret}"
 }}, env);
 const after = recordJobHeartbeat(cwd, job.id, {{ phase: "should-not-change" }}, env);
-console.log(JSON.stringify({{ claim, after, stored: readJob(cwd, job.id, env) }}));
+console.log(JSON.stringify({{ claim, returnedUpdate, after, stored: readJob(cwd, job.id, env) }}));
 """
     result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     stored_text = json.dumps(payload["stored"])
     assert payload["claim"]["status"] == "claimed"
+    assert str(repo) not in payload["returnedUpdate"]["cancelIdentity"]["command"]
+    assert str(repo) not in payload["returnedUpdate"]["cancelChildIdentity"]["command"]
+    assert str(repo) not in payload["returnedUpdate"]["cancelWorkerIdentity"]["command"]
     assert payload["stored"]["status"] == "succeeded"
     assert payload["stored"]["phase"] == "succeeded"
     assert payload["stored"]["heartbeatSeq"] >= 1
@@ -890,9 +910,7 @@ def test_cancel_escalates_to_sigkill_for_sigterm_ignoring_child(tmp_path):
     cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
     assert cancelled.returncode == 0, cancelled.stderr
     for _ in range(30):
-        try:
-            os.kill(fake_pid, 0)
-        except ProcessLookupError:
+        if not process_is_running(fake_pid):
             break
         time.sleep(0.1)
     else:
@@ -972,15 +990,19 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "wait-timeout-stripped",
         "job-idempotency-reuse",
         "job-result-sanitized",
+        "job-write-returns-sanitized",
         "queued-worker-bootstrap-reaper",
         "progress-event-parser",
         "stderr-line-buffering",
         "sdk-progress-hook-point",
         "signal-child-group-cleanup",
         "child-process-identity-required",
+        "cancel-child-and-worker",
+        "leaderless-child-group-cleanup",
         "hard-timeout-sigkill",
         "cancel-sigkill-escalation",
         "owner-aware-file-locks",
+        "zombie-process-not-alive",
         "process-aware-reaper",
         "execution-mode-recommendation",
         "git-timeout-not-nonrepo",
@@ -6985,7 +7007,7 @@ def test_internal_job_worker_rejects_unsupported_job_command(tmp_path):
     assert "Unsupported background job command" in payload["stderr"]
 
 
-def test_running_cancel_refuses_unvalidated_pid_and_corrupt_result_is_reported(tmp_path):
+def test_running_cancel_treats_absent_worker_as_cancelled_and_corrupt_result_is_reported(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
@@ -7019,10 +7041,10 @@ def test_running_cancel_refuses_unvalidated_pid_and_corrupt_result_is_reported(t
         capture_output=True,
         text=True,
     )
-    assert cancel.returncode == 1
+    assert cancel.returncode == 0
     cancel_payload = json.loads(cancel.stdout)
-    assert cancel_payload["status"] == "cancel_failed"
-    assert "identity validation" in cancel_payload["reason"]
+    assert cancel_payload["status"] == "cancelled"
+    assert cancel_payload["job"]["cancelWorkerDelivered"] is False
 
     result = subprocess.run(
         [NODE, str(runtime), "result", "job-corrupt"],
@@ -7125,11 +7147,12 @@ print("SHOULD_NOT_FINISH")
         )
         payload = json.loads(jobs.stdout)
         job = next(item for item in payload["jobs"] if item["id"] == job_id)
-        if job["status"] == "running":
+        if job["status"] == "running" and job.get("childProcessGroupPid"):
             break
         time.sleep(0.1)
     assert job["status"] == "running"
     assert job["pidIdentity"]["command"]
+    assert job["childProcessGroupIdentity"]["command"]
 
     cancel = subprocess.run(
         [NODE, str(runtime), "cancel", job_id],
@@ -7141,7 +7164,8 @@ print("SHOULD_NOT_FINISH")
     assert cancel.returncode == 0, cancel.stderr
     cancel_payload = json.loads(cancel.stdout)
     assert cancel_payload["status"] == "cancelled"
-    assert cancel_payload["job"]["cancelIdentity"]["pid"] == job["workerPid"]
+    assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == job["workerPid"]
+    assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
 
 
 def test_cancel_running_host_forwarded_reserved_job_validates_and_terminates_worker(tmp_path):
@@ -7207,11 +7231,12 @@ print("SHOULD_NOT_FINISH")
             )
             payload = json.loads(jobs.stdout)
             job = next(item for item in payload["jobs"] if item["id"] == job_id)
-            if job["status"] == "running":
+            if job["status"] == "running" and job.get("childProcessGroupPid"):
                 break
             time.sleep(0.1)
         assert job["status"] == "running"
         assert "run-reserved-job" in job["pidIdentity"]["command"]
+        assert job["childProcessGroupIdentity"]["command"]
 
         cancel = subprocess.run(
             [NODE, str(runtime), "cancel", job_id],
@@ -7223,8 +7248,9 @@ print("SHOULD_NOT_FINISH")
         assert cancel.returncode == 0, cancel.stderr
         cancel_payload = json.loads(cancel.stdout)
         assert cancel_payload["status"] == "cancelled"
-        assert cancel_payload["job"]["cancelIdentity"]["pid"] == worker.pid
-        assert "run-reserved-job" in cancel_payload["job"]["cancelIdentity"]["command"]
+        assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == worker.pid
+        assert "run-reserved-job" in cancel_payload["job"]["cancelWorkerIdentity"]["command"]
+        assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
         worker.wait(timeout=5)
         time.sleep(2.5)
         assert not completion_marker.exists()

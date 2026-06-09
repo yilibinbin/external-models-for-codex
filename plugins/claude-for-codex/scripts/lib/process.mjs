@@ -2,22 +2,26 @@ import { spawnSync } from "node:child_process";
 import process from "node:process";
 
 function ps(pid) {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "command="], {
+  const result = spawnSync("ps", ["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "command="], {
     encoding: "utf8"
   });
   if (result.status !== 0 || !result.stdout.trim()) {
     return null;
   }
   const line = result.stdout.trim();
-  const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+([\s\S]*)$/);
+  const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+([\s\S]*)$/);
   if (!match) {
+    return null;
+  }
+  if (String(match[4]).startsWith("Z")) {
     return null;
   }
   return {
     pid: Number(match[1]),
     ppid: Number(match[2]),
     pgid: Number(match[3]),
-    command: match[4]
+    stat: match[4],
+    command: match[5]
   };
 }
 
@@ -37,6 +41,25 @@ function parseGraceMs(value, fallback = 3_000) {
 
 export function isProcessAlive(pid) {
   return Number.isInteger(pid) && Boolean(captureProcessIdentity(pid));
+}
+
+function processGroupHasLiveMembers(pgid) {
+  if (!Number.isInteger(pgid)) {
+    return false;
+  }
+  const result = spawnSync("ps", ["-axo", "pid=", "-o", "pgid=", "-o", "stat="], {
+    encoding: "utf8"
+  });
+  if (result.status !== 0 || !result.stdout.trim()) {
+    return false;
+  }
+  return result.stdout.split(/\r?\n/).some((line) => {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
+    if (!match) {
+      return false;
+    }
+    return Number(match[2]) === pgid && !String(match[3]).startsWith("Z");
+  });
 }
 
 export function captureProcessGroupIdentity(pid, options = {}) {
@@ -145,19 +168,31 @@ export function validateProcessGroupLeader(pid, expectedIdentity) {
 }
 
 export function terminateValidatedProcessGroup(pid, expectedIdentity, options = {}) {
-  const validation = validateProcessGroupLeader(pid, expectedIdentity);
+  let validation = validateProcessGroupLeader(pid, expectedIdentity);
+  let groupStillAlive = () => validateProcessGroupLeader(pid, expectedIdentity).ok;
   if (!validation.ok) {
     if (validation.reason === "process not found") {
-      return { ok: true, delivered: false, reason: "process already absent" };
+      if (expectedIdentity && processGroupHasLiveMembers(pid)) {
+        validation = {
+          ok: true,
+          identity: expectedIdentity,
+          signalPid: -pid,
+          leaderless: true
+        };
+        groupStillAlive = () => processGroupHasLiveMembers(pid);
+      } else {
+        return { ok: true, delivered: false, reason: "process already absent" };
+      }
+    } else {
+      return validation;
     }
-    return validation;
   }
   const graceMs = parseGraceMs(options.killGraceMs ?? process.env.CLAUDE_FOR_CODEX_KILL_GRACE_MS);
   let escalated = false;
   try {
     process.kill(validation.signalPid, "SIGTERM");
     const deadline = Date.now() + graceMs;
-    while (Date.now() < deadline && validateProcessGroupLeader(pid, expectedIdentity).ok) {
+    while (Date.now() < deadline && groupStillAlive()) {
       sleepSync(25);
     }
     escalated = true;
@@ -169,13 +204,8 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
       }
     }
     const killDeadline = Date.now() + 1_000;
-    while (Date.now() < killDeadline) {
-      try {
-        process.kill(validation.signalPid, 0);
-        sleepSync(25);
-      } catch {
-        break;
-      }
+    while (Date.now() < killDeadline && groupStillAlive()) {
+      sleepSync(25);
     }
     return { ok: true, delivered: true, escalated, identity: validation.identity };
   } catch (error) {

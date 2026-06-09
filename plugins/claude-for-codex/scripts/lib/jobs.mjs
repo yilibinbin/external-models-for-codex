@@ -147,7 +147,7 @@ function sanitizeJobForPersistentWrite(job, cwd) {
       sanitized[field] = sanitizeSummary(sanitized[field], { cwd, maxBytes });
     }
   }
-  for (const field of ["pidIdentity", "childProcessGroupIdentity", "cancelIdentity"]) {
+  for (const field of ["pidIdentity", "childProcessGroupIdentity", "cancelIdentity", "cancelChildIdentity", "cancelWorkerIdentity"]) {
     if (sanitized[field]?.command !== undefined) {
       sanitized[field] = {
         ...sanitized[field],
@@ -160,9 +160,10 @@ function sanitizeJobForPersistentWrite(job, cwd) {
 
 function writeJobFileDirect(file, job, cwd = job.cwd ?? process.cwd()) {
   const tmpFile = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(sanitizeJobForPersistentWrite(job, cwd), null, 2)}\n`, "utf8");
+  const sanitized = sanitizeJobForPersistentWrite(job, cwd);
+  fs.writeFileSync(tmpFile, `${JSON.stringify(sanitized, null, 2)}\n`, "utf8");
   fs.renameSync(tmpFile, file);
-  return job;
+  return sanitized;
 }
 
 function writeJob(cwd, job, env = process.env) {
@@ -516,49 +517,42 @@ export function cancelJob(cwd, jobId, env = process.env) {
   }
   if (job.status === "running") {
     const childGroupPid = childProcessGroupPidForJob(job);
-    let childTerminationFailure = "";
-    if (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity) {
-      const childTermination = terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity);
-      if (childTermination.ok) {
-        const updated = updateJobUnlessTerminal(cwd, jobId, {
-          status: "cancelled",
-          cancelledAt: new Date().toISOString(),
-          cancelIdentity: childTermination.identity
-        }, env);
-        return { status: "cancelled", jobId, job: updated };
-      }
-      childTerminationFailure = childTermination.reason || "child process group termination failed";
+    if (!Number.isInteger(childGroupPid) && !Number.isInteger(job.workerPid)) {
+      return cancelFailure(cwd, jobId, "Running job has no valid workerPid or child process group.", env);
     }
-    if (Number.isInteger(job.workerPid)) {
-      const termination = terminateValidatedJobWorker(job.workerPid, jobId);
-      if (termination.ok && termination.delivered !== false) {
-        const updated = updateJobUnlessTerminal(cwd, jobId, {
-          status: "cancelled",
-          cancelledAt: new Date().toISOString(),
-          cancelIdentity: termination.identity
-        }, env);
-        return { status: "cancelled", jobId, job: updated };
-      }
-      if (termination.ok && termination.delivered === false && !Number.isInteger(childGroupPid)) {
-        const updated = updateJobUnlessTerminal(cwd, jobId, {
-          status: "cancelled",
-          cancelledAt: new Date().toISOString(),
-          cancelIdentity: termination.identity
-        }, env);
-        return { status: "cancelled", jobId, job: updated };
-      }
-      const details = [
-        childTerminationFailure ? `child process group: ${childTerminationFailure}` : "",
-        `worker: ${termination.reason}`
-      ].filter(Boolean).join("; ");
-      return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${details}`, env);
+    let workerTermination = Number.isInteger(job.workerPid)
+      ? terminateValidatedJobWorker(job.workerPid, jobId)
+      : { ok: true, delivered: false, reason: "worker process already absent" };
+    let childTermination = Number.isInteger(childGroupPid)
+      ? terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity)
+      : { ok: true, delivered: false, reason: "no child process group recorded" };
+    if (!workerTermination.ok && childTermination.ok && Number.isInteger(job.workerPid)) {
+      workerTermination = terminateValidatedJobWorker(job.workerPid, jobId);
     }
-    if (Number.isInteger(childGroupPid) && !job.childProcessGroupIdentity) {
-      return cancelFailure(cwd, jobId, "Running job child process has no saved identity; refusing to signal possible PID reuse.", env);
+    if (!childTermination.ok && workerTermination.ok && Number.isInteger(childGroupPid)) {
+      childTermination = terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity);
     }
-    return cancelFailure(cwd, jobId, childTerminationFailure
-      ? `Running job child cancellation requires process identity validation; refusing to signal PID: ${childTerminationFailure}`
-      : "Running job has no valid workerPid or child process group.", env);
+    if (childTermination.ok && workerTermination.ok) {
+      const updates = {
+        status: "cancelled",
+        cancelledAt: new Date().toISOString(),
+        cancelIdentity: workerTermination.identity ?? job.pidIdentity ?? childTermination.identity ?? job.childProcessGroupIdentity,
+        cancelChildIdentity: childTermination.identity ?? job.childProcessGroupIdentity,
+        cancelWorkerIdentity: workerTermination.identity ?? job.pidIdentity,
+        cancelChildDelivered: Boolean(childTermination.delivered),
+        cancelWorkerDelivered: Boolean(workerTermination.delivered)
+      };
+      const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);
+      const updated = signalDelivered
+        ? updateJob(cwd, jobId, updates, env)
+        : updateJobUnlessTerminal(cwd, jobId, updates, env);
+      return { status: "cancelled", jobId, job: updated };
+    }
+    const details = [
+      childTermination.ok ? "" : `child process group: ${childTermination.reason || "termination failed"}`,
+      workerTermination.ok ? "" : `worker: ${workerTermination.reason || "termination failed"}`
+    ].filter(Boolean).join("; ");
+    return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${details}`, env);
   }
   if (isTerminalJobStatus(job.status)) {
     return { status: job.status, jobId, job };
