@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -33,6 +32,7 @@ import {
   HARD_JOB_TIMEOUT_MS,
   JOB_HEARTBEAT_INTERVAL_MS,
   MAX_BACKGROUND_WAIT_MS,
+  MAX_STORED_OUTPUT_BYTES,
   deriveJobIdempotencyKey,
   parsePositiveInteger
 } from "./lib/job-lifecycle.mjs";
@@ -117,7 +117,16 @@ import {
   turnBaselineFileForCwd
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
-import { captureProcessGroupIdentity } from "./lib/process.mjs";
+import {
+  captureProcessGroupIdentity,
+  currentProcessPlatform,
+  supportsPosixProcessGroups
+} from "./lib/process.mjs";
+import {
+  workingTreeFingerprint,
+  workingTreeFingerprintDetails,
+  workingTreeFingerprintMatches
+} from "./lib/worktree-fingerprint.mjs";
 
 const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
@@ -144,6 +153,15 @@ const READ_ONLY_MCP_TOOLS = Object.freeze([
   "mcp__claude-for-codex-git__git_blame",
   "mcp__claude-for-codex-git__git_grep",
   "mcp__claude-for-codex-git__git_ls_files"
+]);
+const BACKGROUND_EXECUTION_CONTROL_ENVS = Object.freeze([
+  CLAUDE_CODE_PATH_ENV,
+  QUALITY_ENV,
+  "CLAUDE_FOR_CODEX_BACKEND",
+  "CLAUDE_FOR_CODEX_DENY_TOOLS",
+  "CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG",
+  "CLAUDE_FOR_CODEX_ROLE_PACK_DIR",
+  "CLAUDE_FOR_CODEX_SDK_MODULE"
 ]);
 const STRUCTURED_REVIEW_FINDING_SCHEMA = Object.freeze({
   type: "object",
@@ -1362,6 +1380,34 @@ function workerNodeBinary(env = process.env) {
   return env.CLAUDE_FOR_CODEX_WORKER_NODE || process.execPath;
 }
 
+function backgroundPlatformSupport(env = process.env) {
+  const platform = currentProcessPlatform(env);
+  if (supportsPosixProcessGroups(platform)) {
+    return { ok: true, platform };
+  }
+  return {
+    ok: false,
+    platform,
+    message: `Claude for Codex background jobs require POSIX process groups; platform "${platform}" is not supported. Run a foreground command or use a POSIX environment.`
+  };
+}
+
+function assertBackgroundPlatformSupported(env = process.env) {
+  const support = backgroundPlatformSupport(env);
+  if (!support.ok) {
+    throw new Error(support.message);
+  }
+  return support;
+}
+
+function backgroundExecutionControls(env = process.env) {
+  const controls = Object.fromEntries(
+    BACKGROUND_EXECUTION_CONTROL_ENVS.map((name) => [name, String(env[name] ?? "")])
+  );
+  controls.claudeCommand = claudeCommand();
+  return controls;
+}
+
 function makeProgressLineBuffer(onLine) {
   let buffer = "";
   return {
@@ -1382,18 +1428,64 @@ function makeProgressLineBuffer(onLine) {
   };
 }
 
+function makeCappedOutputAccumulator(maxBytes = MAX_STORED_OUTPUT_BYTES) {
+  const chunks = [];
+  let totalBytes = 0;
+  let storedBytes = 0;
+  let truncated = false;
+  return {
+    push(chunk) {
+      const buffer = Buffer.from(chunk);
+      totalBytes += buffer.length;
+      const remaining = maxBytes - storedBytes;
+      if (remaining <= 0) {
+        truncated = true;
+        return;
+      }
+      if (buffer.length > remaining) {
+        chunks.push(buffer.subarray(0, remaining));
+        storedBytes += remaining;
+        truncated = true;
+        return;
+      }
+      chunks.push(buffer);
+      storedBytes += buffer.length;
+    },
+    text() {
+      return Buffer.concat(chunks, storedBytes).toString("utf8");
+    },
+    metadata() {
+      return { bytes: totalBytes, storedBytes, truncated };
+    }
+  };
+}
+
 function startBackgroundJob(command, rawArgs) {
   if (!BACKGROUND_CAPABLE_COMMANDS.has(command)) {
     console.error(`${command} does not support --background.`);
     process.exit(2);
   }
+  const support = backgroundPlatformSupport(process.env);
+  if (!support.ok) {
+    return { unsupportedPlatform: true, platform: support.platform, message: support.message };
+  }
   const cwd = process.cwd();
+  const foregroundArgs = stripBackgroundArgs(rawArgs);
+  const session = readJson(currentSessionFileForCwd(cwd), {});
+  const fingerprint = workingTreeFingerprintDetails(cwd, foregroundArgs);
+  const executionControls = backgroundExecutionControls(process.env);
   return withWorkspaceJobLock(cwd, process.env, () => {
     reapLostJobs(cwd);
-    const foregroundArgs = stripBackgroundArgs(rawArgs);
-    const session = readJson(currentSessionFileForCwd(cwd), {});
-    const idempotencyKey = deriveJobIdempotencyKey({ command, args: foregroundArgs, cwd });
-    const existing = findActiveJobByIdempotencyKey(cwd, idempotencyKey);
+    const idempotencyKey = fingerprint.timedOut
+      ? ""
+      : deriveJobIdempotencyKey({
+        command,
+        args: foregroundArgs,
+        cwd,
+        workspaceFingerprint: fingerprint.hash,
+        executionControls
+      });
+    const existing = idempotencyKey ? findActiveJobByIdempotencyKey(cwd, idempotencyKey) : null;
     if (existing) {
       return { ...existing, reusedExisting: true };
     }
@@ -1406,7 +1498,9 @@ function startBackgroundJob(command, rawArgs) {
       args: foregroundArgs,
       cwd,
       sessionId: session?.sessionId || "",
-      idempotencyKey
+      submissionState: "starting",
+      idempotencyKey,
+      fingerprintTimedOut: fingerprint.timedOut
     });
     const workerNode = workerNodeBinary(process.env);
     if (!fs.existsSync(workerNode)) {
@@ -1481,19 +1575,35 @@ function enrichCompanionJob(job) {
 
 async function waitForJob(jobId, options = {}) {
   const started = Date.now();
+  const cwd = process.cwd();
   const timeoutMs = parsePositiveInteger(options.timeoutMs, DEFAULT_BACKGROUND_WAIT_MS, {
     min: 0,
     max: MAX_BACKGROUND_WAIT_MS
   });
+  let nextReapAt = 0;
+  const maybeReapLostJobs = () => {
+    const now = Date.now();
+    if (now < nextReapAt) {
+      return;
+    }
+    reapLostJobs(cwd);
+    nextReapAt = now + 5_000;
+  };
   while (Date.now() - started < timeoutMs) {
-    const job = readJob(process.cwd(), jobId);
+    maybeReapLostJobs();
+    const job = readJob(cwd, jobId);
     if (job && terminalJobStatus(job.status)) {
       return { job, waitTimedOut: false };
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
+  reapLostJobs(cwd);
+  const job = readJob(cwd, jobId);
+  if (job && terminalJobStatus(job.status)) {
+    return { job, waitTimedOut: false };
+  }
   return {
-    job: readJob(process.cwd(), jobId) ?? { id: jobId, status: "unknown" },
+    job: job ?? { id: jobId, status: "unknown" },
     waitTimedOut: true
   };
 }
@@ -1509,6 +1619,14 @@ async function maybeStartBackground(command, rawArgs) {
     return false;
   }
   const job = startBackgroundJob(command, rawArgs);
+  if (job?.unsupportedPlatform) {
+    process.stdout.write(`${JSON.stringify({
+      status: "unsupported_platform",
+      platform: job.platform,
+      message: job.message
+    }, null, 2)}\n`);
+    process.exit(2);
+  }
   if (job?.status === "workspace_locked") {
     process.stdout.write(`${JSON.stringify({
       status: "workspace_locked",
@@ -1545,13 +1663,14 @@ async function maybeStartBackground(command, rawArgs) {
       waitTimedOut: stillRunning,
       job: enrichCompanionJob(responseJob)
     }, null, 2)}\n`);
-    process.exit(waited.job.status === "failed" || waited.job.status === "cancel_failed" ? 1 : 0);
+    process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1);
   }
   process.stdout.write(`${JSON.stringify({ status: job.reusedExisting ? "running" : "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
   process.exit(0);
 }
 
 function handleReserveJob(rawArgs) {
+  assertBackgroundPlatformSupported(process.env);
   const tokens = normalizeArgv(rawArgs);
   const command = tokens[0];
   if (!command) {
@@ -1658,15 +1777,6 @@ function hasReviewableGitChanges(cwd = process.cwd()) {
     reviewable: Boolean(status.stdout.trim()),
     reason: status.stdout.trim() ? "git working tree has changes" : "no git changes"
   };
-}
-
-function workingTreeFingerprint(cwd = process.cwd()) {
-  const parts = [
-    run("git", ["status", "--short", "--untracked-files=all"], { cwd }).stdout,
-    run("git", ["diff", "--cached"], { cwd }).stdout,
-    run("git", ["diff"], { cwd }).stdout
-  ];
-  return createHash("sha256").update(parts.join("\n--- claude-for-codex ---\n")).digest("hex");
 }
 
 function adversarialLensSection(lenses) {
@@ -2502,9 +2612,14 @@ async function runReviewGate(rawArgs) {
   if (!reviewable.reviewable) {
     return;
   }
-  const diffHash = workingTreeFingerprint(cwd);
+  const diffFingerprint = workingTreeFingerprintDetails(cwd);
+  const diffHash = diffFingerprint.hash;
+  if (diffFingerprint.timedOut) {
+    warnGate("working-tree fingerprint timed out; allowing stop and skipping cached gate decision");
+    return;
+  }
   const baseline = readJson(turnBaselineFileForCwd(cwd), null);
-  if (baseline?.workingTreeFingerprint === diffHash) {
+  if (workingTreeFingerprintMatches(baseline?.workingTreeFingerprint, diffFingerprint)) {
     return;
   }
   if (config.lastAllowedReviewGateDiffHash === diffHash) {
@@ -3280,6 +3395,12 @@ function runCancel(rawArgs) {
 }
 
 async function runJobWorker(rawArgs) {
+  try {
+    assertBackgroundPlatformSupported(process.env);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
   const jobId = rawArgs[0];
   if (!jobId) {
     process.exit(2);
@@ -3315,6 +3436,16 @@ async function runJobWorker(rawArgs) {
 }
 
 function runStoredJobCommand(job, options = {}) {
+  try {
+    assertBackgroundPlatformSupported(process.env);
+  } catch (error) {
+    return Promise.resolve({
+      status: 2,
+      stdout: "",
+      stderr: error.message || String(error),
+      error: ""
+    });
+  }
   if (!BACKGROUND_CAPABLE_COMMANDS.has(job.command)) {
     return Promise.resolve({
       status: 2,
@@ -3329,14 +3460,16 @@ function runStoredJobCommand(job, options = {}) {
     const hardMs = hardJobTimeoutMs();
     const killMs = killGraceMs();
     const started = Date.now();
-    const stdoutChunks = [];
-    const stderrChunks = [];
+    const stdoutOutput = makeCappedOutputAccumulator();
+    const stderrOutput = makeCappedOutputAccumulator();
     let settled = false;
     let stopRequested = false;
     let hardTimedOut = false;
+    let hardTimedOutAt = 0;
     let childProcessGroupIdentity = null;
     let killTimer = null;
     let child;
+    let childExitedBeforeIdentity = false;
     const progressLines = makeProgressLineBuffer((line) => {
       const parsed = progressEventsFromLines([line]);
       for (const event of parsed.events) {
@@ -3350,6 +3483,21 @@ function runStoredJobCommand(job, options = {}) {
         });
       }
     });
+
+    function commandResult(status, error = "") {
+      const stdout = stdoutOutput.metadata();
+      const stderr = stderrOutput.metadata();
+      return {
+        status,
+        stdout: stdoutOutput.text(),
+        stderr: stderrOutput.text(),
+        stdoutBytes: stdout.bytes,
+        stderrBytes: stderr.bytes,
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+        error
+      };
+    }
 
     function stopChildGroup(signal) {
       stopRequested = true;
@@ -3367,10 +3515,24 @@ function runStoredJobCommand(job, options = {}) {
       }
     }
 
-    function cleanup(heartbeat, timeout, signalHandler) {
+    function stopUnvalidatedChild(signal) {
+      stopRequested = true;
+      if (!child?.pid) {
+        return;
+      }
+      try {
+        child.kill(signal);
+      } catch {
+        // Child may already have exited.
+      }
+    }
+
+    function cleanup(heartbeat, timeout, signalHandler, options = {}) {
       clearInterval(heartbeat);
       clearTimeout(timeout);
-      clearTimeout(killTimer);
+      if (!options.keepKillTimer) {
+        clearTimeout(killTimer);
+      }
       process.removeListener("SIGTERM", signalHandler);
       process.removeListener("SIGINT", signalHandler);
     }
@@ -3393,17 +3555,30 @@ function runStoredJobCommand(job, options = {}) {
       stdio: ["ignore", "pipe", "pipe"]
     });
 
+    child.stdout?.on("data", (chunk) => stdoutOutput.push(chunk));
+    child.stderr?.on("data", (chunk) => {
+      const buffer = Buffer.from(chunk);
+      stderrOutput.push(buffer);
+      progressLines.push(buffer);
+    });
+    child.once("exit", () => {
+      childExitedBeforeIdentity = true;
+    });
+
     childProcessGroupIdentity = child.pid ? captureProcessGroupIdentity(child.pid) : null;
     if (child.pid && !childProcessGroupIdentity) {
-      settled = true;
-      stopChildGroup("SIGKILL");
-      resolve({
-        status: 1,
-        stdout: "",
-        stderr: "",
-        error: "Child process group identity could not be validated after spawn; refusing to supervise an unsafe signal target."
-      });
-      return;
+      const fastExited = childExitedBeforeIdentity || child.exitCode !== null || child.signalCode !== null;
+      if (!fastExited) {
+        settled = true;
+        stopUnvalidatedChild("SIGKILL");
+        resolve({
+          status: 1,
+          stdout: "",
+          stderr: "",
+          error: "Child process group identity could not be validated after spawn; refusing to supervise an unsafe signal target."
+        });
+        return;
+      }
     }
     recordJobProgress(stateCwd, job.id, {
       phase: "submitted",
@@ -3422,6 +3597,7 @@ function runStoredJobCommand(job, options = {}) {
 
     const timeout = setTimeout(() => {
       hardTimedOut = true;
+      hardTimedOutAt = Date.now();
       stopChildWithEscalation("SIGTERM");
     }, hardMs);
     const signalHandler = () => stopChildWithEscalation("SIGTERM");
@@ -3429,12 +3605,6 @@ function runStoredJobCommand(job, options = {}) {
     process.once("SIGTERM", signalHandler);
     process.once("SIGINT", signalHandler);
 
-    child.stdout?.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-    child.stderr?.on("data", (chunk) => {
-      const buffer = Buffer.from(chunk);
-      stderrChunks.push(buffer);
-      progressLines.push(buffer);
-    });
     child.once("error", (error) => {
       if (settled) {
         return;
@@ -3443,10 +3613,7 @@ function runStoredJobCommand(job, options = {}) {
       progressLines.flush();
       cleanup(heartbeat, timeout, signalHandler);
       resolve({
-        status: 1,
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: error.message || String(error)
+        ...commandResult(1, error.message || String(error))
       });
     });
     child.once("close", (status, signal) => {
@@ -3456,31 +3623,25 @@ function runStoredJobCommand(job, options = {}) {
       settled = true;
       progressLines.flush();
       if (hardTimedOut && signal !== "SIGKILL") {
-        clearInterval(heartbeat);
-        clearTimeout(timeout);
-        process.removeListener("SIGTERM", signalHandler);
-        process.removeListener("SIGINT", signalHandler);
-        setTimeout(() => {
+        cleanup(heartbeat, timeout, signalHandler, { keepKillTimer: true });
+        clearTimeout(killTimer);
+        const remainingKillGraceMs = Math.max(0, (hardTimedOutAt || Date.now()) + killMs - Date.now());
+        killTimer = setTimeout(() => {
           stopChildGroup("SIGKILL");
+          clearTimeout(killTimer);
           resolve({
-            status: status ?? 1,
-            stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-            stderr: Buffer.concat(stderrChunks).toString("utf8"),
-            error: `Child terminated by ${signal ?? "SIGTERM"} after hard timeout; SIGKILL sent after grace period.`
+            ...commandResult(1, `Child terminated by ${signal ?? "SIGTERM"} after hard timeout before SIGKILL escalation.`)
           });
-        }, killMs + 25);
+        }, remainingKillGraceMs);
         return;
       }
       cleanup(heartbeat, timeout, signalHandler);
       resolve({
-        status: status ?? (signal ? 1 : 0),
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: hardTimedOut
+        ...commandResult(hardTimedOut ? 1 : status ?? (signal ? 1 : 0), hardTimedOut
           ? `Child terminated by ${signal ?? "timeout"} after hard timeout.`
           : stopRequested
           ? `Child terminated by ${signal ?? "SIGTERM"} after stop request.`
-          : ""
+          : "")
       });
     });
   });

@@ -458,7 +458,9 @@ function longRunningLifecycleChecks(pluginRoot) {
   const jobs = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "jobs.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
   const processText = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "process.mjs"), "utf8");
+  const fingerprint = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "worktree-fingerprint.mjs"), "utf8");
   const gate = fs.readFileSync(path.join(pluginRoot, "hooks", "claude-review-gate.mjs"), "utf8");
+  const unread = fs.readFileSync(path.join(pluginRoot, "hooks", "unread-result.mjs"), "utf8");
   const lifecyclePath = path.join(pluginRoot, "scripts", "lib", "job-lifecycle.mjs");
   const lifecycle = fs.existsSync(lifecyclePath) ? fs.readFileSync(lifecyclePath, "utf8") : "";
   const progressPath = path.join(pluginRoot, "scripts", "lib", "progress.mjs");
@@ -466,28 +468,56 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(fs.existsSync(lifecyclePath), "job-lifecycle-helper", "scripts/lib/job-lifecycle.mjs exists"),
     result(jobs.includes("withJobLock") && jobs.includes("claimQueuedJob") && jobs.includes("claimReservedJob"), "atomic-job-claim-lock", "direct and reserved claims share locked path"),
     result(/async function runJobWorker/.test(companion) && !/runJobWorker[\s\S]{0,900}spawnSync/.test(companion), "async-background-worker", "__run-job uses async supervision"),
+    result(
+      companion.includes("makeCappedOutputAccumulator") &&
+        /function runStoredJobCommand[\s\S]*stdoutOutput\.push/.test(companion) &&
+        /function runStoredJobCommand[\s\S]*stderrOutput\.push/.test(companion) &&
+        !/function runStoredJobCommand[\s\S]*stdoutChunks\.push/.test(companion),
+      "background-output-capped-in-memory",
+      "async worker caps stdout/stderr in memory before finishJob"
+    ),
     result(companion.includes("DEFAULT_BACKGROUND_WAIT_MS") && companion.includes("async function waitForJob"), "short-wait-window", "--wait is bounded and async"),
     result(companion.includes("MAX_BACKGROUND_WAIT_MS") && !/async function waitForJob[\s\S]{0,500}max:\s*HARD_JOB_TIMEOUT_MS/.test(companion), "wait-window-ceiling", "--wait has a small ceiling separate from the hard job timeout"),
+    result(companion.includes('process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1)'), "wait-cancelled-nonzero", "--wait treats terminal non-success jobs as nonzero"),
     result(companion.includes("--wait-timeout-ms") && companion.includes("stripBackgroundArgs"), "wait-timeout-stripped", "wait timeout flags are stripped"),
     result(jobs.includes("findActiveJobByIdempotencyKey") && companion.includes("deriveJobIdempotencyKey") && companion.includes("reusedExisting"), "job-idempotency-reuse", "duplicate active background submissions reuse the existing job"),
-    result(jobs.includes("sanitizeSummary(result.stdout") && jobs.includes("MAX_STORED_OUTPUT_BYTES"), "job-result-sanitized", "finishJob sanitizes persisted output"),
+    result(lifecycle.includes("workspaceFingerprint") && lifecycle.includes("executionControls") && companion.includes("workingTreeFingerprintDetails(cwd, foregroundArgs)") && companion.includes("backgroundExecutionControls(process.env)") && fingerprint.includes("untrackedFilesFingerprintPart") && fingerprint.includes('"rev-parse", "HEAD"') && fingerprint.includes('"rev-parse", baseRef'), "job-idempotency-fingerprint-controls", "background idempotency includes worktree, HEAD/base refs, and execution controls"),
+    result(companion.includes("workingTreeFingerprintDetails") && companion.includes("fingerprint.timedOut") && companion.includes("fingerprintTimedOut"), "job-idempotency-timeout-no-reuse", "background idempotency is disabled when worktree fingerprint collection times out"),
+    result(companion.includes("workingTreeFingerprintMatches") && unread.includes("../scripts/lib/worktree-fingerprint.mjs") && fingerprint.includes("legacyHashes") && fingerprint.includes("hashStdoutParts"), "review-gate-baseline-shared-fingerprint", "review-gate and UserPromptSubmit hook share fingerprint logic with legacy baseline compatibility"),
+    result(companion.includes("diffFingerprint.timedOut") && companion.includes("working-tree fingerprint timed out; allowing stop"), "review-gate-fingerprint-timeout-fail-open", "review-gate does not cache or compare timed-out worktree fingerprints"),
+    result(jobs.includes("storedOutput(result.stdout") && jobs.includes("MAX_STORED_OUTPUT_BYTES"), "job-result-sanitized", "finishJob sanitizes persisted output"),
+    result(jobs.includes("stdoutBytes") && jobs.includes("stdoutStoredBytes") && jobs.includes("stdoutTruncated") && jobs.includes("stderrTruncated"), "job-output-truncation-metadata", "stored job output exposes explicit truncation metadata"),
+    result(jobs.includes("metadata.bytes") && jobs.includes("metadata.truncated"), "job-output-worker-byte-metadata", "finishJob preserves worker-reported byte counts and truncation state"),
+    result(jobs.includes('status: "locked"') && jobs.includes("resultViewedAt") && jobs.includes("Job state is busy"), "result-lock-contention-non-ok", "result does not report ok when resultViewedAt cannot be persisted"),
     result(jobs.includes("const sanitized = sanitizeJobForPersistentWrite(job, cwd)") && jobs.includes("return sanitized;"), "job-write-returns-sanitized", "job writes return sanitized payloads"),
     result(jobs.includes("worker-launch-failed") && lifecycle.includes("JOB_QUEUED_LOST_AFTER_MS") && lifecycle.includes("CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"), "queued-worker-bootstrap-reaper", "worker exits before claim are reaped from queued"),
+    result(/async function waitForJob[\s\S]{0,900}maybeReapLostJobs/.test(companion) && companion.includes("nextReapAt = now + 5_000"), "wait-reaps-lost-jobs", "--wait polls the lost-job reaper before reporting job state"),
     result(fs.existsSync(progressPath) && companion.includes("progressEventsFromLines"), "progress-event-parser", "machine progress events parsed"),
     result(companion.includes("makeProgressLineBuffer"), "stderr-line-buffering", "split stderr lines are buffered"),
     result(backend.includes("function maybeWriteSdkProgress(event, options)") && backend.includes("formatProgressEvent") && !backend.includes("event.phase"), "sdk-progress-hook-point", "SDK progress uses real event fields"),
     result(companion.includes("process.kill(-child.pid") && companion.includes("stopChildWithEscalation") && companion.includes("SIGTERM") && companion.includes("SIGINT"), "signal-child-group-cleanup", "child group cleanup is wired"),
     result(processText.includes("captureProcessGroupIdentity") && processText.includes("missing saved process identity") && companion.includes("Child process group identity could not be validated"), "child-process-identity-required", "child groups require stable saved identity before signaling"),
+    result(companion.includes("function stopUnvalidatedChild") && companion.includes('stopUnvalidatedChild("SIGKILL")') && companion.includes("Child process group identity could not be validated"), "unvalidated-child-no-negative-pgid", "identity validation failure does not signal an unvalidated process group"),
+    result(processText.includes("current === expected") && !processText.includes("expected.includes(current)") && !processText.includes("current.includes(expected)"), "process-identity-no-prefix-match", "process identity validation does not accept prefix/subset command matches"),
     result(jobs.includes("childTermination.ok && workerTermination.ok") && jobs.includes("cancelChildIdentity") && jobs.includes("cancelWorkerIdentity"), "cancel-child-and-worker", "cancel waits for both child group and worker termination"),
-    result(processText.includes("processGroupHasLiveMembers") && processText.includes("\"-axo\"") && processText.includes("leaderless"), "leaderless-child-group-cleanup", "child process groups can be cleaned after the leader exits"),
+    result(jobs.includes("function cancelQueuedJob") && jobs.includes('current.status !== "queued"') && jobs.includes("return cancelJob(cwd, jobId, env)"), "cancel-queued-lock-reread", "queued cancel re-reads under lock and routes claimed jobs through running cancel"),
+    result(jobs.includes("cancelQueuedWorkerPid") && jobs.includes("terminateValidatedJobWorker(updated.cancelQueuedWorkerPid") && jobs.includes("Queued worker cancellation requires process identity validation"), "cancel-queued-worker-terminated", "queued jobs with a spawned worker are not reported cancelled until the validated worker is handled"),
+    result(jobs.includes("Running job cancellation did not deliver a signal") && jobs.includes("signalDelivered"), "cancel-requires-delivered-signal", "running cancel cannot report cancelled unless a validated signal was delivered"),
+    result(jobs.includes("Running job cancellation request could not be persisted; refusing to signal") && jobs.includes("Cancellation signal was delivered but the cancelled state could not be persisted"), "cancel-persistence-required", "running cancel does not report success when request or terminal state persistence fails"),
+    result(jobs.includes("updateJobUnlessTerminal(cwd, jobId, updates") && jobs.includes("Job reached a terminal state before cancellation could be persisted"), "cancel-preserves-terminal-race", "running cancel cannot overwrite a terminal result persisted during termination"),
+    result(jobs.includes("cancelRequestedAt") && jobs.includes("cancelledByRequest") && jobs.includes("after stop request"), "cancel-request-finish-semantics", "worker stop-request results persist as cancelled instead of failed"),
+    result(processText.includes("processGroupHasLiveMembers") && processText.includes("\"-eo\"") && !processText.includes("\"-axo\"") && processText.includes("leaderless"), "leaderless-child-group-cleanup", "child process groups can be cleaned after the leader exits"),
     result(companion.includes("CLAUDE_FOR_CODEX_KILL_GRACE_MS") && companion.includes("SIGKILL"), "hard-timeout-sigkill", "hard timeout escalates after grace period"),
+    result((companion.includes("status: hardTimedOut ? 1") || companion.includes("commandResult(hardTimedOut ? 1")) && companion.includes("status: 1,") && companion.includes("after hard timeout"), "hard-timeout-nonzero-status", "hard timeout cannot be persisted as a successful zero exit"),
     result(processText.includes("terminateValidatedJobWorker") && processText.includes("SIGKILL") && processText.includes("CLAUDE_FOR_CODEX_KILL_GRACE_MS"), "cancel-sigkill-escalation", "user cancel escalates after grace period"),
-    result(jobs.includes("lockOwner") && jobs.includes("captureProcessIdentity(Number(owner.pid))"), "owner-aware-file-locks", "stale lock cleanup checks owner liveness before removing"),
+    result(processText.includes("process group still alive after SIGKILL") && processText.includes("worker process still alive after SIGKILL"), "cancel-final-liveness-check", "cancel verifies worker/process group liveness after SIGKILL"),
+    result(jobs.includes("lockOwnerMatches") && jobs.includes("command: process.argv.join") && jobs.includes("identity.command === owner.command"), "owner-aware-file-locks", "stale lock cleanup checks owner identity before removing"),
     result(processText.includes("\"stat=\"") && processText.includes("startsWith(\"Z\")"), "zombie-process-not-alive", "zombie processes are not treated as live workers"),
     result(jobs.includes("reapLostJobs") && jobs.includes("validateJobWorkerProcess") && jobs.includes("validateProcessGroupLeader") && processText.includes("isProcessAlive"), "process-aware-reaper", "reaper validates worker/child processes"),
     result(companion.includes("recommend-execution-mode") && companion.includes("changedLineEstimate"), "execution-mode-recommendation", "foreground/background recommendation"),
     result(companion.includes("CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS") && companion.includes("ETIMEDOUT") && companion.includes("git signal collection timed out") && companion.includes("status.timedOut") && companion.includes("staged.timedOut") && companion.includes("unstaged.timedOut"), "git-timeout-not-nonrepo", "git timeout is distinct from not-a-repository and is detected through the run() helper's errorCode"),
     result(companion.includes("CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS") && jobs.includes("withWorkspaceJobLock") && jobs.includes("canStartBackgroundJob"), "background-concurrency-cap", "active background cap is under lock"),
+    result(processText.includes("supportsPosixProcessGroups") && companion.includes("backgroundPlatformSupport") && companion.includes("unsupported_platform") && companion.includes("assertBackgroundPlatformSupported"), "background-posix-platform-guard", "background and reserved jobs fail fast where POSIX process groups are unavailable"),
     result(!gate.includes("--background") && !gate.toLowerCase().includes("ultrareview") && !gate.includes("startBackgroundJob("), "review-gate-no-background", "Stop hook does not spawn tracked/cloud jobs"),
     result(!gate.includes("reserveJob(") && companion.includes("rawArgs.includes(\"reserve-job\")") && companion.includes("allowing stop"), "review-gate-no-reserve-job", "Stop hook rejects reserved/background routing"),
     result(companion.includes("REVIEW_GATE_ROLE_TIMEOUT_MS") && companion.includes("warnGate") && companion.includes("allowing stop"), "review-gate-bounded-fail-open", "Stop hook has bounded fail-open behavior")

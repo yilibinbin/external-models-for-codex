@@ -73,7 +73,8 @@ function removeStaleLock(lockFile) {
       return false;
     }
     const owner = lockOwner(lockFile);
-    if (owner?.pid && captureProcessIdentity(Number(owner.pid))) {
+    const identity = owner?.pid ? captureProcessIdentity(Number(owner.pid)) : null;
+    if (identity && lockOwnerMatches(owner, identity)) {
       return false;
     }
     fs.rmSync(lockFile, { force: true });
@@ -83,6 +84,16 @@ function removeStaleLock(lockFile) {
   }
 }
 
+function lockOwnerMatches(owner, identity) {
+  if (!identity) {
+    return false;
+  }
+  if (typeof owner?.command === "string" && owner.command) {
+    return identity.command === owner.command;
+  }
+  return /\bnode(?:\s|$)/.test(identity.command) || identity.command.includes("claude-companion.mjs");
+}
+
 function withFileLock(file, operation, options = {}) {
   const lockFile = lockPathForFile(file);
   const deadline = Date.now() + LOCK_RETRY_UNTIL_MS;
@@ -90,7 +101,7 @@ function withFileLock(file, operation, options = {}) {
   while (fd === undefined) {
     try {
       fd = fs.openSync(lockFile, "wx", 0o600);
-      fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+      fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, command: process.argv.join(" "), createdAt: new Date().toISOString() })}\n`, "utf8");
     } catch (error) {
       if (error?.code !== "EEXIST") {
         throw error;
@@ -156,6 +167,20 @@ function sanitizeJobForPersistentWrite(job, cwd) {
     }
   }
   return sanitized;
+}
+
+function storedOutput(raw, cwd, metadata = {}) {
+  const text = String(raw ?? "");
+  const stored = sanitizeSummary(text, { cwd, maxBytes: MAX_STORED_OUTPUT_BYTES });
+  const bytes = Number.isFinite(metadata.bytes) && metadata.bytes >= 0
+    ? Math.trunc(metadata.bytes)
+    : Buffer.byteLength(text, "utf8");
+  return {
+    text: stored,
+    bytes,
+    storedBytes: Buffer.byteLength(stored, "utf8"),
+    truncated: Boolean(metadata.truncated) || stored.endsWith("...<truncated>")
+  };
 }
 
 function writeJobFileDirect(file, job, cwd = job.cwd ?? process.cwd()) {
@@ -346,14 +371,29 @@ export function finishJob(cwd, jobId, result, env = process.env) {
       return null;
     }
     const succeeded = result.status === 0;
+    const cancelledByRequest = Boolean(current.cancelRequestedAt) && String(result.error ?? "").includes("after stop request");
+    const stdout = storedOutput(result.stdout ?? "", cwd, {
+      bytes: result.stdoutBytes,
+      truncated: result.stdoutTruncated
+    });
+    const stderr = storedOutput(result.stderr ?? "", cwd, {
+      bytes: result.stderrBytes,
+      truncated: result.stderrTruncated
+    });
     return {
       ...current,
-      status: succeeded ? "succeeded" : "failed",
-      phase: succeeded ? "succeeded" : "failed",
-      submissionState: succeeded ? "completed" : "failed",
+      status: cancelledByRequest ? "cancelled" : succeeded ? "succeeded" : "failed",
+      phase: cancelledByRequest ? "cancelled" : succeeded ? "succeeded" : "failed",
+      submissionState: cancelledByRequest ? "cancelled" : succeeded ? "completed" : "failed",
       exitStatus: result.status,
-      stdout: sanitizeSummary(result.stdout ?? "", { cwd, maxBytes: MAX_STORED_OUTPUT_BYTES }),
-      stderr: sanitizeSummary(result.stderr ?? "", { cwd, maxBytes: MAX_STORED_OUTPUT_BYTES }),
+      stdout: stdout.text,
+      stderr: stderr.text,
+      stdoutBytes: stdout.bytes,
+      stderrBytes: stderr.bytes,
+      stdoutStoredBytes: stdout.storedBytes,
+      stderrStoredBytes: stderr.storedBytes,
+      stdoutTruncated: stdout.truncated,
+      stderrTruncated: stderr.truncated,
       error: sanitizeSummary(result.error ?? "", { cwd, maxBytes: 4096 }),
       finishedAt: new Date().toISOString(),
       workerPid: null,
@@ -416,12 +456,13 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       continue;
     }
     if (job.status === "queued") {
+      const missingDirectWorker = !Number.isInteger(job.workerPid) && job.reservationMode !== "host-forwarded" && job.submissionState === "starting";
       const workerGone = Number.isInteger(job.workerPid) && !validateJobWorkerProcess(job.workerPid, job.id).ok;
-      if (workerGone) {
+      if (workerGone || missingDirectWorker) {
         updates.push(updateJobUnlessTerminal(cwd, job.id, {
           status: "failed",
           phase: "worker-launch-failed",
-          error: "Background worker exited before claiming the queued job; the plugin did not resubmit the Claude request.",
+          error: "Background worker exited or never exposed a valid worker before claiming the queued job; the plugin did not resubmit the Claude request.",
           finishedAt: new Date(now).toISOString(),
           workerPid: null
         }, env));
@@ -481,6 +522,9 @@ export function resultForJob(cwd, jobId, env = process.env) {
   const updated = updateJob(cwd, jobId, {
     resultViewedAt: new Date().toISOString()
   }, env) ?? job;
+  if (updated?.status === "locked") {
+    return { status: "locked", jobId, reason: updated.reason ?? "Job state is busy; retry later.", job: updated };
+  }
   return { status: "ok", job: updated };
 }
 
@@ -503,49 +547,136 @@ function cancelFailure(cwd, jobId, reason, env) {
   return { status: "cancel_failed", jobId, reason, job: updated };
 }
 
+function cancelQueuedJob(cwd, jobId, env) {
+  return mutateJobUnderLock(cwd, jobId, env, (current) => {
+    if (current.status !== "queued") {
+      return null;
+    }
+    const cancelQueuedWorkerPid = Number.isInteger(current.workerPid) ? current.workerPid : undefined;
+    return {
+      ...current,
+      status: "cancelled",
+      cancelledAt: new Date().toISOString(),
+      ...(cancelQueuedWorkerPid ? { cancelQueuedWorkerPid } : {})
+    };
+  });
+}
+
 export function cancelJob(cwd, jobId, env = process.env) {
   const job = readJob(cwd, jobId, env);
   if (!job) {
     return { status: "not_found", jobId };
   }
   if (job.status === "queued") {
-    const updated = updateJob(cwd, jobId, {
-      status: "cancelled",
-      cancelledAt: new Date().toISOString()
-    }, env);
-    return { status: "cancelled", jobId, job: updated };
+    const updated = cancelQueuedJob(cwd, jobId, env);
+    if (updated?.status === "cancelled") {
+      if (Number.isInteger(updated.cancelQueuedWorkerPid)) {
+        const workerTermination = terminateValidatedJobWorker(updated.cancelQueuedWorkerPid, jobId);
+        if (!workerTermination.ok) {
+          const failed = updateJob(cwd, jobId, {
+            status: "cancel_failed",
+            cancelFailedAt: new Date().toISOString(),
+            cancelFailureReason: `Queued worker cancellation requires process identity validation; refusing to report cancelled: ${workerTermination.reason || "termination failed"}`,
+            cancelWorkerIdentity: workerTermination.identity ?? updated.pidIdentity,
+            cancelWorkerDelivered: Boolean(workerTermination.delivered)
+          }, env);
+          return {
+            status: "cancel_failed",
+            jobId,
+            reason: "Queued worker cancellation failed after the queued state was closed.",
+            job: failed ?? updated
+          };
+        }
+        const annotated = updateJob(cwd, jobId, {
+          cancelWorkerIdentity: workerTermination.identity ?? updated.pidIdentity,
+          cancelWorkerDelivered: Boolean(workerTermination.delivered),
+          cancelWorkerEscalated: Boolean(workerTermination.escalated)
+        }, env);
+        return { status: "cancelled", jobId, job: annotated?.status === "cancelled" ? annotated : updated };
+      }
+      return { status: "cancelled", jobId, job: updated };
+    }
+    if (updated?.status === "running") {
+      return cancelJob(cwd, jobId, env);
+    }
+    if (updated && isTerminalJobStatus(updated.status)) {
+      return { status: updated.status, jobId, job: updated };
+    }
+    return cancelFailure(cwd, jobId, "Queued job changed state before cancellation could be persisted.", env);
   }
   if (job.status === "running") {
     const childGroupPid = childProcessGroupPidForJob(job);
     if (!Number.isInteger(childGroupPid) && !Number.isInteger(job.workerPid)) {
       return cancelFailure(cwd, jobId, "Running job has no valid workerPid or child process group.", env);
     }
-    let workerTermination = Number.isInteger(job.workerPid)
-      ? terminateValidatedJobWorker(job.workerPid, jobId)
-      : { ok: true, delivered: false, reason: "worker process already absent" };
-    let childTermination = Number.isInteger(childGroupPid)
-      ? terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity)
-      : { ok: true, delivered: false, reason: "no child process group recorded" };
-    if (!workerTermination.ok && childTermination.ok && Number.isInteger(job.workerPid)) {
-      workerTermination = terminateValidatedJobWorker(job.workerPid, jobId);
+    const requested = updateJobUnlessTerminal(cwd, jobId, {
+      cancelRequestedAt: new Date().toISOString(),
+      phase: "cancelling"
+    }, env);
+    if (!requested || requested.status === "locked") {
+      return {
+        status: "cancel_failed",
+        jobId,
+        reason: requested?.reason ?? "Running job cancellation request could not be persisted; refusing to signal.",
+        job: requested
+      };
     }
-    if (!childTermination.ok && workerTermination.ok && Number.isInteger(childGroupPid)) {
-      childTermination = terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity);
+    if (requested && isTerminalJobStatus(requested.status)) {
+      return {
+        status: requested.status,
+        jobId,
+        reason: "Job reached a terminal state before cancellation could be requested.",
+        job: requested
+      };
+    }
+    let workerTermination = Number.isInteger(requested.workerPid)
+      ? terminateValidatedJobWorker(requested.workerPid, jobId)
+      : { ok: true, delivered: false, reason: "worker process already absent" };
+    const requestedChildGroupPid = childProcessGroupPidForJob(requested);
+    let childTermination = Number.isInteger(requestedChildGroupPid)
+      ? terminateValidatedProcessGroup(requestedChildGroupPid, requested.childProcessGroupIdentity)
+      : { ok: true, delivered: false, reason: "no child process group recorded" };
+    if (!workerTermination.ok && childTermination.ok && Number.isInteger(requested.workerPid)) {
+      workerTermination = terminateValidatedJobWorker(requested.workerPid, jobId);
+    }
+    if (!childTermination.ok && workerTermination.ok && Number.isInteger(requestedChildGroupPid)) {
+      childTermination = terminateValidatedProcessGroup(requestedChildGroupPid, requested.childProcessGroupIdentity);
     }
     if (childTermination.ok && workerTermination.ok) {
+      const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);
+      if (!signalDelivered) {
+        return cancelFailure(cwd, jobId, "Running job cancellation did not deliver a signal to a validated worker or child process group.", env);
+      }
       const updates = {
         status: "cancelled",
         cancelledAt: new Date().toISOString(),
-        cancelIdentity: workerTermination.identity ?? job.pidIdentity ?? childTermination.identity ?? job.childProcessGroupIdentity,
-        cancelChildIdentity: childTermination.identity ?? job.childProcessGroupIdentity,
-        cancelWorkerIdentity: workerTermination.identity ?? job.pidIdentity,
+        cancelIdentity: workerTermination.identity ?? requested.pidIdentity ?? childTermination.identity ?? requested.childProcessGroupIdentity,
+        cancelChildIdentity: childTermination.identity ?? requested.childProcessGroupIdentity,
+        cancelWorkerIdentity: workerTermination.identity ?? requested.pidIdentity,
         cancelChildDelivered: Boolean(childTermination.delivered),
         cancelWorkerDelivered: Boolean(workerTermination.delivered)
       };
-      const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);
-      const updated = signalDelivered
-        ? updateJob(cwd, jobId, updates, env)
-        : updateJobUnlessTerminal(cwd, jobId, updates, env);
+      const updated = updateJobUnlessTerminal(cwd, jobId, updates, env);
+      if (!updated || updated.status === "locked") {
+        return {
+          status: "cancel_failed",
+          jobId,
+          reason: updated?.reason ?? "Cancellation signal was delivered but the cancelled state could not be persisted.",
+          job: updated
+        };
+      }
+      if (updated && isTerminalJobStatus(updated.status) && updated.status !== "cancelled") {
+        return {
+          status: updated.status,
+          jobId,
+          reason: "Job reached a terminal state before cancellation could be persisted.",
+          job: updated
+        };
+      }
+      if (updated?.status === "cancelled" && (!updated.cancelWorkerIdentity || !updated.cancelChildIdentity)) {
+        const annotated = updateJob(cwd, jobId, updates, env);
+        return { status: "cancelled", jobId, job: annotated?.status === "cancelled" ? annotated : updated };
+      }
       return { status: "cancelled", jobId, job: updated };
     }
     const details = [

@@ -228,6 +228,8 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 
 `--wait` is a short observation window, not the hard Claude timeout. It defaults to 45 seconds and can be adjusted with `--wait-timeout-ms <ms>`. If the window expires while the worker is still healthy, the command exits 0 with `{"status":"running","waitTimedOut":true,"job":...}`; use `jobs` or `result <job-id>` later. Do not rerun the same review just because `--wait` expired.
 
+Stored job `stdout` and `stderr` are sanitized and capped to keep plugin state bounded. `result <job-id>` includes `stdoutBytes`, `stderrBytes`, `stdoutStoredBytes`, `stderrStoredBytes`, `stdoutTruncated`, and `stderrTruncated` so Codex can report when long model output was shortened instead of silently treating the stored text as complete.
+
 `recommend-execution-mode --json` inspects bounded local git signals and recommends `foreground` only for tiny one-to-two-file work. It recommends `background` for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, unclear scope, or git signal timeouts. A timeout means the git signal collection was inconclusive; it is not evidence that an existing Claude job failed.
 
 Claude for Codex starts at most three active tracked background jobs per workspace by default. Set `CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS=<n>` to adjust the cap. When the cap is reached, the plugin refuses to start another expensive Claude request and asks you to inspect or cancel an existing job. Stale-heartbeat cleanup is process-aware: it does not free capacity or resubmit while a validated worker or child process still exists.

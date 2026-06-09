@@ -1,6 +1,14 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
+export function supportsPosixProcessGroups(platform = process.platform) {
+  return platform !== "win32";
+}
+
+export function currentProcessPlatform(env = process.env) {
+  return env.CLAUDE_FOR_CODEX_PROCESS_PLATFORM || process.platform;
+}
+
 function ps(pid) {
   const result = spawnSync("ps", ["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "command="], {
     encoding: "utf8"
@@ -47,7 +55,7 @@ function processGroupHasLiveMembers(pgid) {
   if (!Number.isInteger(pgid)) {
     return false;
   }
-  const result = spawnSync("ps", ["-axo", "pid=", "-o", "pgid=", "-o", "stat="], {
+  const result = spawnSync("ps", ["-eo", "pid=", "-o", "pgid=", "-o", "stat="], {
     encoding: "utf8"
   });
   if (result.status !== 0 || !result.stdout.trim()) {
@@ -127,7 +135,7 @@ export function validateJobWorkerProcess(pid, jobId) {
 function commandIdentityMatches(currentCommand, expectedCommand) {
   const current = String(currentCommand ?? "");
   const expected = String(expectedCommand ?? "");
-  if (current === expected || current.includes(expected) || expected.includes(current)) {
+  if (current === expected) {
     return true;
   }
   if (expected.includes("<redacted-")) {
@@ -169,7 +177,8 @@ export function validateProcessGroupLeader(pid, expectedIdentity) {
 
 export function terminateValidatedProcessGroup(pid, expectedIdentity, options = {}) {
   let validation = validateProcessGroupLeader(pid, expectedIdentity);
-  let groupStillAlive = () => validateProcessGroupLeader(pid, expectedIdentity).ok;
+  let leaderless = false;
+  let groupStillAlive = () => validateProcessGroupLeader(pid, expectedIdentity).ok || processGroupHasLiveMembers(pid);
   if (!validation.ok) {
     if (validation.reason === "process not found") {
       if (expectedIdentity && processGroupHasLiveMembers(pid)) {
@@ -179,6 +188,7 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
           signalPid: -pid,
           leaderless: true
         };
+        leaderless = true;
         groupStillAlive = () => processGroupHasLiveMembers(pid);
       } else {
         return { ok: true, delivered: false, reason: "process already absent" };
@@ -189,25 +199,58 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
   }
   const graceMs = parseGraceMs(options.killGraceMs ?? process.env.CLAUDE_FOR_CODEX_KILL_GRACE_MS);
   let escalated = false;
+  const revalidateForSignal = () => {
+    if (leaderless || validation.leaderless) {
+      return processGroupHasLiveMembers(pid)
+        ? { ok: true, identity: validation.identity, signalPid: -pid, leaderless: true }
+        : { ok: false, reason: "process already absent", identity: validation.identity };
+    }
+    const current = validateProcessGroupLeader(pid, expectedIdentity);
+    if (current.ok) {
+      return current;
+    }
+    if (current.reason === "process not found" && expectedIdentity && processGroupHasLiveMembers(pid)) {
+      leaderless = true;
+      return { ok: true, identity: expectedIdentity, signalPid: -pid, leaderless: true };
+    }
+    return current;
+  };
   try {
     process.kill(validation.signalPid, "SIGTERM");
     const deadline = Date.now() + graceMs;
     while (Date.now() < deadline && groupStillAlive()) {
       sleepSync(25);
     }
-    escalated = true;
-    try {
-      process.kill(validation.signalPid, "SIGKILL");
-    } catch (error) {
-      if (error?.code !== "ESRCH") {
-        throw error;
+    if (groupStillAlive()) {
+      const refreshed = revalidateForSignal();
+      if (!refreshed.ok) {
+        if (refreshed.reason === "process already absent") {
+          return { ok: true, delivered: true, escalated, identity: validation.identity };
+        }
+        return { ok: false, delivered: true, escalated, reason: refreshed.reason, identity: refreshed.identity ?? validation.identity };
+      }
+      validation = refreshed;
+      escalated = true;
+      try {
+        process.kill(validation.signalPid, "SIGKILL");
+      } catch (error) {
+        if (error?.code !== "ESRCH") {
+          throw error;
+        }
       }
     }
     const killDeadline = Date.now() + 1_000;
     while (Date.now() < killDeadline && groupStillAlive()) {
       sleepSync(25);
     }
-    return { ok: true, delivered: true, escalated, identity: validation.identity };
+    const stillAlive = groupStillAlive();
+    return {
+      ok: !stillAlive,
+      delivered: true,
+      escalated,
+      reason: stillAlive ? "process group still alive after SIGKILL" : undefined,
+      identity: validation.identity
+    };
   } catch (error) {
     return {
       ok: false,
@@ -220,7 +263,7 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
 }
 
 export function terminateValidatedJobWorker(pid, jobId, options = {}) {
-  const validation = validateJobWorkerProcess(pid, jobId);
+  let validation = validateJobWorkerProcess(pid, jobId);
   if (!validation.ok) {
     if (validation.reason === "process not found") {
       return { ok: true, delivered: false, reason: "worker process already absent" };
@@ -229,21 +272,37 @@ export function terminateValidatedJobWorker(pid, jobId, options = {}) {
   }
   const graceMs = parseGraceMs(options.killGraceMs ?? process.env.CLAUDE_FOR_CODEX_KILL_GRACE_MS);
   let escalated = false;
+  const workerStillAlive = () => validateJobWorkerProcess(pid, jobId).ok;
   try {
     process.kill(validation.signalPid, "SIGTERM");
     const deadline = Date.now() + graceMs;
-    while (Date.now() < deadline && isProcessAlive(pid)) {
+    while (Date.now() < deadline && workerStillAlive()) {
       sleepSync(25);
     }
-    if (isProcessAlive(pid)) {
+    if (workerStillAlive()) {
+      const refreshed = validateJobWorkerProcess(pid, jobId);
+      if (!refreshed.ok) {
+        if (refreshed.reason === "process not found") {
+          return { ok: true, delivered: true, escalated, identity: validation.identity };
+        }
+        return { ok: false, delivered: true, escalated, reason: refreshed.reason, identity: refreshed.identity ?? validation.identity };
+      }
+      validation = refreshed;
       escalated = true;
       process.kill(validation.signalPid, "SIGKILL");
       const killDeadline = Date.now() + 1_000;
-      while (Date.now() < killDeadline && isProcessAlive(pid)) {
+      while (Date.now() < killDeadline && workerStillAlive()) {
         sleepSync(25);
       }
     }
-    return { ok: !isProcessAlive(pid), delivered: true, escalated, identity: validation.identity };
+    const stillAlive = workerStillAlive();
+    return {
+      ok: !stillAlive,
+      delivered: true,
+      escalated,
+      reason: stillAlive ? "worker process still alive after SIGKILL" : undefined,
+      identity: validation.identity
+    };
   } catch (error) {
     return {
       ok: false,

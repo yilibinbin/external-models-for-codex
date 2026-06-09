@@ -10,7 +10,7 @@ export const DEFAULT_BACKGROUND_WAIT_MS = 45_000;
 export const MAX_BACKGROUND_WAIT_MS = 5 * 60 * 1000;
 export const HARD_JOB_TIMEOUT_MS = 30 * 60 * 1000;
 export const DEFAULT_MAX_ACTIVE_JOBS = 3;
-export const MAX_STORED_OUTPUT_BYTES = 64 * 1024;
+export const MAX_STORED_OUTPUT_BYTES = 1024 * 1024;
 
 export function isTerminalJobStatus(status) {
   return TERMINAL_JOB_STATUS_SET.has(String(status ?? ""));
@@ -36,12 +36,16 @@ export function queuedLostAfterMs(env = process.env) {
   });
 }
 
-export function deriveJobIdempotencyKey({ command, args = [], cwd = "" }) {
+export function deriveJobIdempotencyKey({ command, args = [], cwd = "", workspaceFingerprint = "", executionControls = {} }) {
   const hash = crypto.createHash("sha256");
   hash.update(JSON.stringify({
     command: String(command ?? ""),
     args: Array.isArray(args) ? args.map(String) : [],
-    cwd: String(cwd ?? "")
+    cwd: String(cwd ?? ""),
+    workspaceFingerprint: String(workspaceFingerprint ?? ""),
+    executionControls: executionControls && typeof executionControls === "object"
+      ? Object.fromEntries(Object.entries(executionControls).sort(([left], [right]) => left.localeCompare(right)))
+      : {}
   }));
   return `sha256:${hash.digest("hex")}`;
 }
@@ -58,7 +62,8 @@ export function classifyJobLiveness(job, options = {}) {
     const queuedLostMs = Number.isFinite(options.queuedLostAfterMs)
       ? options.queuedLostAfterMs
       : queuedLostAfterMs(options.env ?? process.env);
-    if (Number.isInteger(job.workerPid) && staleForMs !== null && staleForMs >= queuedLostMs) {
+    const missingDirectWorker = !Number.isInteger(job.workerPid) && job.reservationMode !== "host-forwarded" && job.submissionState === "starting";
+    if (staleForMs !== null && staleForMs >= queuedLostMs && (Number.isInteger(job.workerPid) || missingDirectWorker)) {
       return { state: "lost", status, staleForMs, queued: true };
     }
     return { state: "queued", status, staleForMs: staleForMs ?? 0 };

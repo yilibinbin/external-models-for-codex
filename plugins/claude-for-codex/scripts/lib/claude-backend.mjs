@@ -424,14 +424,10 @@ function maybeWriteSdkProgress(event, options) {
   const role = event && typeof event === "object"
     ? (event.agent_name ?? event.agentName ?? event.subagent_name ?? event.subagentName ?? "")
     : "";
-  const status = event && typeof event === "object" && typeof event.total_cost_usd === "number"
-    ? `cost_usd=${event.total_cost_usd}`
-    : "";
   process.stderr.write(formatProgressEvent({
     phase: `sdk-${eventType}`,
     message: `${eventType} event received`,
-    role,
-    status
+    role
   }, { cwd: options.cwd ?? process.cwd() }));
 }
 
