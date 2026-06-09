@@ -17,3 +17,4 @@ Rules:
 - Require a job id.
 - Do not claim a running process was stopped unless the runtime reports `cancelled`.
 - If the runtime reports `cancel_failed`, tell the user that the plugin could not validate a process identity for safe cancellation.
+- `cancel_failed`, `suspect`, and `lost` are diagnostic states, not proof of termination.

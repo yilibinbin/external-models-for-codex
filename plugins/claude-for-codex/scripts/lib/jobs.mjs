@@ -516,6 +516,7 @@ export function cancelJob(cwd, jobId, env = process.env) {
   }
   if (job.status === "running") {
     const childGroupPid = childProcessGroupPidForJob(job);
+    let childTerminationFailure = "";
     if (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity) {
       const childTermination = terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity);
       if (childTermination.ok) {
@@ -526,9 +527,7 @@ export function cancelJob(cwd, jobId, env = process.env) {
         }, env);
         return { status: "cancelled", jobId, job: updated };
       }
-      if (childTermination.reason !== "process not found") {
-        return cancelFailure(cwd, jobId, `Running job child cancellation requires process identity validation; refusing to signal PID: ${childTermination.reason}`, env);
-      }
+      childTerminationFailure = childTermination.reason || "child process group termination failed";
     }
     if (Number.isInteger(job.workerPid)) {
       const termination = terminateValidatedJobWorker(job.workerPid, jobId);
@@ -548,12 +547,18 @@ export function cancelJob(cwd, jobId, env = process.env) {
         }, env);
         return { status: "cancelled", jobId, job: updated };
       }
-      return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${termination.reason}`, env);
+      const details = [
+        childTerminationFailure ? `child process group: ${childTerminationFailure}` : "",
+        `worker: ${termination.reason}`
+      ].filter(Boolean).join("; ");
+      return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${details}`, env);
     }
     if (Number.isInteger(childGroupPid) && !job.childProcessGroupIdentity) {
       return cancelFailure(cwd, jobId, "Running job child process has no saved identity; refusing to signal possible PID reuse.", env);
     }
-    return cancelFailure(cwd, jobId, "Running job has no valid workerPid or child process group.", env);
+    return cancelFailure(cwd, jobId, childTerminationFailure
+      ? `Running job child cancellation requires process identity validation; refusing to signal PID: ${childTerminationFailure}`
+      : "Running job has no valid workerPid or child process group.", env);
   }
   if (isTerminalJobStatus(job.status)) {
     return { status: job.status, jobId, job };

@@ -2456,6 +2456,10 @@ async function runReviewGate(rawArgs) {
     warnGate(`argument parse failed; allowing stop: ${error.message || String(error)}`);
     return;
   }
+  if (rawArgs.includes("reserve-job") || args.background || args.wait) {
+    warnGate("background/wait/reserve-job flags are ignored for Stop hook review gate; allowing stop");
+    return;
+  }
 
   let input = {};
   try {

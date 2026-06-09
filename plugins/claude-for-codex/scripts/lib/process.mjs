@@ -101,6 +101,28 @@ export function validateJobWorkerProcess(pid, jobId) {
   return { ok: false, reason: "process command is not a Claude for Codex job worker", identity };
 }
 
+function commandIdentityMatches(currentCommand, expectedCommand) {
+  const current = String(currentCommand ?? "");
+  const expected = String(expectedCommand ?? "");
+  if (current === expected || current.includes(expected) || expected.includes(current)) {
+    return true;
+  }
+  if (expected.includes("<redacted-")) {
+    const suffixes = expected
+      .split(/<redacted-(?:home|workspace|path)>/g)
+      .slice(1)
+      .filter((suffix) => suffix.length >= 3);
+    if (suffixes.length && suffixes.every((suffix) => current.includes(suffix))) {
+      return true;
+    }
+    const stableTokens = expected
+      .split(/\s+/)
+      .filter((token) => token && !token.includes("<redacted-"));
+    return stableTokens.length > 0 && stableTokens.every((token) => current.includes(token));
+  }
+  return false;
+}
+
 export function validateProcessGroupLeader(pid, expectedIdentity) {
   if (!expectedIdentity) {
     return { ok: false, reason: "missing saved process identity; refusing to signal possible PID reuse" };
@@ -115,7 +137,7 @@ export function validateProcessGroupLeader(pid, expectedIdentity) {
   if (
     identity.pid !== expectedIdentity.pid ||
     identity.pgid !== expectedIdentity.pgid ||
-    identity.command !== expectedIdentity.command
+    !commandIdentityMatches(identity.command, expectedIdentity.command)
   ) {
     return { ok: false, reason: "process identity changed; refusing to signal possible PID reuse", identity };
   }
@@ -138,15 +160,24 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
     while (Date.now() < deadline && validateProcessGroupLeader(pid, expectedIdentity).ok) {
       sleepSync(25);
     }
-    if (validateProcessGroupLeader(pid, expectedIdentity).ok) {
-      escalated = true;
+    escalated = true;
+    try {
       process.kill(validation.signalPid, "SIGKILL");
-      const killDeadline = Date.now() + 1_000;
-      while (Date.now() < killDeadline && validateProcessGroupLeader(pid, expectedIdentity).ok) {
-        sleepSync(25);
+    } catch (error) {
+      if (error?.code !== "ESRCH") {
+        throw error;
       }
     }
-    return { ok: !validateProcessGroupLeader(pid, expectedIdentity).ok, delivered: true, escalated, identity: validation.identity };
+    const killDeadline = Date.now() + 1_000;
+    while (Date.now() < killDeadline) {
+      try {
+        process.kill(validation.signalPid, 0);
+        sleepSync(25);
+      } catch {
+        break;
+      }
+    }
+    return { ok: true, delivered: true, escalated, identity: validation.identity };
   } catch (error) {
     return {
       ok: false,

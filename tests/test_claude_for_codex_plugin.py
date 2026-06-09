@@ -833,6 +833,130 @@ def test_sdk_progress_machine_line_uses_real_event_type_fields():
     assert "sdk-${eventType}" in text or "sdk-\" + eventType" in text
 
 
+def test_review_gate_never_starts_background_or_ultrareview():
+    companion = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    gate = (PLUGIN / "hooks" / "claude-review-gate.mjs").read_text(encoding="utf8")
+    skill = (PLUGIN / "skills" / "claude-review-gate" / "SKILL.md").read_text(encoding="utf8")
+    readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    assert "runReviewGate" in companion
+    assert "--background" not in gate
+    assert "startBackgroundJob(" not in gate
+    assert "reserveJob(" not in gate
+    assert "ultrareview" not in gate.lower()
+    assert "roleTimeoutMs" in companion or "REVIEW_GATE_TIMEOUT" in companion
+    assert "warnGate" in companion and "allowing stop" in companion
+    assert "review gate never starts background jobs" in skill.lower()
+    assert "Stop hook never starts background jobs" in readme
+
+
+def test_lifecycle_docs_preserve_no_resubmit_and_cancel_boundaries():
+    readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    result = (PLUGIN / "skills" / "claude-result" / "SKILL.md").read_text(encoding="utf8")
+    cancel = (PLUGIN / "skills" / "claude-cancel" / "SKILL.md").read_text(encoding="utf8")
+    assert "Do not rerun the same review just because `--wait` expired" in readme
+    assert "do not start a replacement review" in result
+    assert "Do not claim a running process was stopped unless the runtime reports `cancelled`" in cancel
+
+
+def test_cancel_escalates_to_sigkill_for_sigterm_ignoring_child(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    pid_file = tmp_path / "fake-claude.pid"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport os, pathlib, signal, sys, time\npath = pathlib.Path({json.dumps(str(pid_file))})\npath.write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM, lambda signum, frame: None)\nwhile True:\n    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "cancel-me"], cwd=repo, env=env, capture_output=True, text=True)
+    assert started.returncode == 0, started.stderr
+    job_id = json.loads(started.stdout)["job"]["id"]
+    for _ in range(30):
+        if pid_file.exists():
+            break
+        time.sleep(0.1)
+    fake_pid = int(pid_file.read_text(encoding="utf8"))
+    cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert cancelled.returncode == 0, cancelled.stderr
+    for _ in range(30):
+        try:
+            os.kill(fake_pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("fake Claude process survived cancel SIGKILL escalation")
+    payload = json.loads(cancelled.stdout)
+    assert payload["status"] == "cancelled"
+
+
+def test_cancel_orphaned_job_uses_validated_child_process_group(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    pid_file = tmp_path / "orphan.pid"
+    repo.mkdir()
+    data.mkdir()
+    child = subprocess.Popen(
+        ["python3", "-c", f"import os, pathlib, signal, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM, lambda signum, frame: None)\nwhile True: time.sleep(1)\n"],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(30):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        child_pid = int(pid_file.read_text(encoding="utf8"))
+        script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["orphan"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "orphaned",
+  workerPid: 999999,
+  childPid: {child_pid},
+  childProcessGroupPid: {child_pid},
+  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  startedAt: new Date().toISOString(),
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+console.log(job.id);
+"""
+        job_id = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True, check=True).stdout.strip()
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(data)
+        env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+        cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+        assert cancelled.returncode == 0, cancelled.stderr
+        payload = json.loads(cancelled.stdout)
+        assert payload["status"] == "cancelled"
+        assert payload["job"]["status"] == "cancelled"
+        for _ in range(30):
+            if child.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 

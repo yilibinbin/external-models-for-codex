@@ -234,6 +234,8 @@ Claude for Codex starts at most three active tracked background jobs per workspa
 
 If the same background command, arguments, and workspace are submitted again while the original job is queued or running, Claude for Codex returns the existing job id with `reusedExisting: true` and does not spawn another Claude process. This is the runtime enforcement behind the no-resubmit rule.
 
+Stop hook never starts background jobs, never calls `reserve-job`, and never invokes ultrareview. If review-gate work exceeds its bounded role timeout or Claude is unavailable, it fails open and tells you to run an explicit tracked review.
+
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
 
 `--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies configured write-tool candidates such as `Edit`, `Write`, `MultiEdit`, and `Bash` when the installed Claude runtime recognizes them, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.

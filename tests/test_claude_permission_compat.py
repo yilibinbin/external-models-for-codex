@@ -83,6 +83,19 @@ def test_unknown_deny_parser_accepts_only_pre_model_permission_failure():
     assert json.loads(node_eval(source)) == ["MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", None, None, None, None, None]
 
 
+def test_lifecycle_progress_does_not_remove_read_only_permission_fence():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    text = runtime.read_text(encoding="utf8")
+    backend = BACKEND.read_text(encoding="utf8")
+    combined = f"{text}\n{backend}"
+    assert "--permission-mode" in text
+    assert "dontAsk" in text
+    assert "allowedTools" in combined or "--allowedTools" in combined
+    assert "disallowedTools" in combined or "--disallowedTools" in combined
+    assert "CLAUDE_FOR_CODEX_JOB_WORKER" in text
+    assert "CLAUDE_FOR_CODEX_ISOLATED_REVIEW" in combined
+
+
 def test_cli_retry_omits_unknown_deny_candidate(tmp_path):
     fake_claude = tmp_path / "claude"
     log_file = tmp_path / "claude-args.jsonl"
