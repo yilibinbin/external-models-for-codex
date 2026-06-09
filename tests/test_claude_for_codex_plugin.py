@@ -123,6 +123,262 @@ def env_without(*names):
     return env
 
 
+def test_job_lifecycle_helpers_classify_liveness_and_parse_limits(tmp_path):
+    lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
+    script = f"""
+import {{
+  classifyJobLiveness,
+  deriveJobIdempotencyKey,
+  isTerminalJobStatus,
+  parsePositiveInteger,
+  DEFAULT_BACKGROUND_WAIT_MS,
+  HARD_JOB_TIMEOUT_MS
+}} from {json.dumps(lifecycle.as_uri())};
+
+const now = Date.parse("2026-06-09T00:10:00.000Z");
+const payload = {{
+  fresh: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:09:50.000Z" }}, {{ now }}),
+  freshHeartbeatOldProgress: classifyJobLiveness({{ status: "running", lastProgressAt: "2026-06-09T00:00:00.000Z", lastHeartbeatAt: "2026-06-09T00:09:55.000Z" }}, {{ now }}),
+  suspect: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:05:00.000Z" }}, {{ now }}),
+  lost: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:00:00.000Z" }}, {{ now }}),
+  queued: classifyJobLiveness({{ status: "queued", createdAt: "2026-06-09T00:09:30.000Z" }}, {{ now }}),
+  terminal: isTerminalJobStatus("succeeded"),
+  nonterminal: isTerminalJobStatus("running"),
+  activeLimit: parsePositiveInteger("4", 3, {{ min: 1, max: 20 }}),
+  invalidLimit: parsePositiveInteger("bad", 3, {{ min: 1, max: 20 }}),
+  key1: deriveJobIdempotencyKey({{ command: "review", args: ["--base", "main"], cwd: "/workspace/demo" }}),
+  key2: deriveJobIdempotencyKey({{ command: "review", args: ["--base", "main"], cwd: "/workspace/demo" }}),
+  wait: DEFAULT_BACKGROUND_WAIT_MS,
+  hard: HARD_JOB_TIMEOUT_MS
+}};
+console.log(JSON.stringify(payload));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["fresh"]["state"] == "healthy"
+    assert payload["freshHeartbeatOldProgress"]["state"] == "healthy"
+    assert payload["suspect"]["state"] == "suspect"
+    assert payload["lost"]["state"] == "lost"
+    assert payload["queued"]["state"] == "queued"
+    assert payload["terminal"] is True
+    assert payload["nonterminal"] is False
+    assert payload["activeLimit"] == 4
+    assert payload["invalidLimit"] == 3
+    assert payload["key1"] == payload["key2"]
+    assert payload["key1"].startswith("sha256:")
+    assert payload["wait"] <= 60_000
+    assert payload["hard"] >= 30 * 60 * 1000
+
+
+def test_progress_events_parse_sanitize_and_count_malformed_lines(tmp_path):
+    progress = PLUGIN / "scripts" / "lib" / "progress.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = f"""
+import {{ formatProgressEvent, progressEventsFromLines }} from {json.dumps(progress.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const good = formatProgressEvent({{ phase: "reviewing", message: "path " + cwd + " api_key='sk-progresssecret1234567890'", role: "security" }}, {{ cwd }}).trimEnd();
+const parsed = progressEventsFromLines([good, "[claude-for-codex progress] {{bad-json", "[claude-for-codex progress typo"]);
+console.log(JSON.stringify({{ good, parsed }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["good"].startswith("[claude-for-codex progress] ")
+    assert str(repo) not in payload["good"]
+    assert "sk-progresssecret" not in payload["good"]
+    assert payload["parsed"]["events"][0]["phase"] == "reviewing"
+    assert payload["parsed"]["events"][0]["role"] == "security"
+    assert payload["parsed"]["malformedCount"] == 1
+    assert payload["parsed"]["malformedPrefixCount"] == 1
+
+
+def test_job_finish_sanitizes_output_and_progress_cannot_overwrite_terminal(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    secret = "api_key='sk-testsecretvalue1234567890'"
+    script = f"""
+import {{
+  createJob,
+  claimJobForRun,
+  recordJobHeartbeat,
+  recordJobProgress,
+  finishJob,
+  readJob,
+  updateJobUnlessTerminal
+}} from {json.dumps(jobs.as_uri())};
+
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["x"], cwd }}, env);
+const claim = claimJobForRun(cwd, job.id, process.pid, env);
+recordJobHeartbeat(cwd, job.id, {{ phase: "reviewing" }}, env);
+recordJobProgress(cwd, job.id, {{ phase: "sdk-result", message: "path " + cwd + " {secret}", role: "security " + cwd }}, env);
+updateJobUnlessTerminal(cwd, job.id, {{ cancelFailureReason: "cancel path " + cwd + " {secret}" }}, env);
+finishJob(cwd, job.id, {{
+  status: 0,
+  stdout: "ok " + cwd + " {secret}",
+  stderr: "stderr " + cwd,
+  error: "error {secret}"
+}}, env);
+const after = recordJobHeartbeat(cwd, job.id, {{ phase: "should-not-change" }}, env);
+console.log(JSON.stringify({{ claim, after, stored: readJob(cwd, job.id, env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    stored_text = json.dumps(payload["stored"])
+    assert payload["claim"]["status"] == "claimed"
+    assert payload["stored"]["status"] == "succeeded"
+    assert payload["stored"]["phase"] == "succeeded"
+    assert payload["stored"]["heartbeatSeq"] >= 1
+    assert payload["stored"]["lastProgressAt"]
+    assert "sk-testsecret" not in stored_text
+    assert str(repo) not in payload["stored"]["stdout"]
+    assert str(repo) not in payload["stored"].get("lastProgressMessage", "")
+    assert str(repo) not in payload["stored"].get("lastProgressRole", "")
+    assert str(repo) not in payload["stored"].get("cancelFailureReason", "")
+    assert payload["after"]["phase"] == "succeeded"
+
+
+def test_direct_and_reserved_claims_are_exclusive_and_share_submission_fields(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    companion = PLUGIN / "scripts" / "claude-companion.mjs"
+    script = f"""
+import {{ createJob, reserveJob, claimJobForRun, claimReservedJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const direct = createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env);
+const first = claimJobForRun(cwd, direct.id, 1111, env);
+const second = claimJobForRun(cwd, direct.id, 2222, env);
+const workerCommand = ["node", {json.dumps(str(companion))}, "run-reserved-job", "--job-id"];
+const reserved = reserveJob(cwd, {{ command: "review", args: ["reserved"], cwd }}, workerCommand, env);
+workerCommand.push(reserved.id);
+updateJob(cwd, reserved.id, {{ workerCommand }}, env);
+const reservedFirst = claimReservedJob(cwd, reserved.id, 3333, env);
+const reservedSecond = claimReservedJob(cwd, reserved.id, 4444, env);
+console.log(JSON.stringify({{
+  first, second, reservedFirst, reservedSecond,
+  directStored: readJob(cwd, direct.id, env),
+  reservedStored: readJob(cwd, reserved.id, env)
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["first"]["status"] == "claimed"
+    assert payload["second"]["status"] == "not_claimed"
+    assert payload["reservedFirst"]["status"] == "claimed"
+    assert payload["reservedSecond"]["status"] == "not_claimed"
+    for key in ["directStored", "reservedStored"]:
+        assert payload[key]["status"] == "running"
+        assert payload[key]["submissionState"] == "in-flight"
+        assert payload[key]["submittedAt"]
+        assert payload[key]["idempotencyKey"].startswith("sha256:")
+
+
+def test_claim_job_for_run_is_exclusive_across_processes(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    start = tmp_path / "start"
+    repo.mkdir()
+    data.mkdir()
+    create = f"""
+import {{ createJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+console.log(createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env).id);
+"""
+    job_id = subprocess.run([NODE, "--input-type=module", "--eval", create], capture_output=True, text=True, check=True).stdout.strip()
+    worker = f"""
+import fs from "node:fs";
+import {{ claimJobForRun }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+while (!fs.existsSync({json.dumps(str(start))})) {{
+  await new Promise((resolve) => setTimeout(resolve, 5));
+}}
+console.log(JSON.stringify(claimJobForRun(cwd, {json.dumps(job_id)}, process.pid, env)));
+"""
+    procs = [subprocess.Popen([NODE, "--input-type=module", "--eval", worker], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    start.write_text("go", encoding="utf8")
+    outputs = [proc.communicate(timeout=10) + (proc.returncode,) for proc in procs]
+    assert all(row[2] == 0 for row in outputs), outputs
+    statuses = [json.loads(row[0])["status"] for row in outputs]
+    assert statuses.count("claimed") == 1
+    assert statuses.count("not_claimed") == 1
+
+
+def test_claim_job_lock_contention_returns_structured_busy_not_exception(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import fs from "node:fs";
+import path from "node:path";
+import {{ createJob, claimJobForRun, listJobs }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env);
+const state = listJobs(cwd, env);
+const lockFile = path.join(state.stateDir, "jobs", `${{job.id}}.json.lock`);
+const fd = fs.openSync(lockFile, "wx", 0o600);
+let claim;
+try {{
+  claim = claimJobForRun(cwd, job.id, process.pid, env);
+}} finally {{
+  fs.closeSync(fd);
+  fs.rmSync(lockFile, {{ force: true }});
+}}
+console.log(JSON.stringify(claim));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] in {"locked", "not_claimed"}
+
+
+def test_job_lock_does_not_remove_stale_lock_when_owner_is_alive(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import fs from "node:fs";
+import path from "node:path";
+import {{ createJob, claimJobForRun, listJobs }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env);
+const state = listJobs(cwd, env);
+const lockFile = path.join(state.stateDir, "jobs", `${{job.id}}.json.lock`);
+fs.writeFileSync(lockFile, JSON.stringify({{ pid: process.pid, createdAt: "2026-06-09T00:00:00.000Z" }}));
+const old = new Date(Date.now() - 120000);
+fs.utimesSync(lockFile, old, old);
+const claim = claimJobForRun(cwd, job.id, process.pid, env);
+const stillLocked = fs.existsSync(lockFile);
+fs.rmSync(lockFile, {{ force: true }});
+console.log(JSON.stringify({{ claim, stillLocked }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claim"]["status"] == "locked"
+    assert payload["stillLocked"] is True
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 

@@ -2,9 +2,32 @@ import fs from "node:fs";
 import path from "node:path";
 import { captureProcessIdentity, terminateValidatedJobWorker } from "./process.mjs";
 import { jobsDirForCwd, stateDirForCwd } from "./state.mjs";
+import {
+  DEFAULT_MAX_ACTIVE_JOBS,
+  MAX_STORED_OUTPUT_BYTES,
+  classifyJobLiveness,
+  deriveJobIdempotencyKey,
+  isTerminalJobStatus
+} from "./job-lifecycle.mjs";
+import { sanitizeSummary } from "./sanitize.mjs";
 
 const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
-const TERMINAL_STATUSES = new Set(["succeeded", "failed", "cancelled", "cancel_failed"]);
+const LOCK_STALE_AFTER_MS = 30_000;
+const LOCK_RETRY_UNTIL_MS = 2_000;
+const SANITIZED_JOB_STRING_FIELDS = Object.freeze({
+  stdout: MAX_STORED_OUTPUT_BYTES,
+  stderr: MAX_STORED_OUTPUT_BYTES,
+  error: 4096,
+  reason: 1024,
+  stateError: 1024,
+  detail: 1024,
+  failureReason: 1024,
+  phase: 80,
+  lastProgressMessage: 512,
+  lastProgressRole: 80,
+  cancelFailureReason: 1024,
+  message: 512
+});
 
 function ensureJobsDir(cwd = process.cwd(), env = process.env) {
   const dir = jobsDirForCwd(cwd, env);
@@ -19,12 +42,125 @@ function jobFile(cwd, jobId, env = process.env) {
   return path.join(ensureJobsDir(cwd, env), `${jobId}.json`);
 }
 
-function writeJob(cwd, job, env = process.env) {
-  const file = jobFile(cwd, job.id, env);
+function sleepSync(ms) {
+  const view = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(view, 0, 0, ms);
+}
+
+function lockPathForFile(file) {
+  return `${file}.lock`;
+}
+
+function lockOwner(lockFile) {
+  try {
+    return JSON.parse(fs.readFileSync(lockFile, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function removeStaleLock(lockFile) {
+  try {
+    const stat = fs.statSync(lockFile);
+    if (Date.now() - stat.mtimeMs <= LOCK_STALE_AFTER_MS) {
+      return false;
+    }
+    const owner = lockOwner(lockFile);
+    if (owner?.pid && captureProcessIdentity(Number(owner.pid))) {
+      return false;
+    }
+    fs.rmSync(lockFile, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function withFileLock(file, operation, options = {}) {
+  const lockFile = lockPathForFile(file);
+  const deadline = Date.now() + LOCK_RETRY_UNTIL_MS;
+  let fd;
+  while (fd === undefined) {
+    try {
+      fd = fs.openSync(lockFile, "wx", 0o600);
+      fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, createdAt: new Date().toISOString() })}\n`, "utf8");
+    } catch (error) {
+      if (error?.code !== "EEXIST") {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        removeStaleLock(lockFile);
+        return options.onBusy ? options.onBusy() : { status: "locked", reason: "lock busy" };
+      }
+      if (removeStaleLock(lockFile)) {
+        continue;
+      }
+      sleepSync(25);
+    }
+  }
+  try {
+    return operation();
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } finally {
+      fs.rmSync(lockFile, { force: true });
+    }
+  }
+}
+
+function withJobLock(cwd, jobId, env, operation) {
+  return withFileLock(jobFile(cwd, jobId, env), operation, {
+    onBusy: () => ({ status: "locked", jobId, reason: "Job state is busy; retry later." })
+  });
+}
+
+export function withWorkspaceJobLock(cwd = process.cwd(), env = process.env, operation) {
+  const dir = ensureJobsDir(cwd, env);
+  return withFileLock(path.join(dir, ".workspace.lock"), operation, {
+    onBusy: () => ({ status: "workspace_locked", reason: "Workspace job state is busy; retry later." })
+  });
+}
+
+function readJobFileDirect(file, jobId) {
+  if (!fs.existsSync(file)) {
+    return null;
+  }
+  try {
+    return JSON.parse(fs.readFileSync(file, "utf8"));
+  } catch (error) {
+    return { id: jobId, status: "corrupt", stateError: error.message || String(error) };
+  }
+}
+
+function sanitizeJobForPersistentWrite(job, cwd) {
+  const sanitized = { ...job };
+  for (const [field, maxBytes] of Object.entries(SANITIZED_JOB_STRING_FIELDS)) {
+    if (sanitized[field] !== undefined) {
+      sanitized[field] = sanitizeSummary(sanitized[field], { cwd, maxBytes });
+    }
+  }
+  for (const field of ["pidIdentity", "childProcessGroupIdentity", "cancelIdentity"]) {
+    if (sanitized[field]?.command !== undefined) {
+      sanitized[field] = {
+        ...sanitized[field],
+        command: sanitizeSummary(sanitized[field].command, { cwd, maxBytes: 2048 })
+      };
+    }
+  }
+  return sanitized;
+}
+
+function writeJobFileDirect(file, job, cwd = job.cwd ?? process.cwd()) {
   const tmpFile = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(job, null, 2)}\n`, "utf8");
+  fs.writeFileSync(tmpFile, `${JSON.stringify(sanitizeJobForPersistentWrite(job, cwd), null, 2)}\n`, "utf8");
   fs.renameSync(tmpFile, file);
   return job;
+}
+
+function writeJob(cwd, job, env = process.env) {
+  const file = jobFile(cwd, job.id, env);
+  return writeJobFileDirect(file, job, cwd);
 }
 
 export function createJob(cwd, job, env = process.env) {
@@ -68,106 +204,154 @@ function isValidReservedWorkerCommand(job, jobId) {
   return jobIdFlagIndex >= 0 && job.workerCommand[jobIdFlagIndex + 1] === jobId;
 }
 
+function sanitizeProgressUpdates(updates, cwd) {
+  const sanitized = { ...updates };
+  if (sanitized.message !== undefined && sanitized.lastProgressMessage === undefined) {
+    sanitized.lastProgressMessage = sanitized.message;
+    delete sanitized.message;
+  }
+  if (sanitized.role !== undefined && sanitized.lastProgressRole === undefined) {
+    sanitized.lastProgressRole = sanitized.role;
+    delete sanitized.role;
+  }
+  for (const key of ["phase", "lastProgressMessage", "lastProgressRole"]) {
+    if (sanitized[key] !== undefined) {
+      sanitized[key] = sanitizeSummary(sanitized[key], { cwd, maxBytes: key === "phase" ? 80 : 512 });
+    }
+  }
+  return sanitized;
+}
+
+function claimQueuedJob(cwd, jobId, workerPid, env, validate = () => true) {
+  return withJobLock(cwd, jobId, env, () => {
+    const file = jobFile(cwd, jobId, env);
+    const job = readJobFileDirect(file, jobId);
+    if (!job) {
+      return { status: "not_found", jobId };
+    }
+    if (job.status !== "queued") {
+      return { status: "not_claimed", jobId, job, reason: `Job is ${job.status}.` };
+    }
+    const validation = validate(job);
+    if (validation !== true) {
+      return { status: "not_claimed", jobId, job, reason: validation.reason ?? String(validation) };
+    }
+    const now = new Date().toISOString();
+    const running = writeJobFileDirect(file, {
+      ...job,
+      status: "running",
+      phase: "starting",
+      workerPid,
+      pidIdentity: captureProcessIdentity(workerPid),
+      startedAt: job.startedAt ?? now,
+      updatedAt: now,
+      lastHeartbeatAt: now,
+      heartbeatSeq: Number(job.heartbeatSeq ?? 0),
+      submissionState: "in-flight",
+      submittedAt: now,
+      idempotencyKey: job.idempotencyKey ?? deriveJobIdempotencyKey(job)
+    }, cwd);
+    return { status: "claimed", job: running };
+  });
+}
+
+export function claimJobForRun(cwd, jobId, workerPid = process.pid, env = process.env) {
+  return claimQueuedJob(cwd, jobId, workerPid, env);
+}
+
 export function claimReservedJob(cwd, jobId, workerPid = process.pid, env = process.env) {
-  const file = jobFile(cwd, jobId, env);
-  if (!fs.existsSync(file)) {
-    return { status: "not_found", jobId };
-  }
-  const original = fs.readFileSync(file, "utf8");
-  let job;
-  try {
-    job = JSON.parse(original);
-  } catch (error) {
-    return {
-      status: "not_claimed",
-      jobId,
-      reason: `Reserved job state is corrupt: ${error.message || String(error)}`
-    };
-  }
-  if (job.status !== "queued") {
-    return { status: "not_claimed", jobId, job };
-  }
-  if (!isValidReservedWorkerCommand(job, jobId)) {
-    return {
-      status: "not_claimed",
-      jobId,
-      reason: "Job is not a valid host-forwarded reservation.",
-      job
-    };
-  }
-  const running = {
-    ...job,
-    status: "running",
-    workerPid,
-    pidIdentity: captureProcessIdentity(workerPid),
-    startedAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
-  };
-  const tmpFile = `${file}.${process.pid}.claim.tmp`;
-  fs.writeFileSync(tmpFile, `${JSON.stringify(running, null, 2)}\n`, "utf8");
-  if (fs.readFileSync(file, "utf8") !== original) {
-    fs.rmSync(tmpFile, { force: true });
-    return {
-      status: "not_claimed",
-      jobId,
-      reason: "Job changed before it could be claimed."
-    };
-  }
-  fs.renameSync(tmpFile, file);
-  return { status: "claimed", job: running };
+  return claimQueuedJob(cwd, jobId, workerPid, env, (job) => (
+    isValidReservedWorkerCommand(job, jobId)
+      ? true
+      : { reason: "Job is not a valid host-forwarded reservation." }
+  ));
+}
+
+function mutateJobUnderLock(cwd, jobId, env, mutator) {
+  return withJobLock(cwd, jobId, env, () => {
+    const file = jobFile(cwd, jobId, env);
+    const job = readJobFileDirect(file, jobId);
+    if (!job) {
+      return null;
+    }
+    const updated = mutator(job);
+    if (!updated) {
+      return job;
+    }
+    return writeJobFileDirect(file, { ...updated, updatedAt: new Date().toISOString() }, cwd);
+  });
 }
 
 export function updateJob(cwd, jobId, updates, env = process.env) {
-  const job = readJob(cwd, jobId, env);
-  if (!job) {
-    return null;
-  }
-  const updated = {
+  return mutateJobUnderLock(cwd, jobId, env, (job) => ({
     ...job,
-    ...updates,
-    updatedAt: new Date().toISOString()
-  };
-  return writeJob(cwd, updated, env);
+    ...updates
+  }));
 }
 
 export function updateJobUnlessTerminal(cwd, jobId, updates, env = process.env) {
-  const job = readJob(cwd, jobId, env);
-  if (!job) {
-    return null;
-  }
-  if (TERMINAL_STATUSES.has(job.status)) {
-    return job;
-  }
-  const updated = {
-    ...job,
+  return mutateJobUnderLock(cwd, jobId, env, (job) => {
+    if (isTerminalJobStatus(job.status)) {
+      return null;
+    }
+    return { ...job, ...updates };
+  });
+}
+
+export function recordJobHeartbeat(cwd, jobId, updates = {}, env = process.env) {
+  return mutateJobUnderLock(cwd, jobId, env, (job) => {
+    if (isTerminalJobStatus(job.status)) {
+      return null;
+    }
+    return {
+      ...job,
+      ...sanitizeProgressUpdates(updates, cwd),
+      heartbeatSeq: Number(job.heartbeatSeq ?? 0) + 1,
+      lastHeartbeatAt: new Date().toISOString()
+    };
+  });
+}
+
+export function recordJobProgress(cwd, jobId, updates = {}, env = process.env) {
+  return recordJobHeartbeat(cwd, jobId, {
     ...updates,
-    updatedAt: new Date().toISOString()
-  };
-  return writeJob(cwd, updated, env);
+    lastProgressAt: new Date().toISOString()
+  }, env);
 }
 
 export function markJobRunning(cwd, jobId, workerPid, env = process.env) {
   return updateJob(cwd, jobId, {
     status: "running",
+    phase: "starting",
     workerPid,
     pidIdentity: captureProcessIdentity(workerPid),
-    startedAt: new Date().toISOString()
+    startedAt: new Date().toISOString(),
+    lastHeartbeatAt: new Date().toISOString(),
+    submissionState: "in-flight",
+    submittedAt: new Date().toISOString()
   }, env);
 }
 
 export function finishJob(cwd, jobId, result, env = process.env) {
-  const current = readJob(cwd, jobId, env);
-  if (current && TERMINAL_STATUSES.has(current.status)) {
-    return current;
-  }
-  return updateJob(cwd, jobId, {
-    status: result.status === 0 ? "succeeded" : "failed",
-    exitStatus: result.status,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    error: result.error ?? "",
-    finishedAt: new Date().toISOString()
-  }, env);
+  return mutateJobUnderLock(cwd, jobId, env, (current) => {
+    if (isTerminalJobStatus(current.status)) {
+      return null;
+    }
+    const succeeded = result.status === 0;
+    return {
+      ...current,
+      status: succeeded ? "succeeded" : "failed",
+      phase: succeeded ? "succeeded" : "failed",
+      submissionState: succeeded ? "completed" : "failed",
+      exitStatus: result.status,
+      stdout: sanitizeSummary(result.stdout ?? "", { cwd, maxBytes: MAX_STORED_OUTPUT_BYTES }),
+      stderr: sanitizeSummary(result.stderr ?? "", { cwd, maxBytes: MAX_STORED_OUTPUT_BYTES }),
+      error: sanitizeSummary(result.error ?? "", { cwd, maxBytes: 4096 }),
+      finishedAt: new Date().toISOString(),
+      workerPid: null,
+      childPid: null
+    };
+  });
 }
 
 export function listJobs(cwd = process.cwd(), env = process.env) {
@@ -192,19 +376,27 @@ export function listJobs(cwd = process.cwd(), env = process.env) {
 }
 
 export function readJob(cwd, jobId, env = process.env) {
-  const file = jobFile(cwd, jobId, env);
-  if (!fs.existsSync(file)) {
+  return readJobFileDirect(jobFile(cwd, jobId, env), jobId);
+}
+
+export function activeJobs(cwd = process.cwd(), env = process.env) {
+  return listJobs(cwd, env).jobs.filter((job) => job.status === "queued" || job.status === "running");
+}
+
+export function canStartBackgroundJob(cwd = process.cwd(), env = process.env, limit = DEFAULT_MAX_ACTIVE_JOBS) {
+  const active = activeJobs(cwd, env);
+  return { ok: active.length < limit, activeCount: active.length, limit, active };
+}
+
+export function findActiveJobByIdempotencyKey(cwd = process.cwd(), idempotencyKey, env = process.env) {
+  if (!idempotencyKey) {
     return null;
   }
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf8"));
-  } catch (error) {
-    return {
-      id: jobId,
-      status: "corrupt",
-      stateError: error.message || String(error)
-    };
-  }
+  return activeJobs(cwd, env).find((job) => job.idempotencyKey === idempotencyKey) ?? null;
+}
+
+export function enrichJobLifecycle(job, options = {}) {
+  return { ...job, lifecycle: classifyJobLiveness(job, options) };
 }
 
 export function resultForJob(cwd, jobId, env = process.env) {
@@ -215,11 +407,9 @@ export function resultForJob(cwd, jobId, env = process.env) {
   if (job.status === "corrupt") {
     return { status: "corrupt", jobId, job };
   }
-  const updated = {
-    ...job,
+  const updated = updateJob(cwd, jobId, {
     resultViewedAt: new Date().toISOString()
-  };
-  writeJob(cwd, updated, env);
+  }, env) ?? job;
   return { status: "ok", job: updated };
 }
 
@@ -229,12 +419,10 @@ export function cancelJob(cwd, jobId, env = process.env) {
     return { status: "not_found", jobId };
   }
   if (job.status === "queued") {
-    const updated = {
-      ...job,
+    const updated = updateJob(cwd, jobId, {
       status: "cancelled",
       cancelledAt: new Date().toISOString()
-    };
-    writeJob(cwd, updated, env);
+    }, env);
     return { status: "cancelled", jobId, job: updated };
   }
   if (job.status === "running" && Number.isInteger(job.workerPid)) {
@@ -272,7 +460,7 @@ export function cancelJob(cwd, jobId, env = process.env) {
       job: updated
     };
   }
-  if (TERMINAL_STATUSES.has(job.status)) {
+  if (isTerminalJobStatus(job.status)) {
     return { status: job.status, jobId, job };
   }
   return {
