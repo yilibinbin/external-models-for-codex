@@ -121,6 +121,7 @@ import { extractJsonObject, validateAdversarialJson } from "./lib/structured-out
 import {
   captureProcessGroupIdentity,
   currentProcessPlatform,
+  processGroupHasLiveMembers,
   supportsPosixProcessGroups
 } from "./lib/process.mjs";
 import {
@@ -3506,20 +3507,29 @@ function runStoredJobCommand(job, options = {}) {
       };
     }
 
-    function stopChildGroup(signal) {
+    function stopChildGroup(signal, options = {}) {
       stopRequested = true;
       if (!child?.pid) {
-        return;
+        return false;
+      }
+      if (options.requireLiveGroup && !processGroupHasLiveMembers(child.pid)) {
+        return false;
       }
       try {
         process.kill(-child.pid, signal);
+        return true;
       } catch {
+        if (options.requireLiveGroup) {
+          return false;
+        }
         try {
           child.kill(signal);
+          return true;
         } catch {
           // Child may already have exited.
         }
       }
+      return false;
     }
 
     function stopUnvalidatedChild(signal) {
@@ -3634,7 +3644,7 @@ function runStoredJobCommand(job, options = {}) {
         clearTimeout(killTimer);
         const remainingKillGraceMs = Math.max(0, (hardTimedOutAt || Date.now()) + killMs - Date.now());
         killTimer = setTimeout(() => {
-          stopChildGroup("SIGKILL");
+          stopChildGroup("SIGKILL", { requireLiveGroup: true });
           clearTimeout(killTimer);
           resolve({
             ...commandResult(1, `Child terminated by ${signal ?? "SIGTERM"} after hard timeout before SIGKILL escalation.`)

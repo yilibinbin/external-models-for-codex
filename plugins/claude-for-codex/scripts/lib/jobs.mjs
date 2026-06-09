@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   captureProcessIdentity,
@@ -89,10 +90,24 @@ function lockOwnerMatches(owner, identity) {
   if (!identity) {
     return false;
   }
+  if (typeof owner?.commandHash === "string" && owner.commandHash) {
+    return identity.commandHash === owner.commandHash;
+  }
   if (typeof owner?.command === "string" && owner.command) {
     return identity.command === owner.command;
   }
   return /\bnode(?:\s|$)/.test(identity.command) || identity.command.includes("claude-companion.mjs");
+}
+
+function currentLockOwner() {
+  const command = process.argv.join(" ");
+  return {
+    pid: process.pid,
+    commandHash: createHash("sha256").update(command).digest("hex"),
+    executable: path.basename(process.argv[0] || ""),
+    entrypoint: process.argv[1] ? path.basename(process.argv[1]) : "",
+    createdAt: new Date().toISOString()
+  };
 }
 
 function withFileLock(file, operation, options = {}) {
@@ -103,7 +118,7 @@ function withFileLock(file, operation, options = {}) {
     try {
       fd = fs.openSync(lockFile, "wx", 0o600);
       try {
-        fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, command: process.argv.join(" "), createdAt: new Date().toISOString() })}\n`, "utf8");
+        fs.writeFileSync(fd, `${JSON.stringify(currentLockOwner())}\n`, "utf8");
       } catch (writeError) {
         try {
           fs.closeSync(fd);
@@ -342,6 +357,18 @@ export function updateJobUnlessTerminal(cwd, jobId, updates, env = process.env) 
   });
 }
 
+function hasEffectiveCancelRequest(job) {
+  if (!job?.cancelRequestedAt) {
+    return false;
+  }
+  if (!job.cancelFailedAt) {
+    return true;
+  }
+  const requestedAt = Date.parse(job.cancelRequestedAt);
+  const failedAt = Date.parse(job.cancelFailedAt);
+  return Number.isFinite(requestedAt) && Number.isFinite(failedAt) && requestedAt > failedAt;
+}
+
 export function recordJobHeartbeat(cwd, jobId, updates = {}, env = process.env) {
   return mutateJobUnderLock(cwd, jobId, env, (job) => {
     if (isTerminalJobStatus(job.status)) {
@@ -382,7 +409,7 @@ export function finishJob(cwd, jobId, result, env = process.env) {
       return null;
     }
     const succeeded = result.status === 0;
-    const cancelledByRequest = Boolean(current.cancelRequestedAt);
+    const cancelledByRequest = hasEffectiveCancelRequest(current);
     const stdout = storedOutput(result.stdout ?? "", cwd, {
       bytes: result.stdoutBytes,
       truncated: result.stdoutTruncated
@@ -561,6 +588,14 @@ function cancelFailure(cwd, jobId, reason, env, options = {}) {
     cancelFailedAt: new Date().toISOString(),
     cancelFailureReason: reason
   }, env);
+  if (updated && isTerminalJobStatus(updated.status) && updated.status !== "cancel_failed") {
+    return {
+      status: updated.status,
+      jobId,
+      reason: "Job reached a terminal state before cancellation failure could be persisted.",
+      job: updated
+    };
+  }
   return { status: "cancel_failed", jobId, reason, job: updated };
 }
 

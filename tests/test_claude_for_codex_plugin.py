@@ -1728,6 +1728,18 @@ updateJob(cwd, "cancel-validation", {{
     assert "requires process identity validation" in payload["reason"]
     assert payload["job"]["status"] == "running"
     assert payload["job"]["phase"] == "cancel_failed"
+    finished_script = f"""
+import {{ finishJob, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+finishJob(cwd, "cancel-validation", {{ status: 0, stdout: "done", stderr: "" }}, env);
+console.log(JSON.stringify(readJob(cwd, "cancel-validation", env)));
+"""
+    finished = subprocess.run([NODE, "--input-type=module", "--eval", finished_script], capture_output=True, text=True)
+    assert finished.returncode == 0, finished.stderr
+    finished_payload = json.loads(finished.stdout)
+    assert finished_payload["status"] == "succeeded"
+    assert finished_payload["phase"] == "succeeded"
 
 
 def test_finish_job_after_cancel_request_is_recorded_as_cancelled(tmp_path):
