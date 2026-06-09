@@ -657,6 +657,7 @@ export function cancelJob(cwd, jobId, env = process.env) {
     return cancelFailure(cwd, jobId, "Queued job changed state before cancellation could be persisted.", env);
   }
   if (job.status === "running") {
+    const phaseBeforeCancel = String(job.phase ?? "");
     const childGroupPid = childProcessGroupPidForJob(job);
     if (!Number.isInteger(childGroupPid) && !Number.isInteger(job.workerPid)) {
       return cancelFailure(cwd, jobId, "Running job has no valid workerPid or child process group.", env);
@@ -697,7 +698,7 @@ export function cancelJob(cwd, jobId, env = process.env) {
     if (childTermination.ok && workerTermination.ok) {
       const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);
       const missingStartingChildSupervision = !Number.isInteger(requestedChildGroupPid)
-        && ["starting", "submitted"].includes(String(requested.phase ?? ""));
+        && ["starting", "submitted"].includes(phaseBeforeCancel);
       if (!signalDelivered) {
         const processMayRemain = !(
           String(workerTermination.reason ?? "").includes("already absent") &&

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1552,7 +1553,7 @@ function startBackgroundJob(command, rawArgs) {
   });
 }
 
-function reserveBackgroundJob(command, commandArgs, workerCommand) {
+function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
   const cwd = process.cwd();
   const session = readJson(currentSessionFileForCwd(cwd), {});
   const fingerprint = workingTreeFingerprintDetails(cwd, commandArgs);
@@ -1580,6 +1581,7 @@ function reserveBackgroundJob(command, commandArgs, workerCommand) {
       return { capacityBlocked: true, capacity };
     }
     const job = reserveJob(cwd, {
+      id: jobId,
       command,
       args: commandArgs,
       cwd,
@@ -1726,9 +1728,11 @@ function handleReserveJob(rawArgs) {
   const workerCommand = [
     process.argv0 || process.execPath,
     process.argv[1],
-    "run-reserved-job"
+    "run-reserved-job",
+    "--job-id",
+    `job-${randomUUID()}`
   ];
-  const reserved = reserveBackgroundJob(command, commandArgs, workerCommand);
+  const reserved = reserveBackgroundJob(command, commandArgs, workerCommand, workerCommand.at(-1));
   if (reserved?.status === "workspace_locked") {
     return {
       status: "workspace_locked",
@@ -1757,12 +1761,7 @@ function handleReserveJob(rawArgs) {
     };
   }
   const job = reserved.job;
-  if (!reserved.reusedExisting) {
-    workerCommand.push("--job-id", job.id);
-  }
-  const updated = reserved.reusedExisting
-    ? job
-    : updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
+  const updated = job;
 
   return {
     status: "reserved",
