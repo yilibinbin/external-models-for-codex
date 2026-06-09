@@ -1135,11 +1135,19 @@ function runReleaseCheck(rawArgs) {
       return text
         && (naturalLanguageRoutingContract.githubActionsInitForbiddenSubstrings || []).every((forbidden) => !text.includes(forbidden));
     });
-  const marketplaceInstallDocs = [
-    repoTextIfExists("README.md"),
-    repoTextIfExists(path.join("docs", "README.en.md")),
-    repoTextIfExists(path.join("docs", "README.zh-CN.md"))
-  ].filter(Boolean);
+  const marketplaceDocPaths = [
+    "README.md",
+    path.join("docs", "README.en.md"),
+    path.join("docs", "README.zh-CN.md")
+  ];
+  const marketplaceDocs = marketplaceDocPaths.map((relativePath) => ({
+    existsInRepo: fs.existsSync(path.join(REPO_ROOT_DIR, relativePath)),
+    text: repoTextIfExists(relativePath)
+  }));
+  const marketplaceDocsExistInRepo = marketplaceDocs.some((doc) => doc.existsInRepo);
+  const marketplaceDocsReleaseRefOk = marketplaceDocs
+    .filter((doc) => doc.existsInRepo)
+    .every((doc) => doc.text.includes(`--ref ${RELEASE_REF}`));
   const hooks = exists("hooks/hooks.json") ? readText("hooks/hooks.json") : "";
   const renderedWorkflow = renderWorkflow(ROOT_DIR, { releaseRef: RELEASE_REF });
   const workflowValidation = validateWorkflow(renderedWorkflow);
@@ -1152,9 +1160,9 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(versionHelper.includes(`PLUGIN_VERSION = "${manifest.version}"`), "version-helper"),
     releaseCheckResult(readme.includes(`Version: ${PLUGIN_VERSION}`) && changelog.includes(`## ${PLUGIN_VERSION} `), "docs-version-aligned"),
     releaseCheckResult(
-      marketplaceInstallDocs.length === 0 || marketplaceInstallDocs.every((doc) => doc.includes(`--ref ${RELEASE_REF}`)),
+      !marketplaceDocsExistInRepo || marketplaceDocsReleaseRefOk,
       "marketplace-docs-release-ref",
-      marketplaceInstallDocs.length === 0 ? "skipped repo-level docs in installed plugin layout" : ""
+      !marketplaceDocsExistInRepo ? "skipped repo-level docs in installed plugin layout" : ""
     ),
     releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),

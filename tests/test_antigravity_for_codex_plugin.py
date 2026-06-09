@@ -2089,6 +2089,22 @@ def test_release_check_passes_from_installed_plugin_layout(tmp_path):
     assert "PASS github-actions-no-repo-relative-runtime-path" in result.stdout
 
 
+def test_release_check_enforces_repo_docs_when_source_layout_has_docs(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "plugins" / "antigravity-for-codex"
+    shutil.copytree(PLUGIN, plugin)
+    (repo / "docs").mkdir(parents=True)
+    (repo / "README.md").write_text("codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.0.0\n", encoding="utf8")
+    (repo / "docs" / "README.en.md").write_text("missing current release ref\n", encoding="utf8")
+    (repo / "docs" / "README.zh-CN.md").write_text("missing current release ref\n", encoding="utf8")
+    runtime = plugin / "scripts" / "antigravity-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "release-check failed: marketplace-docs-release-ref" in result.stderr
+
+
 def test_version_helper_matches_manifest():
     source = (
         "const version = await import('./plugins/antigravity-for-codex/scripts/lib/version.mjs');"
