@@ -1574,6 +1574,9 @@ function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
       if (existing.reservationMode !== "host-forwarded" || !Array.isArray(existing.workerCommand)) {
         return { alreadyRunning: true, job: existing };
       }
+      if (existing.status !== "queued") {
+        return { alreadyRunning: true, job: existing };
+      }
       return { reusedExisting: true, job: existing };
     }
     const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
@@ -1613,6 +1616,10 @@ function progressPreview(job) {
 
 function enrichCompanionJob(job) {
   return { ...enrichJobLifecycle(job), elapsedMs: elapsedMs(job), progressPreview: progressPreview(job) };
+}
+
+function isExpectedActiveWaitStatus(status) {
+  return status === "queued" || status === "running";
 }
 
 async function waitForJob(jobId, options = {}) {
@@ -1695,14 +1702,14 @@ async function maybeStartBackground(command, rawArgs) {
   }
   if (parsed.wait) {
     const waited = await waitForJob(job.id, { timeoutMs: parsed.waitTimeoutMs });
-    const stillRunning = waited.waitTimedOut && !isTerminalJobStatus(waited.job.status);
+    const stillRunning = waited.waitTimedOut && isExpectedActiveWaitStatus(waited.job.status);
     const responseJob = {
       ...waited.job,
       ...(job.reusedExisting ? { reusedExisting: true } : {})
     };
     process.stdout.write(`${JSON.stringify({
       status: stillRunning ? "running" : waited.job.status,
-      waitTimedOut: stillRunning,
+      waitTimedOut: waited.waitTimedOut,
       job: enrichCompanionJob(responseJob)
     }, null, 2)}\n`);
     process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1);
@@ -1757,7 +1764,7 @@ function handleReserveJob(rawArgs) {
         command: reserved.job.command,
         args: reserved.job.args ?? []
       },
-      message: "An active direct background job already covers this request; do not dispatch a forwarding subagent."
+      message: "An active background job already covers this request; do not dispatch a forwarding subagent."
     };
   }
   const job = reserved.job;

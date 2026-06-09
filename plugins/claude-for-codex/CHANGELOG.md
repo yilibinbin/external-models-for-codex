@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.16.0 - 2026-06-10
+
+### Added
+
+- Add async supervised background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
+- Add short foreground wait windows, tracked job status/result/cancel lifecycle output, execution-mode recommendations, SDK progress events, and unread-result reminders.
+- Add release-check guards for background lifecycle invariants, idempotency reuse, process-aware reaping, hard-timeout failure semantics, Stop-hook boundaries, and reserved job startup safety.
+
+### Fixed
+
+- Prevent duplicate expensive background submissions by reusing active same-command jobs with workspace fingerprints while disabling reuse when git state is inconclusive.
+- Harden cancellation and timeout handling with process-group identity validation, SIGTERM-to-SIGKILL escalation, startup cancellation races, and post-SIGKILL failure persistence.
+- Keep Stop hooks fail-open and bounded by using short git probes and avoiding background, reserve-job, ultrareview, or unbounded role execution from hooks.
+
 ## 0.15.0 - 2026-06-09
 
 ### Added

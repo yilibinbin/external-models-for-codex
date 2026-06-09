@@ -188,21 +188,24 @@ export function validateProcessGroupLeader(pid, expectedIdentity) {
   return { ok: true, identity, signalPid: -pid };
 }
 
+function leaderlessProcessGroupRefusal(pid, expectedIdentity) {
+  return {
+    ok: false,
+    delivered: false,
+    reason: "process-group leader is absent but live members remain; refusing to signal leaderless process group without member identity validation",
+    identity: expectedIdentity,
+    leaderless: true,
+    signalPid: -pid
+  };
+}
+
 export function terminateValidatedProcessGroup(pid, expectedIdentity, options = {}) {
   let validation = validateProcessGroupLeader(pid, expectedIdentity);
-  let leaderless = false;
   let groupStillAlive = () => validateProcessGroupLeader(pid, expectedIdentity).ok || processGroupHasLiveMembers(pid);
   if (!validation.ok) {
     if (validation.reason === "process not found") {
       if (expectedIdentity && processGroupHasLiveMembers(pid)) {
-        validation = {
-          ok: true,
-          identity: expectedIdentity,
-          signalPid: -pid,
-          leaderless: true
-        };
-        leaderless = true;
-        groupStillAlive = () => processGroupHasLiveMembers(pid);
+        return leaderlessProcessGroupRefusal(pid, expectedIdentity);
       } else {
         return { ok: true, delivered: false, reason: "process already absent" };
       }
@@ -212,24 +215,23 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
   }
   const graceMs = parseGraceMs(options.killGraceMs ?? process.env.CLAUDE_FOR_CODEX_KILL_GRACE_MS);
   let escalated = false;
+  let deliveredToValidatedGroup = false;
   const revalidateForSignal = () => {
-    if (leaderless || validation.leaderless) {
-      return processGroupHasLiveMembers(pid)
-        ? { ok: true, identity: validation.identity, signalPid: -pid, leaderless: true }
-        : { ok: false, reason: "process already absent", identity: validation.identity };
-    }
     const current = validateProcessGroupLeader(pid, expectedIdentity);
     if (current.ok) {
       return current;
     }
+    if (current.reason === "process not found" && deliveredToValidatedGroup && processGroupHasLiveMembers(pid)) {
+      return { ok: true, identity: expectedIdentity, signalPid: -pid, leaderlessAfterValidatedSignal: true };
+    }
     if (current.reason === "process not found" && expectedIdentity && processGroupHasLiveMembers(pid)) {
-      leaderless = true;
-      return { ok: true, identity: expectedIdentity, signalPid: -pid, leaderless: true };
+      return leaderlessProcessGroupRefusal(pid, expectedIdentity);
     }
     return current;
   };
   try {
     process.kill(validation.signalPid, "SIGTERM");
+    deliveredToValidatedGroup = true;
     const deadline = Date.now() + graceMs;
     while (Date.now() < deadline && groupStillAlive()) {
       sleepSync(25);

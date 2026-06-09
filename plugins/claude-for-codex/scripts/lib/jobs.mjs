@@ -682,18 +682,24 @@ export function cancelJob(cwd, jobId, env = process.env) {
         job: requested
       };
     }
-    let workerTermination = Number.isInteger(requested.workerPid)
-      ? terminateValidatedJobWorker(requested.workerPid, jobId)
-      : { ok: true, delivered: false, reason: "worker process already absent" };
     const requestedChildGroupPid = childProcessGroupPidForJob(requested);
     let childTermination = Number.isInteger(requestedChildGroupPid)
       ? terminateValidatedProcessGroup(requestedChildGroupPid, requested.childProcessGroupIdentity)
       : { ok: true, delivered: false, reason: "no child process group recorded" };
+    if (!childTermination.ok && Number.isInteger(requestedChildGroupPid)) {
+      return cancelFailure(
+        cwd,
+        jobId,
+        `Running job cancellation requires child process group validation before signaling the worker; refusing to signal worker: ${childTermination.reason || "termination failed"}`,
+        env,
+        { preserveActive: true }
+      );
+    }
+    let workerTermination = Number.isInteger(requested.workerPid)
+      ? terminateValidatedJobWorker(requested.workerPid, jobId)
+      : { ok: true, delivered: false, reason: "worker process already absent" };
     if (!workerTermination.ok && childTermination.ok && Number.isInteger(requested.workerPid)) {
       workerTermination = terminateValidatedJobWorker(requested.workerPid, jobId);
-    }
-    if (!childTermination.ok && workerTermination.ok && Number.isInteger(requestedChildGroupPid)) {
-      childTermination = terminateValidatedProcessGroup(requestedChildGroupPid, requested.childProcessGroupIdentity);
     }
     if (childTermination.ok && workerTermination.ok) {
       const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);

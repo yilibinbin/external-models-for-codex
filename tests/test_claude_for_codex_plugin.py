@@ -833,6 +833,65 @@ def test_background_wait_timeout_returns_running_job_without_killing_worker(tmp_
     assert current["stdout"].strip() == "LATE_DONE"
 
 
+def test_background_wait_reports_missing_or_corrupt_job_state_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text(
+        "#!/usr/bin/env sh\n"
+        "job_id=''\n"
+        "for arg in \"$@\"; do job_id=\"$arg\"; done\n"
+        "job_file=\"$TEST_STATE_DIR/jobs/$job_id.json\"\n"
+        "i=0\n"
+        "while [ \"$i\" -lt 50 ]; do\n"
+        "  grep -q '\"workerPid\"' \"$job_file\" 2>/dev/null && break\n"
+        "  i=$((i + 1))\n"
+        "  sleep 0.02\n"
+        "done\n"
+        "if [ \"$TEST_WORKER_MODE\" = delete ]; then\n"
+        "  rm -f \"$job_file\"\n"
+        "else\n"
+        "  printf '{bad json' > \"$job_file\"\n"
+        "fi\n"
+        "sleep 1\n",
+        encoding="utf8",
+    )
+    fake_worker.chmod(0o755)
+
+    base_env = {
+        **env,
+        "CLAUDE_FOR_CODEX_WORKER_NODE": str(fake_worker),
+        "TEST_STATE_DIR": str(state_dir),
+    }
+    for mode, expected_status in [("delete", "unknown"), ("corrupt", "corrupt")]:
+        result = subprocess.run(
+            [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "1500", f"{mode}-state"],
+            cwd=repo,
+            env={**base_env, "TEST_WORKER_MODE": mode},
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 1, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["status"] == expected_status
+        assert payload["waitTimedOut"] is True
+        assert payload["job"]["status"] == expected_status
+
+
 def test_background_wait_exits_nonzero_when_job_is_cancelled(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -1083,7 +1142,7 @@ def test_background_idempotency_changes_when_worktree_changes(tmp_path):
     (repo / "changed.txt").write_text("change one\n", encoding="utf8")
     fake_claude = bin_dir / "claude"
     fake_claude.write_text(
-        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\npath.write_text(path.read_text() + 'x' if path.exists() else 'x')\ntime.sleep(5)\nprint('done')\n",
+        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\nwith path.open('a', encoding='utf8') as handle:\n    handle.write('x')\ntime.sleep(5)\nprint('done')\n",
         encoding="utf8",
     )
     fake_claude.chmod(0o755)
@@ -1836,6 +1895,169 @@ try {{
     finally:
         if child.poll() is None:
             child.kill()
+
+
+def test_process_group_cancel_refuses_unvalidated_leaderless_group(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    info_file = tmp_path / "leaderless-cancel.json"
+    leader = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, time\n"
+                f"info = pathlib.Path({json.dumps(str(info_file))})\n"
+                "leader_pid = os.getpid()\n"
+                "child_pid = os.fork()\n"
+                "if child_pid == 0:\n"
+                "    info.write_text(json.dumps({'leaderPid': leader_pid, 'childPid': os.getpid(), 'pgid': os.getpgrp()}))\n"
+                "    while True: time.sleep(1)\n"
+                "time.sleep(0.1)\n"
+            ),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(30):
+            if info_file.exists():
+                break
+            time.sleep(0.1)
+        assert info_file.exists()
+        info = json.loads(info_file.read_text(encoding="utf8"))
+        leader_pid = int(info["leaderPid"])
+        child_pid = int(info["childPid"])
+        assert int(info["pgid"]) == leader_pid
+        for _ in range(30):
+            if leader.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert leader.poll() is not None
+        assert process_is_running(child_pid)
+
+        script = f"""
+import {{ terminateValidatedProcessGroup }} from {json.dumps(process_lib.as_uri())};
+const result = terminateValidatedProcessGroup({leader_pid}, {{
+  pid: {leader_pid},
+  pgid: {leader_pid},
+  command: "exited leader",
+  commandHash: "exited leader"
+}}, {{ killGraceMs: 10 }});
+console.log(JSON.stringify(result));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["delivered"] is False
+        assert "leaderless process group" in payload["reason"]
+        assert process_is_running(child_pid)
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if leader.poll() is None:
+            leader.kill()
+
+
+def test_cancel_refuses_worker_signal_when_child_group_validation_fails(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    info_file = tmp_path / "leaderless-worker-cancel.json"
+    worker_script = tmp_path / "claude-companion.mjs"
+    repo.mkdir()
+    data.mkdir()
+    worker_script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    worker_script.chmod(0o755)
+    leader = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, time\n"
+                f"info = pathlib.Path({json.dumps(str(info_file))})\n"
+                "leader_pid = os.getpid()\n"
+                "child_pid = os.fork()\n"
+                "if child_pid == 0:\n"
+                "    info.write_text(json.dumps({'leaderPid': leader_pid, 'childPid': os.getpid(), 'pgid': os.getpgrp()}))\n"
+                "    while True: time.sleep(1)\n"
+                "time.sleep(0.1)\n"
+            ),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    worker = subprocess.Popen(
+        ["python3", str(worker_script), "__run-job", "job-leaderless-worker"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(30):
+            if info_file.exists():
+                break
+            time.sleep(0.1)
+        assert info_file.exists()
+        info = json.loads(info_file.read_text(encoding="utf8"))
+        leader_pid = int(info["leaderPid"])
+        child_pid = int(info["childPid"])
+        assert int(info["pgid"]) == leader_pid
+        for _ in range(30):
+            if leader.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert leader.poll() is not None
+        assert process_is_running(child_pid)
+        assert process_is_running(worker.pid)
+
+        script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "job-leaderless-worker", command: "review", args: ["leaderless"], cwd }}, env);
+updateJob(cwd, "job-leaderless-worker", {{
+  status: "running",
+  phase: "running",
+  workerPid: {worker.pid},
+  childProcessGroupPid: {leader_pid},
+  childProcessGroupIdentity: {{ pid: {leader_pid}, pgid: {leader_pid}, command: "exited leader", commandHash: "exited leader" }},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+"""
+        created = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert created.returncode == 0, created.stderr
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(data)
+        cancelled = subprocess.run([NODE, str(runtime), "cancel", "job-leaderless-worker"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+        assert cancelled.returncode == 1
+        payload = json.loads(cancelled.stdout)
+        assert payload["status"] == "cancel_failed"
+        assert "before signaling the worker" in payload["reason"]
+        assert process_is_running(worker.pid)
+        assert process_is_running(child_pid)
+    finally:
+        for pgid in [worker.pid, leader.pid]:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if worker.poll() is None:
+            worker.kill()
+        if leader.poll() is None:
+            leader.kill()
 
 
 def test_process_identity_hash_takes_precedence_over_redacted_fallback(tmp_path):
@@ -3048,7 +3270,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.15.0"
+    assert data["version"] == "0.16.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -3061,14 +3283,14 @@ def test_plugin_manifest_is_valid():
     assert all(path.startswith("./assets/") for path in asset_paths)
 
 
-def test_claude_manifest_version_is_0150():
+def test_claude_manifest_version_is_0160():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.15.0"
+    assert manifest["version"] == "0.16.0"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.15.0"
+    assert manifest["version"] == "0.16.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -6383,7 +6605,7 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
-def test_release_check_knows_claude_0150_native_assets():
+def test_release_check_knows_claude_0160_native_assets():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run(
         [NODE, str(runtime), "release-check"],
@@ -6396,7 +6618,7 @@ def test_release_check_knows_claude_0150_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.15.0"
+    assert checks["manifest-version"]["detail"] == "version=0.16.0"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -6596,7 +6818,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.15.0"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.16.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -6605,11 +6827,11 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.15.0"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.16.0"] in calls
     assert ["plugin", "list", "--json"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.15.0"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.16.0"
     assert checks["remote-install-plugin-list-schema"]["ok"] is True
     assert checks["remote-install-plugin-list-schema"]["detail"] == f"installed root={installed_plugin}"
 
@@ -6653,7 +6875,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.15.0"],
+        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.16.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -6689,7 +6911,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "codex plugin list --json" in text
     assert "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" in text
@@ -6940,7 +7162,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.15.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.16.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -7028,7 +7250,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.15.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.16.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -7128,7 +7350,7 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-model-env-forwarded"]["ok"] is True
     assert checks["github-actions-effort-env-forwarded"]["ok"] is True
     assert checks["github-actions-model-effort-quoted"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.15.0"
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.16.0"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
@@ -7473,6 +7695,87 @@ def test_reserve_job_reuses_existing_reserved_job(tmp_path):
     assert second_payload["workerCommand"] == first_payload["workerCommand"]
     jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
     assert len(json.loads(jobs.stdout)["jobs"]) == 1
+
+
+def test_reserve_job_reuses_running_reserved_job_without_worker_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "time.sleep(1)\n"
+        "print('RESERVED_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    first = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-running-reservation"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert first.returncode == 0, first.stderr
+    first_payload = json.loads(first.stdout)
+    worker = subprocess.Popen(
+        first_payload["workerCommand"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        job_id = first_payload["job"]["id"]
+        running = None
+        for _ in range(50):
+            jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+            running = next(job for job in json.loads(jobs.stdout)["jobs"] if job["id"] == job_id)
+            if running["status"] == "running":
+                break
+            time.sleep(0.05)
+        assert running["status"] == "running"
+
+        second = subprocess.run(
+            [NODE, str(runtime), "reserve-job", "review", "same-running-reservation"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert second.returncode == 0, second.stderr
+        second_payload = json.loads(second.stdout)
+        assert second_payload["status"] == "running"
+        assert second_payload["reusedExisting"] is True
+        assert second_payload["job"]["id"] == job_id
+        assert "workerCommand" not in second_payload
+        assert "do not dispatch" in second_payload["message"]
+
+        stdout, stderr = worker.communicate(timeout=5)
+        assert worker.returncode == 0, stderr
+        assert json.loads(stdout)["status"] == "succeeded"
+        result = subprocess.run([NODE, str(runtime), "result", job_id], cwd=repo, env=env, capture_output=True, text=True, check=True)
+        result_payload = json.loads(result.stdout)
+        assert "RESERVED_DONE" in result_payload["job"]["stdout"]
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
 
 
 def test_reserve_job_respects_background_capacity_cap(tmp_path):
