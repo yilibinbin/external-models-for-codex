@@ -133,9 +133,11 @@ export function validateWorkflow(text) {
     result(activeBody.includes("npm install -g @openai/codex"), "codex-cli-install"),
     result(activeBody.includes("codex plugin marketplace add yilibinbin/external-models-for-codex"), "marketplace-install"),
     result(activeBody.includes("codex plugin add antigravity-for-codex@external-models-for-codex"), "plugin-install"),
+    result(activeBody.includes("codex plugin list --json") && activeBody.includes("ANTIGRAVITY_PLUGIN_ROOT=$ANTIGRAVITY_PLUGIN_ROOT"), "plugin-root-resolved"),
     result(marketplaceInstallUsesImmutableRef(activeBody), "immutable-release-ref"),
     result(activeBody.includes("ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER: \"{{MODEL_PROVIDER}}\"") || activeBody.includes("ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:"), "provider-env"),
-    result(activeBody.includes("antigravity-companion.mjs review") || (activeBody.includes("args=(review") && activeBody.includes("antigravity-companion.mjs")), "review-command"),
+    result(activeBody.includes("args=(review") && activeBody.includes("$ANTIGRAVITY_PLUGIN_ROOT/scripts/antigravity-companion.mjs"), "review-command"),
+    result(!activeBody.includes("node plugins/antigravity-for-codex/scripts/"), "no-repo-relative-runtime-path"),
     result(!activeBody.includes("--dangerously-skip-permissions"), "no-dangerous-permission-flag"),
     result(!LOCAL_PATH_PATTERN.test(activeBody), "no-local-absolute-paths"),
     result(runBlocks.length > 0 && runBlocks.every((block) => !block.includes("${{ github.")), "no-github-context-in-run")

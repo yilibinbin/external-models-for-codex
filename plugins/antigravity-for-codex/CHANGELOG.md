@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.4 - 2026-06-09
+
+- Resolve generated GitHub Actions workflows through the installed Antigravity plugin root instead of repo-relative runtime paths.
+- Allow `release-check` to run from an installed plugin cache where repository-level README/docs files are absent.
+- Add release guards for installed-plugin release checks and workflow plugin-root resolution.
+
 ## 0.5.3 - 2026-06-08
 
 - Reframe Antigravity skills around natural-language model routing so users can ask for review, planning, rescue, and Claude-through-Antigravity without writing internal CLI flags.
