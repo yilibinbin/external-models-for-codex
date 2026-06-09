@@ -685,6 +685,145 @@ def test_jobs_and_result_include_lifecycle_elapsed_and_progress_preview(tmp_path
     assert result_job["progressPreview"] == ["security started"]
 
 
+def test_background_start_respects_active_job_limit_without_spawning(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    spawn_marker = tmp_path / "spawn-count.txt"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\npath.write_text(path.read_text() + 'x' if path.exists() else 'x')\ntime.sleep(5)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS"] = "1"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "one"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "two"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 2
+    payload = json.loads(second.stdout)
+    assert payload["status"] == "capacity_blocked"
+    assert payload["activeCount"] == 1
+
+
+def test_duplicate_background_retry_reuses_existing_job_without_second_spawn(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    spawn_marker = tmp_path / "spawn-count.txt"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\npath.write_text(path.read_text() + 'x' if path.exists() else 'x')\ntime.sleep(5)\nprint('done')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    first_payload = json.loads(first.stdout)
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "100", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    second_payload = json.loads(second.stdout)
+    assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is True
+    for _ in range(20):
+        if spawn_marker.exists():
+            break
+        time.sleep(0.1)
+    assert spawn_marker.read_text(encoding="utf8") == "x"
+
+
+def test_background_worker_launch_failure_does_not_leave_active_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(tmp_path / "missing-node")
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "launch-fails"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "launch_failed"
+    assert payload["job"]["status"] == "failed"
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert "launch-fails" not in jobs.stdout or "failed" in jobs.stdout
+
+
+def test_background_worker_bootstrap_exit_is_reaped_from_queued(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_worker = tmp_path / "fake-node"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker.write_text("#!/usr/bin/env sh\nexit 1\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "bootstrap-exits"], cwd=repo, env=env, capture_output=True, text=True)
+    assert started.returncode == 0, started.stderr
+    time.sleep(1.2)
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    job = next(item for item in json.loads(listed.stdout)["jobs"] if item["args"] == ["bootstrap-exits"])
+    assert job["status"] == "failed"
+    assert job["phase"] == "worker-launch-failed"
+
+
+def test_lost_job_reaper_is_process_aware_and_terminal_safe(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, updateJob, finishJob, reapLostJobs, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const lost = createJob(cwd, {{ command: "review", args: ["lost"], cwd }}, env);
+updateJob(cwd, lost.id, {{
+  status: "running",
+  workerPid: 999999,
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const done = createJob(cwd, {{ command: "review", args: ["done"], cwd }}, env);
+finishJob(cwd, done.id, {{ status: 0, stdout: "done" }}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, lost: readJob(cwd, lost.id, env), done: readJob(cwd, done.id, env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["lost"]["status"] == "failed"
+    assert payload["lost"]["phase"] == "lost"
+    assert payload["done"]["status"] == "succeeded"
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 

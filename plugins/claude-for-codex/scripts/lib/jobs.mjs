@@ -1,13 +1,20 @@
 import fs from "node:fs";
 import path from "node:path";
-import { captureProcessIdentity, terminateValidatedJobWorker } from "./process.mjs";
+import {
+  captureProcessIdentity,
+  terminateValidatedJobWorker,
+  terminateValidatedProcessGroup,
+  validateJobWorkerProcess,
+  validateProcessGroupLeader
+} from "./process.mjs";
 import { jobsDirForCwd, stateDirForCwd } from "./state.mjs";
 import {
   DEFAULT_MAX_ACTIVE_JOBS,
   MAX_STORED_OUTPUT_BYTES,
   classifyJobLiveness,
   deriveJobIdempotencyKey,
-  isTerminalJobStatus
+  isTerminalJobStatus,
+  queuedLostAfterMs
 } from "./job-lifecycle.mjs";
 import { sanitizeSummary } from "./sanitize.mjs";
 
@@ -399,6 +406,69 @@ export function enrichJobLifecycle(job, options = {}) {
   return { ...job, lifecycle: classifyJobLiveness(job, options) };
 }
 
+export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.env) {
+  const now = Number.isFinite(options.now) ? options.now : Date.now();
+  const updates = [];
+  for (const job of listJobs(cwd, env).jobs) {
+    const lifecycle = classifyJobLiveness(job, { now, env, queuedLostAfterMs: queuedLostAfterMs(env) });
+    if (lifecycle.state !== "lost") {
+      continue;
+    }
+    if (job.status === "queued") {
+      const workerGone = Number.isInteger(job.workerPid) && !validateJobWorkerProcess(job.workerPid, job.id).ok;
+      if (workerGone) {
+        updates.push(updateJobUnlessTerminal(cwd, job.id, {
+          status: "failed",
+          phase: "worker-launch-failed",
+          error: "Background worker exited before claiming the queued job; the plugin did not resubmit the Claude request.",
+          finishedAt: new Date(now).toISOString(),
+          workerPid: null
+        }, env));
+      }
+      continue;
+    }
+    if (Number.isInteger(job.workerPid) && validateJobWorkerProcess(job.workerPid, job.id).ok) {
+      updates.push(updateJobUnlessTerminal(cwd, job.id, {
+        phase: "lost",
+        lastProgressMessage: "Worker heartbeat is stale, but a validated worker process is still alive.",
+        lifecycleState: "lost"
+      }, env));
+      continue;
+    }
+    const childGroupPid = Number.isInteger(job.childProcessGroupPid) ? job.childProcessGroupPid : job.childPid;
+    const childGroupValidation = Number.isInteger(childGroupPid) && job.childProcessGroupIdentity
+      ? validateProcessGroupLeader(childGroupPid, job.childProcessGroupIdentity)
+      : { ok: false };
+    if (childGroupValidation.ok) {
+      updates.push(updateJobUnlessTerminal(cwd, job.id, {
+        phase: "orphaned",
+        lastProgressMessage: "Worker heartbeat is lost but the supervised process-group leader still exists; not freeing capacity or resubmitting.",
+        lifecycleState: "lost",
+        workerPid: null
+      }, env));
+      continue;
+    }
+    if (Number.isInteger(childGroupPid) && !job.childProcessGroupIdentity && captureProcessIdentity(childGroupPid)) {
+      updates.push(updateJobUnlessTerminal(cwd, job.id, {
+        phase: "unsafe-child-identity",
+        lastProgressMessage: "A child PID still exists but has no saved identity; refusing to signal possible PID reuse and preserving capacity until manual inspection.",
+        lifecycleState: "lost",
+        workerPid: null
+      }, env));
+      continue;
+    }
+    updates.push(updateJobUnlessTerminal(cwd, job.id, {
+      status: "failed",
+      phase: "lost",
+      error: "Tracked worker heartbeat was lost and no validated worker or supervised process group remains; the plugin did not resubmit the Claude request.",
+      finishedAt: new Date(now).toISOString(),
+      workerPid: null,
+      childPid: null
+    }, env));
+  }
+  return updates.filter(Boolean);
+}
+
 export function resultForJob(cwd, jobId, env = process.env) {
   const job = readJob(cwd, jobId, env);
   if (!job) {
@@ -413,6 +483,25 @@ export function resultForJob(cwd, jobId, env = process.env) {
   return { status: "ok", job: updated };
 }
 
+function childProcessGroupPidForJob(job) {
+  if (Number.isInteger(job.childProcessGroupPid)) {
+    return job.childProcessGroupPid;
+  }
+  if (Number.isInteger(job.childPid)) {
+    return job.childPid;
+  }
+  return null;
+}
+
+function cancelFailure(cwd, jobId, reason, env) {
+  const updated = updateJobUnlessTerminal(cwd, jobId, {
+    status: "cancel_failed",
+    cancelFailedAt: new Date().toISOString(),
+    cancelFailureReason: reason
+  }, env);
+  return { status: "cancel_failed", jobId, reason, job: updated };
+}
+
 export function cancelJob(cwd, jobId, env = process.env) {
   const job = readJob(cwd, jobId, env);
   if (!job) {
@@ -425,40 +514,46 @@ export function cancelJob(cwd, jobId, env = process.env) {
     }, env);
     return { status: "cancelled", jobId, job: updated };
   }
-  if (job.status === "running" && Number.isInteger(job.workerPid)) {
-    const termination = terminateValidatedJobWorker(job.workerPid, jobId);
-    if (termination.ok) {
-      const updated = updateJobUnlessTerminal(cwd, jobId, {
-        status: "cancelled",
-        cancelledAt: new Date().toISOString(),
-        cancelIdentity: termination.identity
-      }, env);
-      return { status: "cancelled", jobId, job: updated };
-    }
-    const updated = updateJobUnlessTerminal(cwd, jobId, {
-      status: "cancel_failed",
-      cancelFailedAt: new Date().toISOString(),
-      cancelFailureReason: `Running job cancellation requires process identity validation; refusing to signal PID: ${termination.reason}`
-    }, env);
-    return {
-      status: "cancel_failed",
-      jobId,
-      reason: `Running job cancellation requires process identity validation; refusing to signal PID: ${termination.reason}`,
-      job: updated
-    };
-  }
   if (job.status === "running") {
-    const updated = updateJobUnlessTerminal(cwd, jobId, {
-      status: "cancel_failed",
-      cancelFailedAt: new Date().toISOString(),
-      cancelFailureReason: "Running job has no valid workerPid."
-    }, env);
-    return {
-      status: "cancel_failed",
-      jobId,
-      reason: "Running job has no valid workerPid.",
-      job: updated
-    };
+    const childGroupPid = childProcessGroupPidForJob(job);
+    if (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity) {
+      const childTermination = terminateValidatedProcessGroup(childGroupPid, job.childProcessGroupIdentity);
+      if (childTermination.ok) {
+        const updated = updateJobUnlessTerminal(cwd, jobId, {
+          status: "cancelled",
+          cancelledAt: new Date().toISOString(),
+          cancelIdentity: childTermination.identity
+        }, env);
+        return { status: "cancelled", jobId, job: updated };
+      }
+      if (childTermination.reason !== "process not found") {
+        return cancelFailure(cwd, jobId, `Running job child cancellation requires process identity validation; refusing to signal PID: ${childTermination.reason}`, env);
+      }
+    }
+    if (Number.isInteger(job.workerPid)) {
+      const termination = terminateValidatedJobWorker(job.workerPid, jobId);
+      if (termination.ok && termination.delivered !== false) {
+        const updated = updateJobUnlessTerminal(cwd, jobId, {
+          status: "cancelled",
+          cancelledAt: new Date().toISOString(),
+          cancelIdentity: termination.identity
+        }, env);
+        return { status: "cancelled", jobId, job: updated };
+      }
+      if (termination.ok && termination.delivered === false && !Number.isInteger(childGroupPid)) {
+        const updated = updateJobUnlessTerminal(cwd, jobId, {
+          status: "cancelled",
+          cancelledAt: new Date().toISOString(),
+          cancelIdentity: termination.identity
+        }, env);
+        return { status: "cancelled", jobId, job: updated };
+      }
+      return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${termination.reason}`, env);
+    }
+    if (Number.isInteger(childGroupPid) && !job.childProcessGroupIdentity) {
+      return cancelFailure(cwd, jobId, "Running job child process has no saved identity; refusing to signal possible PID reuse.", env);
+    }
+    return cancelFailure(cwd, jobId, "Running job has no valid workerPid or child process group.", env);
   }
   if (isTerminalJobStatus(job.status)) {
     return { status: job.status, jobId, job };

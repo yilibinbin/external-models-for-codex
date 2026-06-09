@@ -9,25 +9,31 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
   cancelJob,
+  canStartBackgroundJob,
   claimJobForRun,
   claimReservedJob,
   createJob,
   enrichJobLifecycle,
+  findActiveJobByIdempotencyKey,
   finishJob,
   listJobs,
   markJobRunning,
   recordJobHeartbeat,
   recordJobProgress,
+  reapLostJobs,
   readJob,
   reserveJob,
   resultForJob,
-  updateJob
+  updateJob,
+  withWorkspaceJobLock
 } from "./lib/jobs.mjs";
 import {
   DEFAULT_BACKGROUND_WAIT_MS,
+  DEFAULT_MAX_ACTIVE_JOBS,
   HARD_JOB_TIMEOUT_MS,
   JOB_HEARTBEAT_INTERVAL_MS,
   MAX_BACKGROUND_WAIT_MS,
+  deriveJobIdempotencyKey,
   parsePositiveInteger
 } from "./lib/job-lifecycle.mjs";
 import { progressEventsFromLines } from "./lib/progress.mjs";
@@ -1345,6 +1351,17 @@ function killGraceMs(env = process.env) {
   });
 }
 
+function maxActiveJobs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS, DEFAULT_MAX_ACTIVE_JOBS, {
+    min: 1,
+    max: 20
+  });
+}
+
+function workerNodeBinary(env = process.env) {
+  return env.CLAUDE_FOR_CODEX_WORKER_NODE || process.execPath;
+}
+
 function makeProgressLineBuffer(onLine) {
   let buffer = "";
   return {
@@ -1371,25 +1388,75 @@ function startBackgroundJob(command, rawArgs) {
     process.exit(2);
   }
   const cwd = process.cwd();
-  const foregroundArgs = stripBackgroundArgs(rawArgs);
-  const session = readJson(currentSessionFileForCwd(cwd), {});
-  const job = createJob(cwd, {
-    command,
-    args: foregroundArgs,
-    cwd,
-    sessionId: session?.sessionId || ""
+  return withWorkspaceJobLock(cwd, process.env, () => {
+    reapLostJobs(cwd);
+    const foregroundArgs = stripBackgroundArgs(rawArgs);
+    const session = readJson(currentSessionFileForCwd(cwd), {});
+    const idempotencyKey = deriveJobIdempotencyKey({ command, args: foregroundArgs, cwd });
+    const existing = findActiveJobByIdempotencyKey(cwd, idempotencyKey);
+    if (existing) {
+      return { ...existing, reusedExisting: true };
+    }
+    const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
+    if (!capacity.ok) {
+      return { capacityBlocked: true, capacity };
+    }
+    const job = createJob(cwd, {
+      command,
+      args: foregroundArgs,
+      cwd,
+      sessionId: session?.sessionId || "",
+      idempotencyKey
+    });
+    const workerNode = workerNodeBinary(process.env);
+    if (!fs.existsSync(workerNode)) {
+      const failed = finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: `Worker node binary not found: ${workerNode}`
+      });
+      return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
+    }
+    let child;
+    try {
+      child = spawn(workerNode, [process.argv[1], "__run-job", job.id], {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: "ignore"
+      });
+    } catch (error) {
+      const failed = finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: error.message || String(error)
+      });
+      return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
+    }
+    child.once("error", (error) => {
+      finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: error.message || String(error)
+      });
+    });
+    if (!child.pid) {
+      const failed = finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: "Worker process did not expose a pid."
+      });
+      return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
+    }
+    child.unref();
+    return updateJob(cwd, job.id, {
+      workerPid: child.pid
+    }) ?? job;
   });
-  const child = spawn(process.execPath, [process.argv[1], "__run-job", job.id], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore"
-  });
-  child.unref();
-  updateJob(cwd, job.id, {
-    workerPid: child.pid
-  });
-  return readJob(cwd, job.id) ?? job;
 }
 
 function elapsedMs(job) {
@@ -1442,17 +1509,45 @@ async function maybeStartBackground(command, rawArgs) {
     return false;
   }
   const job = startBackgroundJob(command, rawArgs);
+  if (job?.status === "workspace_locked") {
+    process.stdout.write(`${JSON.stringify({
+      status: "workspace_locked",
+      message: job.reason ?? "Claude for Codex workspace job state is busy; retry later."
+    }, null, 2)}\n`);
+    process.exit(2);
+  }
+  if (job?.capacityBlocked) {
+    process.stdout.write(`${JSON.stringify({
+      status: "capacity_blocked",
+      activeCount: job.capacity.activeCount,
+      limit: job.capacity.limit,
+      message: "Claude for Codex already has the maximum number of active background jobs. Use jobs/result/cancel before starting another."
+    }, null, 2)}\n`);
+    process.exit(2);
+  }
+  if (job?.launchFailed) {
+    process.stdout.write(`${JSON.stringify({
+      status: "launch_failed",
+      job: enrichCompanionJob(job.job),
+      message: "Claude for Codex could not start the background worker; the job was marked failed and will not occupy active capacity."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
   if (parsed.wait) {
     const waited = await waitForJob(job.id, { timeoutMs: parsed.waitTimeoutMs });
     const stillRunning = waited.waitTimedOut && !terminalJobStatus(waited.job.status);
+    const responseJob = {
+      ...waited.job,
+      ...(job.reusedExisting ? { reusedExisting: true } : {})
+    };
     process.stdout.write(`${JSON.stringify({
       status: stillRunning ? "running" : waited.job.status,
       waitTimedOut: stillRunning,
-      job: enrichCompanionJob(waited.job)
+      job: enrichCompanionJob(responseJob)
     }, null, 2)}\n`);
     process.exit(waited.job.status === "failed" || waited.job.status === "cancel_failed" ? 1 : 0);
   }
-  process.stdout.write(`${JSON.stringify({ status: "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ status: job.reusedExisting ? "running" : "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
   process.exit(0);
 }
 
@@ -3128,6 +3223,7 @@ function runClaudeUltrareview(rawArgs) {
 }
 
 function printJobs() {
+  reapLostJobs(process.cwd());
   const payload = listJobs(process.cwd());
   process.stdout.write(`${JSON.stringify({
     ...payload,
@@ -3143,6 +3239,7 @@ function printResult(rawArgs) {
   }
   let payload;
   try {
+    reapLostJobs(process.cwd());
     payload = resultForJob(process.cwd(), jobId);
   } catch (error) {
     console.error(error.message || String(error));

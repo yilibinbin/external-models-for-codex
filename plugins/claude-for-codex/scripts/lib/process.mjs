@@ -25,8 +25,33 @@ export function captureProcessIdentity(pid) {
   return ps(pid);
 }
 
-export function captureProcessGroupIdentity(pid) {
-  return captureProcessIdentity(pid);
+function sleepSync(ms) {
+  const view = new Int32Array(new SharedArrayBuffer(4));
+  Atomics.wait(view, 0, 0, ms);
+}
+
+function parseGraceMs(value, fallback = 3_000) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.min(Math.trunc(parsed), 30_000) : fallback;
+}
+
+export function isProcessAlive(pid) {
+  return Number.isInteger(pid) && Boolean(captureProcessIdentity(pid));
+}
+
+export function captureProcessGroupIdentity(pid, options = {}) {
+  const deadline = Date.now() + (options.timeoutMs ?? 1_000);
+  while (Date.now() <= deadline) {
+    const identity = captureProcessIdentity(pid);
+    if (!identity) {
+      return null;
+    }
+    if (identity.pid === pid && identity.pgid === pid) {
+      return identity;
+    }
+    sleepSync(25);
+  }
+  return null;
 }
 
 function commandTokens(command) {
@@ -76,17 +101,93 @@ export function validateJobWorkerProcess(pid, jobId) {
   return { ok: false, reason: "process command is not a Claude for Codex job worker", identity };
 }
 
-export function terminateValidatedJobWorker(pid, jobId) {
-  const validation = validateJobWorkerProcess(pid, jobId);
+export function validateProcessGroupLeader(pid, expectedIdentity) {
+  if (!expectedIdentity) {
+    return { ok: false, reason: "missing saved process identity; refusing to signal possible PID reuse" };
+  }
+  const identity = captureProcessIdentity(pid);
+  if (!identity) {
+    return { ok: false, reason: "process not found" };
+  }
+  if (identity.pid !== pid || identity.pgid !== pid) {
+    return { ok: false, reason: "process is not the expected process-group leader", identity };
+  }
+  if (
+    identity.pid !== expectedIdentity.pid ||
+    identity.pgid !== expectedIdentity.pgid ||
+    identity.command !== expectedIdentity.command
+  ) {
+    return { ok: false, reason: "process identity changed; refusing to signal possible PID reuse", identity };
+  }
+  return { ok: true, identity, signalPid: -pid };
+}
+
+export function terminateValidatedProcessGroup(pid, expectedIdentity, options = {}) {
+  const validation = validateProcessGroupLeader(pid, expectedIdentity);
   if (!validation.ok) {
+    if (validation.reason === "process not found") {
+      return { ok: true, delivered: false, reason: "process already absent" };
+    }
     return validation;
   }
+  const graceMs = parseGraceMs(options.killGraceMs ?? process.env.CLAUDE_FOR_CODEX_KILL_GRACE_MS);
+  let escalated = false;
   try {
     process.kill(validation.signalPid, "SIGTERM");
-    return { ok: true, identity: validation.identity };
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline && validateProcessGroupLeader(pid, expectedIdentity).ok) {
+      sleepSync(25);
+    }
+    if (validateProcessGroupLeader(pid, expectedIdentity).ok) {
+      escalated = true;
+      process.kill(validation.signalPid, "SIGKILL");
+      const killDeadline = Date.now() + 1_000;
+      while (Date.now() < killDeadline && validateProcessGroupLeader(pid, expectedIdentity).ok) {
+        sleepSync(25);
+      }
+    }
+    return { ok: !validateProcessGroupLeader(pid, expectedIdentity).ok, delivered: true, escalated, identity: validation.identity };
   } catch (error) {
     return {
       ok: false,
+      delivered: false,
+      escalated,
+      reason: error.message || String(error),
+      identity: validation.identity
+    };
+  }
+}
+
+export function terminateValidatedJobWorker(pid, jobId, options = {}) {
+  const validation = validateJobWorkerProcess(pid, jobId);
+  if (!validation.ok) {
+    if (validation.reason === "process not found") {
+      return { ok: true, delivered: false, reason: "worker process already absent" };
+    }
+    return validation;
+  }
+  const graceMs = parseGraceMs(options.killGraceMs ?? process.env.CLAUDE_FOR_CODEX_KILL_GRACE_MS);
+  let escalated = false;
+  try {
+    process.kill(validation.signalPid, "SIGTERM");
+    const deadline = Date.now() + graceMs;
+    while (Date.now() < deadline && isProcessAlive(pid)) {
+      sleepSync(25);
+    }
+    if (isProcessAlive(pid)) {
+      escalated = true;
+      process.kill(validation.signalPid, "SIGKILL");
+      const killDeadline = Date.now() + 1_000;
+      while (Date.now() < killDeadline && isProcessAlive(pid)) {
+        sleepSync(25);
+      }
+    }
+    return { ok: !isProcessAlive(pid), delivered: true, escalated, identity: validation.identity };
+  } catch (error) {
+    return {
+      ok: false,
+      delivered: false,
+      escalated,
       reason: error.message || String(error),
       identity: validation.identity
     };
