@@ -33,6 +33,7 @@ function runGit(cwd, args, options = {}) {
     status: result.status ?? 1,
     stdout: result.stdout ?? "",
     stderr: result.stderr ?? "",
+    error: result.error ? String(result.error.message ?? result.error) : "",
     errorCode: result.error?.code ? String(result.error.code) : ""
   };
 }
@@ -41,10 +42,45 @@ function gitCommandTimedOut(result) {
   return String(result?.errorCode ?? "") === "ETIMEDOUT";
 }
 
+function isUnbornHead(args, result) {
+  if (args.length !== 2 || args[0] !== "rev-parse" || args[1] !== "HEAD") {
+    return false;
+  }
+  const stderr = String(result?.stderr ?? "");
+  return result?.status !== 0
+    && stderr.includes("ambiguous argument 'HEAD'")
+    && stderr.includes("unknown revision or path not in the working tree");
+}
+
 function workingTreeFingerprintPart(cwd, args, options = {}) {
   const result = runGit(cwd, args, options);
   if (gitCommandTimedOut(result)) {
     return { text: `ETIMEDOUT ${args.join(" ")}`, timedOut: true };
+  }
+  if (isUnbornHead(args, result)) {
+    return {
+      text: [
+        "UNBORN_HEAD rev-parse HEAD",
+        `status=${result.status}`,
+        result.stderr
+      ].join("\n"),
+      stdout: "",
+      timedOut: false
+    };
+  }
+  if (result.errorCode || result.status !== 0) {
+    return {
+      text: [
+        `INCONCLUSIVE ${args.join(" ")}`,
+        `status=${result.status}`,
+        `errorCode=${result.errorCode}`,
+        result.error,
+        result.stdout,
+        result.stderr
+      ].join("\n"),
+      stdout: result.stdout,
+      timedOut: true
+    };
   }
   return {
     text: [
@@ -90,8 +126,18 @@ function untrackedFilesFingerprintPart(cwd, options = {}) {
   if (gitCommandTimedOut(result)) {
     return { text: "ETIMEDOUT ls-files --others --exclude-standard -z", stdout: "", timedOut: true };
   }
-  if (result.status !== 0) {
-    return { text: `status=${result.status}\n${result.stderr}`, stdout: "", timedOut: false };
+  if (result.errorCode || result.status !== 0) {
+    return {
+      text: [
+        "INCONCLUSIVE ls-files --others --exclude-standard -z",
+        `status=${result.status}`,
+        `errorCode=${result.errorCode}`,
+        result.error,
+        result.stderr
+      ].join("\n"),
+      stdout: "",
+      timedOut: true
+    };
   }
   const files = result.stdout.split("\0").filter(Boolean).sort();
   return {

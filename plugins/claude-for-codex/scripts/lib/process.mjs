@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import process from "node:process";
 
 export function supportsPosixProcessGroups(platform = process.platform) {
@@ -29,12 +30,17 @@ function ps(pid) {
     ppid: Number(match[2]),
     pgid: Number(match[3]),
     stat: match[4],
-    command: match[5]
+    command: match[5],
+    commandHash: commandHash(match[5])
   };
 }
 
 export function captureProcessIdentity(pid) {
   return ps(pid);
+}
+
+function commandHash(command) {
+  return createHash("sha256").update(String(command ?? "")).digest("hex");
 }
 
 function sleepSync(ms) {
@@ -51,7 +57,7 @@ export function isProcessAlive(pid) {
   return Number.isInteger(pid) && Boolean(captureProcessIdentity(pid));
 }
 
-function processGroupHasLiveMembers(pgid) {
+export function processGroupHasLiveMembers(pgid) {
   if (!Number.isInteger(pgid)) {
     return false;
   }
@@ -154,6 +160,13 @@ function commandIdentityMatches(currentCommand, expectedCommand) {
   return false;
 }
 
+function processIdentityCommandMatches(currentIdentity, expectedIdentity) {
+  if (currentIdentity?.commandHash && expectedIdentity?.commandHash) {
+    return currentIdentity.commandHash === expectedIdentity.commandHash;
+  }
+  return commandIdentityMatches(currentIdentity?.command, expectedIdentity?.command);
+}
+
 export function validateProcessGroupLeader(pid, expectedIdentity) {
   if (!expectedIdentity) {
     return { ok: false, reason: "missing saved process identity; refusing to signal possible PID reuse" };
@@ -168,7 +181,7 @@ export function validateProcessGroupLeader(pid, expectedIdentity) {
   if (
     identity.pid !== expectedIdentity.pid ||
     identity.pgid !== expectedIdentity.pgid ||
-    !commandIdentityMatches(identity.command, expectedIdentity.command)
+    !processIdentityCommandMatches(identity, expectedIdentity)
   ) {
     return { ok: false, reason: "process identity changed; refusing to signal possible PID reuse", identity };
   }

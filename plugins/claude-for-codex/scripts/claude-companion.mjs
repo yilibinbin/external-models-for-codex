@@ -34,6 +34,7 @@ import {
   MAX_BACKGROUND_WAIT_MS,
   MAX_STORED_OUTPUT_BYTES,
   deriveJobIdempotencyKey,
+  isTerminalJobStatus,
   parsePositiveInteger
 } from "./lib/job-lifecycle.mjs";
 import { progressEventsFromLines } from "./lib/progress.mjs";
@@ -1257,10 +1258,6 @@ function parseJobIdArg(rawArgs) {
   return positional;
 }
 
-function terminalJobStatus(status) {
-  return ["succeeded", "failed", "cancelled", "cancel_failed"].includes(status);
-}
-
 function shortstatFileCount(text) {
   const match = String(text ?? "").match(/(\d+)\s+files?\s+changed/);
   return match ? Number(match[1]) : 0;
@@ -1558,7 +1555,7 @@ function elapsedMs(job) {
   if (!Number.isFinite(start)) {
     return null;
   }
-  const terminal = terminalJobStatus(job.status);
+  const terminal = isTerminalJobStatus(job.status);
   const end = terminal
     ? Date.parse(job.finishedAt ?? job.updatedAt ?? "")
     : Date.now();
@@ -1592,14 +1589,14 @@ async function waitForJob(jobId, options = {}) {
   while (Date.now() - started < timeoutMs) {
     maybeReapLostJobs();
     const job = readJob(cwd, jobId);
-    if (job && terminalJobStatus(job.status)) {
+    if (job && isTerminalJobStatus(job.status)) {
       return { job, waitTimedOut: false };
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   reapLostJobs(cwd);
   const job = readJob(cwd, jobId);
-  if (job && terminalJobStatus(job.status)) {
+  if (job && isTerminalJobStatus(job.status)) {
     return { job, waitTimedOut: false };
   }
   return {
@@ -1653,7 +1650,7 @@ async function maybeStartBackground(command, rawArgs) {
   }
   if (parsed.wait) {
     const waited = await waitForJob(job.id, { timeoutMs: parsed.waitTimeoutMs });
-    const stillRunning = waited.waitTimedOut && !terminalJobStatus(waited.job.status);
+    const stillRunning = waited.waitTimedOut && !isTerminalJobStatus(waited.job.status);
     const responseJob = {
       ...waited.job,
       ...(job.reusedExisting ? { reusedExisting: true } : {})
@@ -1766,10 +1763,17 @@ function handleSubagentCommand(rawArgs) {
 }
 
 function hasReviewableGitChanges(cwd = process.cwd()) {
-  if (run("git", ["rev-parse", "--is-inside-work-tree"], { cwd }).status !== 0) {
+  const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd);
+  if (inside.timedOut) {
+    return { reviewable: false, reason: "git repository check timed out", timedOut: true };
+  }
+  if (inside.status !== 0) {
     return { reviewable: false, reason: "not a git repository" };
   }
-  const status = run("git", ["status", "--short", "--untracked-files=all"], { cwd });
+  const status = gitShort(["status", "--short", "--untracked-files=all"], cwd);
+  if (status.timedOut) {
+    return { reviewable: false, reason: "git status timed out", timedOut: true };
+  }
   if (status.status !== 0) {
     return { reviewable: false, reason: "git status failed" };
   }
@@ -2610,6 +2614,9 @@ async function runReviewGate(rawArgs) {
 
   const reviewable = hasReviewableGitChanges(cwd);
   if (!reviewable.reviewable) {
+    if (reviewable.timedOut) {
+      warnGate(`${reviewable.reason}; allowing stop`);
+    }
     return;
   }
   const diffFingerprint = workingTreeFingerprintDetails(cwd);

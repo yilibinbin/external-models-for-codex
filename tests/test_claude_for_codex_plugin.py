@@ -4,6 +4,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import time
 
@@ -1137,6 +1138,57 @@ def test_background_idempotency_does_not_reuse_when_fingerprint_times_out(tmp_pa
     assert second_payload["job"].get("reusedExisting") is not True
 
 
+def test_background_idempotency_does_not_reuse_when_git_returns_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "tracked.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = bin_dir / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+if args[:1] == ["status"]:
+    print("fatal: synthetic status failure", file=sys.stderr)
+    raise SystemExit(128)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["job"]["id"] != second_payload["job"]["id"]
+    assert first_payload["job"]["fingerprintTimedOut"] is True
+    assert second_payload["job"]["fingerprintTimedOut"] is True
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
 def test_background_idempotency_changes_when_head_or_base_ref_changes(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -1248,6 +1300,34 @@ def test_background_worker_bootstrap_exit_is_reaped_from_queued(tmp_path):
     assert job["phase"] == "worker-launch-failed"
 
 
+def test_abandoned_host_forwarded_reservation_is_reaped_from_queued(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "abandoned"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["job"]["id"]
+
+    time.sleep(1.2)
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == job_id)
+    assert job["status"] == "failed"
+    assert job["phase"] == "reservation-expired"
+    assert "reserved job was not claimed" in job["error"]
+
+
 def test_background_wait_reaps_bootstrap_dead_worker(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -1306,6 +1386,83 @@ console.log(JSON.stringify({{ updates, lost: readJob(cwd, lost.id, env), done: r
     assert payload["lost"]["status"] == "failed"
     assert payload["lost"]["phase"] == "lost"
     assert payload["done"]["status"] == "succeeded"
+
+
+def test_lost_job_reaper_preserves_leaderless_child_process_group(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    info_file = tmp_path / "leaderless.json"
+    repo.mkdir()
+    data.mkdir()
+    leader = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, time\n"
+                f"info = pathlib.Path({json.dumps(str(info_file))})\n"
+                "leader_pid = os.getpid()\n"
+                "pgid = os.getpgrp()\n"
+                "child_pid = os.fork()\n"
+                "if child_pid == 0:\n"
+                "    info.write_text(json.dumps({'leaderPid': leader_pid, 'childPid': os.getpid(), 'pgid': os.getpgrp()}))\n"
+                "    while True: time.sleep(1)\n"
+                "time.sleep(0.1)\n"
+            ),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(30):
+            if info_file.exists():
+                break
+            time.sleep(0.1)
+        assert info_file.exists()
+        info = json.loads(info_file.read_text(encoding="utf8"))
+        leader_pid = int(info["leaderPid"])
+        child_pid = int(info["childPid"])
+        pgid = int(info["pgid"])
+        assert pgid == leader_pid
+        for _ in range(30):
+            if leader.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert leader.poll() is not None
+        assert process_is_running(child_pid)
+        script = f"""
+import {{ activeJobs, createJob, reapLostJobs, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "leaderless", command: "review", args: ["leaderless"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "running",
+  workerPid: 999999,
+  childProcessGroupPid: {leader_pid},
+  childProcessGroupIdentity: {{ pid: {leader_pid}, pgid: {leader_pid}, command: "exited leader", commandHash: "exited leader" }},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds: activeJobs(cwd, env).map((item) => item.id) }}));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["job"]["status"] == "running"
+        assert payload["job"]["phase"] == "leaderless-orphaned"
+        assert payload["job"]["lifecycleState"] == "lost"
+        assert "leaderless" in payload["activeIds"]
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if leader.poll() is None:
+            leader.kill()
 
 
 def test_finish_job_records_output_truncation_metadata(tmp_path):
@@ -1540,6 +1697,66 @@ updateJob(cwd, "cancel-race", {{
             child.kill()
 
 
+def test_cancel_validation_failure_preserves_running_job_status(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "cancel-validation", command: "review", args: ["unsafe"], cwd }}, env);
+updateJob(cwd, "cancel-validation", {{
+  status: "running",
+  phase: "running",
+  workerPid: {os.getpid()},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+"""
+    created = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert created.returncode == 0, created.stderr
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    cancelled = subprocess.run([NODE, str(runtime), "cancel", "cancel-validation"], cwd=repo, env=env, capture_output=True, text=True)
+    assert cancelled.returncode == 1
+    payload = json.loads(cancelled.stdout)
+    assert payload["status"] == "cancel_failed"
+    assert "requires process identity validation" in payload["reason"]
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["phase"] == "cancel_failed"
+
+
+def test_finish_job_after_cancel_request_is_recorded_as_cancelled(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, finishJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "finish-after-cancel", command: "review", args: ["cancelled"], cwd }}, env);
+updateJob(cwd, "finish-after-cancel", {{
+  status: "running",
+  phase: "cancelling",
+  cancelRequestedAt: "2026-06-09T00:00:01.000Z",
+  startedAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+finishJob(cwd, "finish-after-cancel", {{ status: 1, stdout: "", stderr: "interrupted" }}, env);
+console.log(JSON.stringify(readJob(cwd, "finish-after-cancel", env)));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "cancelled"
+    assert payload["phase"] == "cancelled"
+
+
 def test_process_group_cancel_fails_when_group_survives_sigkill(tmp_path):
     process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
     pid_file = tmp_path / "group.pid"
@@ -1577,6 +1794,47 @@ try {{
             child.kill()
 
 
+def test_process_identity_hash_takes_precedence_over_redacted_fallback(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    pid_file = tmp_path / "identity.pid"
+    child = subprocess.Popen(
+        ["python3", "-c", f"import os, pathlib, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nwhile True: time.sleep(1)\n"],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(30):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        child_pid = int(pid_file.read_text(encoding="utf8"))
+        script = f"""
+import {{ captureProcessIdentity, validateProcessGroupLeader }} from {json.dumps(process_lib.as_uri())};
+const identity = captureProcessIdentity({child_pid});
+const suffix = identity.command.slice(-20);
+const redactedWouldMatch = {{
+  ...identity,
+  command: `<redacted-home>${{suffix}}`
+}};
+const mismatchedHash = {{
+  ...redactedWouldMatch,
+  commandHash: "0".repeat(64)
+}};
+console.log(JSON.stringify({{
+  fallback: validateProcessGroupLeader({child_pid}, redactedWouldMatch),
+  strictHash: validateProcessGroupLeader({child_pid}, mismatchedHash)
+}}));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["fallback"]["ok"] is True
+        assert payload["strictHash"]["ok"] is False
+        assert "process identity changed" in payload["strictHash"]["reason"]
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
 def test_release_check_knows_long_running_lifecycle_guards():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run([NODE, str(runtime), "release-check", "--ci-simulate"], cwd=ROOT, capture_output=True, text=True)
@@ -1597,12 +1855,14 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "job-idempotency-timeout-no-reuse",
         "review-gate-baseline-shared-fingerprint",
         "review-gate-fingerprint-timeout-fail-open",
+        "review-gate-reviewable-git-timeout",
         "job-result-sanitized",
         "job-output-truncation-metadata",
         "job-output-worker-byte-metadata",
         "result-lock-contention-non-ok",
         "job-write-returns-sanitized",
         "queued-worker-bootstrap-reaper",
+        "queued-reservation-expiry",
         "wait-reaps-lost-jobs",
         "progress-event-parser",
         "stderr-line-buffering",
@@ -8778,6 +9038,56 @@ os.execv({json.dumps(real_git)}, ["git", *args])
     assert result.returncode == 0
     assert result.stdout == ""
     assert "fingerprint timed out; allowing stop" in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_reviewable_git_timeout_fails_open_without_claude(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    time.sleep(1)
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "git status timed out; allowing stop" in result.stderr
     assert list(capture_dir.glob("prompt-*.txt")) == []
 
 

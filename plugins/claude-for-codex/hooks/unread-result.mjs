@@ -2,6 +2,7 @@
 
 import fs from "node:fs";
 import process from "node:process";
+import { isTerminalJobStatus } from "../scripts/lib/job-lifecycle.mjs";
 import { listJobs } from "../scripts/lib/jobs.mjs";
 import { atomicWriteJson, turnBaselineFileForCwd } from "../scripts/lib/state.mjs";
 import { workingTreeFingerprint } from "../scripts/lib/worktree-fingerprint.mjs";
@@ -16,7 +17,7 @@ function readHookInput() {
 
 function notifyUnreadResults(cwd, sessionId) {
   const unread = listJobs(cwd).jobs.filter((job) =>
-    ["succeeded", "failed", "cancelled", "cancel_failed"].includes(job.status)
+    isTerminalJobStatus(job.status)
       && !job.resultViewedAt
       && (!sessionId || job.sessionId === sessionId)
   );

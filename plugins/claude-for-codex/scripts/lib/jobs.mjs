@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   captureProcessIdentity,
+  processGroupHasLiveMembers,
   terminateValidatedJobWorker,
   terminateValidatedProcessGroup,
   validateJobWorkerProcess,
@@ -101,7 +102,17 @@ function withFileLock(file, operation, options = {}) {
   while (fd === undefined) {
     try {
       fd = fs.openSync(lockFile, "wx", 0o600);
-      fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, command: process.argv.join(" "), createdAt: new Date().toISOString() })}\n`, "utf8");
+      try {
+        fs.writeFileSync(fd, `${JSON.stringify({ pid: process.pid, command: process.argv.join(" "), createdAt: new Date().toISOString() })}\n`, "utf8");
+      } catch (writeError) {
+        try {
+          fs.closeSync(fd);
+        } finally {
+          fs.rmSync(lockFile, { force: true });
+          fd = undefined;
+        }
+        throw writeError;
+      }
     } catch (error) {
       if (error?.code !== "EEXIST") {
         throw error;
@@ -371,7 +382,7 @@ export function finishJob(cwd, jobId, result, env = process.env) {
       return null;
     }
     const succeeded = result.status === 0;
-    const cancelledByRequest = Boolean(current.cancelRequestedAt) && String(result.error ?? "").includes("after stop request");
+    const cancelledByRequest = Boolean(current.cancelRequestedAt);
     const stdout = storedOutput(result.stdout ?? "", cwd, {
       bytes: result.stdoutBytes,
       truncated: result.stdoutTruncated
@@ -458,11 +469,14 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
     if (job.status === "queued") {
       const missingDirectWorker = !Number.isInteger(job.workerPid) && job.reservationMode !== "host-forwarded" && job.submissionState === "starting";
       const workerGone = Number.isInteger(job.workerPid) && !validateJobWorkerProcess(job.workerPid, job.id).ok;
-      if (workerGone || missingDirectWorker) {
+      const abandonedReservation = !Number.isInteger(job.workerPid) && job.reservationMode === "host-forwarded";
+      if (workerGone || missingDirectWorker || abandonedReservation) {
         updates.push(updateJobUnlessTerminal(cwd, job.id, {
           status: "failed",
-          phase: "worker-launch-failed",
-          error: "Background worker exited or never exposed a valid worker before claiming the queued job; the plugin did not resubmit the Claude request.",
+          phase: abandonedReservation ? "reservation-expired" : "worker-launch-failed",
+          error: abandonedReservation
+            ? "Host-forwarded reserved job was not claimed before the queued timeout; releasing background capacity without resubmitting the Claude request."
+            : "Background worker exited or never exposed a valid worker before claiming the queued job; the plugin did not resubmit the Claude request.",
           finishedAt: new Date(now).toISOString(),
           workerPid: null
         }, env));
@@ -481,10 +495,12 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
     const childGroupValidation = Number.isInteger(childGroupPid) && job.childProcessGroupIdentity
       ? validateProcessGroupLeader(childGroupPid, job.childProcessGroupIdentity)
       : { ok: false };
-    if (childGroupValidation.ok) {
+    if (childGroupValidation.ok || (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity && processGroupHasLiveMembers(childGroupPid))) {
       updates.push(updateJobUnlessTerminal(cwd, job.id, {
-        phase: "orphaned",
-        lastProgressMessage: "Worker heartbeat is lost but the supervised process-group leader still exists; not freeing capacity or resubmitting.",
+        phase: childGroupValidation.ok ? "orphaned" : "leaderless-orphaned",
+        lastProgressMessage: childGroupValidation.ok
+          ? "Worker heartbeat is lost but the supervised process-group leader still exists; not freeing capacity or resubmitting."
+          : "Worker heartbeat is lost but live members remain in the supervised process group; not freeing capacity or resubmitting.",
         lifecycleState: "lost",
         workerPid: null
       }, env));
@@ -538,9 +554,10 @@ function childProcessGroupPidForJob(job) {
   return null;
 }
 
-function cancelFailure(cwd, jobId, reason, env) {
+function cancelFailure(cwd, jobId, reason, env, options = {}) {
   const updated = updateJobUnlessTerminal(cwd, jobId, {
-    status: "cancel_failed",
+    ...(options.preserveActive ? {} : { status: "cancel_failed" }),
+    phase: "cancel_failed",
     cancelFailedAt: new Date().toISOString(),
     cancelFailureReason: reason
   }, env);
@@ -645,7 +662,11 @@ export function cancelJob(cwd, jobId, env = process.env) {
     if (childTermination.ok && workerTermination.ok) {
       const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);
       if (!signalDelivered) {
-        return cancelFailure(cwd, jobId, "Running job cancellation did not deliver a signal to a validated worker or child process group.", env);
+        const processMayRemain = !(
+          String(workerTermination.reason ?? "").includes("already absent") &&
+          String(childTermination.reason ?? "").includes("no child process group")
+        );
+        return cancelFailure(cwd, jobId, "Running job cancellation did not deliver a signal to a validated worker or child process group.", env, { preserveActive: processMayRemain });
       }
       const updates = {
         status: "cancelled",
@@ -683,7 +704,7 @@ export function cancelJob(cwd, jobId, env = process.env) {
       childTermination.ok ? "" : `child process group: ${childTermination.reason || "termination failed"}`,
       workerTermination.ok ? "" : `worker: ${workerTermination.reason || "termination failed"}`
     ].filter(Boolean).join("; ");
-    return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${details}`, env);
+    return cancelFailure(cwd, jobId, `Running job cancellation requires process identity validation; refusing to signal PID: ${details}`, env, { preserveActive: true });
   }
   if (isTerminalJobStatus(job.status)) {
     return { status: job.status, jobId, job };

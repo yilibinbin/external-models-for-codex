@@ -63,7 +63,8 @@ export function classifyJobLiveness(job, options = {}) {
       ? options.queuedLostAfterMs
       : queuedLostAfterMs(options.env ?? process.env);
     const missingDirectWorker = !Number.isInteger(job.workerPid) && job.reservationMode !== "host-forwarded" && job.submissionState === "starting";
-    if (staleForMs !== null && staleForMs >= queuedLostMs && (Number.isInteger(job.workerPid) || missingDirectWorker)) {
+    const abandonedReservation = !Number.isInteger(job.workerPid) && job.reservationMode === "host-forwarded";
+    if (staleForMs !== null && staleForMs >= queuedLostMs && (Number.isInteger(job.workerPid) || missingDirectWorker || abandonedReservation)) {
       return { state: "lost", status, staleForMs, queued: true };
     }
     return { state: "queued", status, staleForMs: staleForMs ?? 0 };
