@@ -1542,7 +1542,14 @@ function startBackgroundJob(command, rawArgs) {
       });
     const existing = idempotencyKey ? findActiveJobByIdempotencyKey(cwd, idempotencyKey) : null;
     if (existing) {
-      return { ...existing, reusedExisting: true };
+      const existingIsQueuedHostForwardedReservation = existing.reservationMode === "host-forwarded"
+        && Array.isArray(existing.workerCommand)
+        && existing.status === "queued";
+      // A queued host-forwarded reservation is waiting for a Codex subagent to
+      // claim it; a direct --background request must start its own worker.
+      if (!existingIsQueuedHostForwardedReservation) {
+        return { ...existing, reusedExisting: true };
+      }
     }
     const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
     if (!capacity.ok) {
@@ -1771,7 +1778,7 @@ async function maybeStartBackground(command, rawArgs) {
     }, null, 2)}\n`);
     process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1);
   }
-  process.stdout.write(`${JSON.stringify({ status: job.reusedExisting ? "running" : "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ status: job.reusedExisting ? job.status : "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
   process.exit(0);
 }
 
@@ -3708,6 +3715,9 @@ function runStoredJobCommand(job, options = {}) {
     }
 
     function stopChildWithEscalation(reasonSignal = "SIGTERM") {
+      // Invariant: every path that resolves the worker result sets `settled`
+      // first. `killTimer` belongs to the active escalation branch until close
+      // either cancels it or intentionally keeps/replaces it below.
       stopChildGroup(reasonSignal === "SIGKILL" ? "SIGKILL" : "SIGTERM");
       if (reasonSignal !== "SIGKILL") {
         clearTimeout(killTimer);
@@ -3821,6 +3831,9 @@ function runStoredJobCommand(job, options = {}) {
       settled = true;
       progressLines.flush();
       if (hardTimedOut && signal !== "SIGKILL") {
+        // The child closed during the hard-timeout grace window. Keep ownership
+        // of the escalation timer long enough to preserve timeout-as-failure
+        // semantics even if the process reports a clean exit after SIGTERM.
         cleanup({ keepKillTimer: true });
         clearTimeout(killTimer);
         const remainingKillGraceMs = Math.max(0, (hardTimedOutAt || Date.now()) + killMs - Date.now());

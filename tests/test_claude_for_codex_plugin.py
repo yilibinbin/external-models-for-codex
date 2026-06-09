@@ -8001,6 +8001,50 @@ def test_reserve_job_reuses_existing_reserved_job(tmp_path):
     assert len(json.loads(jobs.stdout)["jobs"]) == 1
 
 
+def test_direct_background_does_not_reuse_queued_host_forwarded_reservation(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    direct = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert reserved.returncode == 0, reserved.stderr
+    assert direct.returncode == 0, direct.stderr
+    reserved_payload = json.loads(reserved.stdout)
+    direct_payload = json.loads(direct.stdout)
+    assert reserved_payload["status"] == "reserved"
+    assert direct_payload["status"] == "queued"
+    assert direct_payload["job"]["id"] != reserved_payload["job"]["id"]
+    assert direct_payload["job"].get("reusedExisting") is not True
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert len(json.loads(jobs.stdout)["jobs"]) == 2
+
+
 def test_reserve_job_reuses_running_reserved_job_without_worker_command(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"

@@ -468,6 +468,10 @@ function longRunningLifecycleChecks(pluginRoot) {
   const workerSpawnIndex = companion.indexOf("child = spawn(process.execPath");
   const cancelChildTerminationIndex = jobs.indexOf("let childTermination = Number.isInteger(requestedChildGroupPid)");
   const cancelWorkerTerminationIndex = jobs.indexOf("let workerTermination = Number.isInteger(requested.workerPid)");
+  // These source guards intentionally complement behavior tests. They pin
+  // security/lifecycle invariants that are easy to preserve accidentally in
+  // tests while losing in a refactor, such as ordering of signal handling and
+  // exact fail-open hook boundaries.
   return [
     result(fs.existsSync(lifecyclePath), "job-lifecycle-helper", "scripts/lib/job-lifecycle.mjs exists"),
     result(jobs.includes("withJobLock") && jobs.includes("claimQueuedJob") && jobs.includes("claimReservedJob"), "atomic-job-claim-lock", "direct and reserved claims share locked path"),
