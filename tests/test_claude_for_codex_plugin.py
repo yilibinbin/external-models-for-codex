@@ -548,6 +548,38 @@ def test_background_worker_line_buffers_split_progress_events(tmp_path):
     assert payload["job"]["lastProgressMessage"] == "role started"
 
 
+def test_background_worker_fast_child_exit_does_not_fail_identity_capture(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "print('FAST_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "3000", "fast-exit"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert "FAST_DONE" in payload["job"]["stdout"]
+    assert "identity could not be validated" not in payload["job"].get("error", "")
+
+
 def test_background_worker_hard_timeout_escalates_to_sigkill(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"

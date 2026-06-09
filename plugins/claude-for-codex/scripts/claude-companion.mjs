@@ -121,6 +121,7 @@ import { extractJsonObject, validateAdversarialJson } from "./lib/structured-out
 import {
   captureProcessGroupIdentity,
   currentProcessPlatform,
+  isProcessAlive,
   processGroupHasLiveMembers,
   supportsPosixProcessGroups
 } from "./lib/process.mjs";
@@ -3594,8 +3595,10 @@ function runStoredJobCommand(job, options = {}) {
 
     childProcessGroupIdentity = child.pid ? captureProcessGroupIdentity(child.pid) : null;
     if (child.pid && !childProcessGroupIdentity) {
-      const fastExited = childExitedBeforeIdentity || child.exitCode !== null || child.signalCode !== null;
-      if (!fastExited) {
+      const fastExited = childExitedBeforeIdentity || child.exitCode !== null || child.signalCode !== null || !isProcessAlive(child.pid);
+      if (fastExited) {
+        childExitedBeforeIdentity = true;
+      } else {
         settled = true;
         stopUnvalidatedChild("SIGKILL");
         resolve({
