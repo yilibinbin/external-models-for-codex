@@ -127,6 +127,7 @@ import {
   supportsPosixProcessGroups
 } from "./lib/process.mjs";
 import {
+  hookFingerprintOptions,
   workingTreeFingerprint,
   workingTreeFingerprintDetails,
   workingTreeFingerprintMatches
@@ -2754,7 +2755,7 @@ async function runReviewGate(rawArgs) {
     }
     return;
   }
-  const diffFingerprint = workingTreeFingerprintDetails(cwd);
+  const diffFingerprint = workingTreeFingerprintDetails(cwd, [], hookFingerprintOptions());
   const diffHash = diffFingerprint.hash;
   if (diffFingerprint.timedOut) {
     warnGate("working-tree fingerprint timed out; allowing stop and skipping cached gate decision");

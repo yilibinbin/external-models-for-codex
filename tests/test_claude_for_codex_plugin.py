@@ -9541,6 +9541,35 @@ raise SystemExit(2)
     assert payload["claudeCommand"] == str(fake_claude)
 
 
+def test_hook_fingerprint_options_clamp_work_under_prompt_hook_timeout():
+    module_uri = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").as_uri()
+    script = f"""
+import {{ hookFingerprintOptions }} from {json.dumps(module_uri)};
+const options = hookFingerprintOptions({{
+  CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: "10000",
+  CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: "9999999",
+  CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES: "999"
+}});
+console.log(JSON.stringify(options.env));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    env = json.loads(result.stdout)
+    assert env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] == "500"
+    assert env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] == str(512 * 1024)
+    assert env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES"] == "128"
+
+
+def test_prompt_and_stop_hooks_share_bounded_fingerprint_options():
+    runtime = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    unread = (PLUGIN / "hooks" / "unread-result.mjs").read_text(encoding="utf8")
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf8"))
+    prompt_commands = hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
+    assert any(command.get("timeout") == 5 for command in prompt_commands)
+    assert "workingTreeFingerprint(cwd, [], hookFingerprintOptions())" in unread
+    assert "workingTreeFingerprintDetails(cwd, [], hookFingerprintOptions())" in runtime
+
+
 def test_setup_can_enable_and_disable_review_gate(tmp_path):
     runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
 

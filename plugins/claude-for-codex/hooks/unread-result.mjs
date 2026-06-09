@@ -5,7 +5,7 @@ import process from "node:process";
 import { isTerminalJobStatus } from "../scripts/lib/job-lifecycle.mjs";
 import { listJobs } from "../scripts/lib/jobs.mjs";
 import { atomicWriteJson, turnBaselineFileForCwd } from "../scripts/lib/state.mjs";
-import { workingTreeFingerprint } from "../scripts/lib/worktree-fingerprint.mjs";
+import { hookFingerprintOptions, workingTreeFingerprint } from "../scripts/lib/worktree-fingerprint.mjs";
 
 function readHookInput() {
   if (process.stdin.isTTY) {
@@ -36,7 +36,7 @@ try {
     sessionId,
     cwd,
     promptSubmittedAt: new Date().toISOString(),
-    workingTreeFingerprint: workingTreeFingerprint(cwd)
+    workingTreeFingerprint: workingTreeFingerprint(cwd, [], hookFingerprintOptions())
   });
   notifyUnreadResults(cwd, sessionId);
 } catch (error) {

@@ -7,6 +7,9 @@ import process from "node:process";
 const MAX_WORKTREE_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_UNTRACKED_FINGERPRINT_BYTES = 4 * 1024 * 1024;
 const DEFAULT_MAX_UNTRACKED_FINGERPRINT_FILES = 512;
+const HOOK_GIT_SIGNAL_TIMEOUT_MS = 500;
+const HOOK_MAX_UNTRACKED_FINGERPRINT_BYTES = 512 * 1024;
+const HOOK_MAX_UNTRACKED_FINGERPRINT_FILES = 128;
 const FINGERPRINT_SEPARATOR = "\n--- claude-for-codex ---\n";
 
 function parsePositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -22,6 +25,29 @@ function gitSignalTimeoutMs(env = process.env) {
     min: 100,
     max: 60_000
   });
+}
+
+export function hookFingerprintOptions(env = process.env) {
+  return {
+    env: {
+      ...env,
+      CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: String(parsePositiveInteger(
+        env.CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS,
+        HOOK_GIT_SIGNAL_TIMEOUT_MS,
+        { min: 1, max: HOOK_GIT_SIGNAL_TIMEOUT_MS }
+      )),
+      CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: String(parsePositiveInteger(
+        env.CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES,
+        HOOK_MAX_UNTRACKED_FINGERPRINT_BYTES,
+        { min: 1, max: HOOK_MAX_UNTRACKED_FINGERPRINT_BYTES }
+      )),
+      CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES: String(parsePositiveInteger(
+        env.CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES,
+        HOOK_MAX_UNTRACKED_FINGERPRINT_FILES,
+        { min: 1, max: HOOK_MAX_UNTRACKED_FINGERPRINT_FILES }
+      ))
+    }
+  };
 }
 
 function runGit(cwd, args, options = {}) {
