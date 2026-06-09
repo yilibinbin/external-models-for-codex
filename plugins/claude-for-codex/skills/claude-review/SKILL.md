@@ -24,6 +24,7 @@ When converting the user's request to companion invocation:
 - Use `--quality max` only when the user explicitly asks for the strongest local Claude review or max local effort.
 - If the user names a concrete Claude model or effort, pass it as explicit argv tokens outside quoted `$ARGUMENTS`.
 - Use `--background` for broad diffs, unclear scope, or long reviews instead of blocking the main Codex turn.
+- Before choosing foreground for an unforced review, run `recommend-execution-mode --json` or apply the same threshold: foreground only for tiny one-to-two-file work; use background for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, or unclear scope.
 - Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
 
 Internal invocation examples, not for users:
@@ -79,6 +80,7 @@ Rules:
 - If Claude reports no findings, still report any residual risks it listed.
 - Use `--background` for long reviews through the background routing contract above so Codex can continue working and retrieve results later with `claude-result`.
 - Tiny one-to-two file reviews can run foreground; broader or unclear reviews should use background.
+- Do not rerun a review just because a previous `--wait` observation window expired; use `claude-status` or `claude-result <job-id>`.
 
 Arguments:
 - `--base <ref>` reviews `ref...HEAD`.

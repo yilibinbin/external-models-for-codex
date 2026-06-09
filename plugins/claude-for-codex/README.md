@@ -188,6 +188,7 @@ Run from the repository root:
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --json --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --backend sdk --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs recommend-execution-mode --json
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
@@ -226,6 +227,8 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
 
 `--wait` is a short observation window, not the hard Claude timeout. It defaults to 45 seconds and can be adjusted with `--wait-timeout-ms <ms>`. If the window expires while the worker is still healthy, the command exits 0 with `{"status":"running","waitTimedOut":true,"job":...}`; use `jobs` or `result <job-id>` later. Do not rerun the same review just because `--wait` expired.
+
+`recommend-execution-mode --json` inspects bounded local git signals and recommends `foreground` only for tiny one-to-two-file work. It recommends `background` for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, unclear scope, or git signal timeouts. A timeout means the git signal collection was inconclusive; it is not evidence that an existing Claude job failed.
 
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
 

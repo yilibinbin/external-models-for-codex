@@ -27,6 +27,7 @@ routing:write-mode-explicit
 - If the user names a concrete Claude model or effort, pass it as explicit argv tokens outside quoted `$ARGUMENTS`.
 - Keep rescue read-only unless the user explicitly asks Claude to write or repair files.
 - Route explicit repair requests to `rescue --write`; inspect the resulting git diff before reporting success.
+- Before choosing foreground for an unforced review, run `recommend-execution-mode --json` or apply the same threshold: foreground only for tiny one-to-two-file work; use background for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, or unclear scope.
 - Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
 
 User-facing examples:
@@ -68,6 +69,7 @@ Rules:
 - In write mode, report Claude's output and inspect the resulting git diff before claiming the task is fixed.
 - Preserve Claude's evidence, uncertainty markers, file paths, and recovery assumptions.
 - If Claude fails, reports setup/auth problems, or cannot inspect enough evidence, report that directly instead of inventing a substitute diagnosis.
+- Do not rerun rescue just because a previous `--wait` observation window expired; use `claude-status` or `claude-result <job-id>`.
 
 Arguments:
 - `--base <ref>` includes branch diff context when available.

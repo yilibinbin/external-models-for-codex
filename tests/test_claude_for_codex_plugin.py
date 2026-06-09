@@ -595,6 +595,96 @@ def test_wait_timeout_is_clamped_below_hard_timeout_in_source():
     assert "max: HARD_JOB_TIMEOUT_MS" not in wait_block
 
 
+def test_recommend_execution_mode_routes_large_reviews_to_background(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\n" + "changed\n" * 60, encoding="utf8")
+    result = subprocess.run([NODE, str(runtime), "recommend-execution-mode", "--json"], cwd=repo, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["changedLineEstimate"] >= 50
+    assert payload["reviewable"] is True
+
+
+def test_recommend_execution_mode_distinguishes_git_timeout_from_non_repo(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env sh\n"
+        "if [ \"$1\" = \"rev-parse\" ]; then echo true; exit 0; fi\n"
+        "sleep 2\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+    result = subprocess.run([NODE, str(runtime), "recommend-execution-mode", "--json"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["reviewable"] is False
+    assert payload["git"]["timedOut"] is True
+    assert "timed out" in payload["reason"]
+
+
+def test_jobs_and_result_include_lifecycle_elapsed_and_progress_preview(tmp_path):
+    import datetime
+
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    job_file = state_dir / "jobs" / "job-lifecycle.json"
+    job_file.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    created = (now - datetime.timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+    started = (now - datetime.timedelta(seconds=9)).isoformat().replace("+00:00", "Z")
+    updated = (now - datetime.timedelta(seconds=8)).isoformat().replace("+00:00", "Z")
+    job_file.write_text(json.dumps({
+        "id": "job-lifecycle",
+        "status": "running",
+        "command": "review",
+        "args": ["focus"],
+        "cwd": str(repo),
+        "createdAt": created,
+        "startedAt": started,
+        "updatedAt": updated,
+        "lastHeartbeatAt": updated,
+        "heartbeatSeq": 3,
+        "phase": "reviewing",
+        "lastProgressMessage": "security started"
+    }), encoding="utf8")
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+    job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == "job-lifecycle")
+    assert job["lifecycle"]["state"] in {"healthy", "suspect", "lost"}
+    assert job["phase"] == "reviewing"
+    assert job["heartbeatSeq"] == 3
+    assert job["progressPreview"] == ["security started"]
+    assert job["elapsedMs"] > 0
+    result = subprocess.run([NODE, str(runtime), "result", "job-lifecycle"], cwd=repo, env=env, capture_output=True, text=True)
+    result_job = json.loads(result.stdout)["job"]
+    assert result_job["lifecycle"]["state"] in {"healthy", "suspect", "lost"}
+    assert result_job["progressPreview"] == ["security started"]
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 

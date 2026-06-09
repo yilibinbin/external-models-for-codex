@@ -113,7 +113,7 @@ import {
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
 import { captureProcessGroupIdentity } from "./lib/process.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
@@ -1235,6 +1235,93 @@ function parseJobIdArg(rawArgs) {
 
 function terminalJobStatus(status) {
   return ["succeeded", "failed", "cancelled", "cancel_failed"].includes(status);
+}
+
+function shortstatFileCount(text) {
+  const match = String(text ?? "").match(/(\d+)\s+files?\s+changed/);
+  return match ? Number(match[1]) : 0;
+}
+
+function shortstatChangedLines(text) {
+  const insertions = String(text ?? "").match(/(\d+)\s+insertions?/);
+  const deletions = String(text ?? "").match(/(\d+)\s+deletions?/);
+  return (insertions ? Number(insertions[1]) : 0) + (deletions ? Number(deletions[1]) : 0);
+}
+
+function gitSignalTimeoutMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS, 10_000, {
+    min: 100,
+    max: 60_000
+  });
+}
+
+function gitCommandTimedOut(result) {
+  return String(result?.errorCode ?? "") === "ETIMEDOUT";
+}
+
+function gitShort(args, cwd = process.cwd()) {
+  const result = run("git", args, { cwd, timeout: gitSignalTimeoutMs() });
+  return { ...result, timedOut: gitCommandTimedOut(result) };
+}
+
+function recommendExecutionMode(cwd = process.cwd(), options = {}) {
+  const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd);
+  if (inside.timedOut) {
+    return {
+      recommendation: "background",
+      reason: "git signal collection timed out; use a tracked background review or retry status later",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: null, timedOut: true }
+    };
+  }
+  if (inside.status !== 0) {
+    return {
+      recommendation: "background",
+      reason: "not a git repository; manual/background review recommended",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: false }
+    };
+  }
+  const status = gitShort(["status", "--short", "--untracked-files=all"], cwd);
+  const staged = gitShort(["diff", "--shortstat", "--cached"], cwd);
+  const unstaged = gitShort(["diff", "--shortstat"], cwd);
+  if (status.timedOut || staged.timedOut || unstaged.timedOut) {
+    return {
+      recommendation: "background",
+      reason: "git signal collection timed out; use a tracked background review or retry status later",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: true, timedOut: true }
+    };
+  }
+  const statusLines = status.stdout.trim() ? status.stdout.trim().split(/\r?\n/) : [];
+  const hasUntracked = statusLines.some((line) => line.startsWith("??"));
+  const fileCountEstimate = Math.max(
+    statusLines.length,
+    shortstatFileCount(staged.stdout) + shortstatFileCount(unstaged.stdout)
+  );
+  const changedLineEstimate = shortstatChangedLines(staged.stdout) + shortstatChangedLines(unstaged.stdout);
+  const command = options.command ?? "review";
+  const forcedBackground = command === "multi-review" || command === "adversarial-review" || command === "rescue";
+  const broad = hasUntracked || fileCountEstimate > 2 || changedLineEstimate > 50;
+  const recommendation = forcedBackground || broad ? "background" : "foreground";
+  return {
+    recommendation,
+    reason: recommendation === "background" ? "review appears broader than a small foreground review" : "small review scope",
+    reviewable: statusLines.length > 0 || fileCountEstimate > 0,
+    fileCountEstimate,
+    changedLineEstimate,
+    hasUntracked,
+    git: { repository: true }
+  };
 }
 
 function heartbeatIntervalMs(env = process.env) {
@@ -3041,7 +3128,11 @@ function runClaudeUltrareview(rawArgs) {
 }
 
 function printJobs() {
-  process.stdout.write(`${JSON.stringify(listJobs(process.cwd()), null, 2)}\n`);
+  const payload = listJobs(process.cwd());
+  process.stdout.write(`${JSON.stringify({
+    ...payload,
+    jobs: payload.jobs.map((job) => enrichCompanionJob(job))
+  }, null, 2)}\n`);
 }
 
 function printResult(rawArgs) {
@@ -3057,8 +3148,17 @@ function printResult(rawArgs) {
     console.error(error.message || String(error));
     process.exit(2);
   }
+  if (payload.job) {
+    payload = { ...payload, job: enrichCompanionJob(payload.job) };
+  }
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.status === "ok" ? 0 : 1);
+}
+
+function runRecommendExecutionMode(rawArgs) {
+  const tokens = normalizeArgv(rawArgs).filter((arg) => arg !== "--json" && arg !== "--json-output");
+  const command = tokens[0] && BACKGROUND_CAPABLE_COMMANDS.has(tokens[0]) ? tokens[0] : "review";
+  process.stdout.write(`${JSON.stringify(recommendExecutionMode(process.cwd(), { command }), null, 2)}\n`);
 }
 
 function runCancel(rawArgs) {
@@ -3397,6 +3497,9 @@ switch (command) {
     break;
   case "leases":
     runLeasesCommand(rawArgs);
+    break;
+  case "recommend-execution-mode":
+    runRecommendExecutionMode(rawArgs);
     break;
   case "__run-job":
     await runJobWorker(rawArgs);
