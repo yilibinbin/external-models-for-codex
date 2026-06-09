@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { createGitMcpConfig } from "./mcp-config.mjs";
+import { formatProgressEvent } from "./progress.mjs";
 
 export const READ_ONLY_BUILTIN_TOOLS = Object.freeze(["Read", "Grep", "Glob"]);
 export const READ_ONLY_MCP_TOOLS = Object.freeze([
@@ -417,6 +418,21 @@ function maybeWriteSdkProgress(event, options) {
     return;
   }
   process.stderr.write(`${sanitizedSdkProgressLine(event)}\n`);
+  const eventType = event && typeof event === "object" && typeof event.type === "string"
+    ? event.type
+    : typeof event;
+  const role = event && typeof event === "object"
+    ? (event.agent_name ?? event.agentName ?? event.subagent_name ?? event.subagentName ?? "")
+    : "";
+  const status = event && typeof event === "object" && typeof event.total_cost_usd === "number"
+    ? `cost_usd=${event.total_cost_usd}`
+    : "";
+  process.stderr.write(formatProgressEvent({
+    phase: `sdk-${eventType}`,
+    message: `${eventType} event received`,
+    role,
+    status
+  }, { cwd: options.cwd ?? process.cwd() }));
 }
 
 function shouldCollectSdkText(event, options) {
@@ -532,7 +548,8 @@ async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disa
       includePartialMessages: sdkOptions.includePartialMessages
     });
     const output = await collectSdkOutput(queryResult, {
-      streamProgress: Boolean(args.streamProgress || options.streamProgress)
+      streamProgress: Boolean(args.streamProgress || options.streamProgress),
+      cwd: options.cwd ?? process.cwd()
     });
     return {
       status: 0,

@@ -824,6 +824,15 @@ console.log(JSON.stringify({{ updates, lost: readJob(cwd, lost.id, env), done: r
     assert payload["done"]["status"] == "succeeded"
 
 
+def test_sdk_progress_machine_line_uses_real_event_type_fields():
+    backend = PLUGIN / "scripts" / "lib" / "claude-backend.mjs"
+    text = backend.read_text(encoding="utf8")
+    assert "function maybeWriteSdkProgress(event, options)" in text
+    assert "formatProgressEvent" in text
+    assert "event.phase" not in text
+    assert "sdk-${eventType}" in text or "sdk-\" + eventType" in text
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 
@@ -4670,6 +4679,7 @@ def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path
     assert result.returncode == 0, result.stderr
     assert "[claude-for-codex sdk progress] assistant" in result.stderr
     assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
+    assert "[claude-for-codex progress]" in result.stderr
     assert secret_chunk not in result.stderr
     assert secret_session not in result.stderr
     assert secret_chunk not in result.stdout
@@ -4735,6 +4745,7 @@ def test_sdk_review_stream_progress_is_sanitized_and_report_omits_raw_chunks(tmp
     assert result.returncode == 0, result.stderr
     assert "[claude-for-codex sdk progress] assistant" in result.stderr
     assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
+    assert "[claude-for-codex progress]" in result.stderr
     assert "SDK_REVIEW_OK" in result.stdout
     assert secret_chunk not in result.stderr
     assert secret_session not in result.stderr
