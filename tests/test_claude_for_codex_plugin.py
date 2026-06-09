@@ -1318,6 +1318,55 @@ def test_background_idempotency_does_not_reuse_when_fingerprint_times_out(tmp_pa
     assert second_payload["job"].get("reusedExisting") is not True
 
 
+def test_worktree_fingerprint_marks_untracked_budget_exceeded_inconclusive(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "one.txt").write_text("12345\n", encoding="utf8")
+    module_uri = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").as_uri()
+    script = f"""
+import {{ workingTreeFingerprintDetails }} from {json.dumps(module_uri)};
+const details = workingTreeFingerprintDetails({json.dumps(str(repo))}, [], {{
+  env: {{ ...process.env, CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: "4" }}
+}});
+console.log(JSON.stringify(details));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    details = json.loads(result.stdout)
+    assert details["timedOut"] is True
+    assert details["hash"]
+
+
+def test_background_idempotency_does_not_reuse_when_untracked_budget_exceeded(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "large-untracked.txt").write_text("12345\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] = "4"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["job"]["id"] != second_payload["job"]["id"]
+    assert first_payload["job"]["fingerprintTimedOut"] is True
+    assert second_payload["job"]["fingerprintTimedOut"] is True
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
 def test_duplicate_background_retry_reuses_existing_job_in_non_git_workspace(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"

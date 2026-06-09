@@ -5,6 +5,8 @@ import path from "node:path";
 import process from "node:process";
 
 const MAX_WORKTREE_FINGERPRINT_FILE_BYTES = 1024 * 1024;
+const DEFAULT_MAX_UNTRACKED_FINGERPRINT_BYTES = 4 * 1024 * 1024;
+const DEFAULT_MAX_UNTRACKED_FINGERPRINT_FILES = 512;
 const FINGERPRINT_SEPARATOR = "\n--- claude-for-codex ---\n";
 
 function parsePositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
@@ -116,7 +118,34 @@ function safeWorkspacePath(cwd, relativePath) {
   return fullPath === root || fullPath.startsWith(`${root}${path.sep}`) ? fullPath : null;
 }
 
-function fileFingerprint(filePath) {
+function untrackedFingerprintBudget(env = process.env) {
+  return {
+    remainingBytes: parsePositiveInteger(
+      env.CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES,
+      DEFAULT_MAX_UNTRACKED_FINGERPRINT_BYTES,
+      { min: 1, max: 64 * 1024 * 1024 }
+    ),
+    maxFiles: parsePositiveInteger(
+      env.CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES,
+      DEFAULT_MAX_UNTRACKED_FINGERPRINT_FILES,
+      { min: 1, max: 10_000 }
+    )
+  };
+}
+
+function budgetExceededPart(reason) {
+  return {
+    text: [
+      "UNTRACKED_FINGERPRINT_BUDGET_EXCEEDED",
+      reason
+    ].join("\n"),
+    stdout: "",
+    timedOut: true,
+    budgetExceeded: true
+  };
+}
+
+function fileFingerprint(filePath, budget) {
   try {
     const stat = fs.lstatSync(filePath);
     if (stat.isSymbolicLink()) {
@@ -127,6 +156,16 @@ function fileFingerprint(filePath) {
     }
     if (stat.size > MAX_WORKTREE_FINGERPRINT_FILE_BYTES) {
       return { type: "file-large", size: stat.size, mtimeMs: Math.trunc(stat.mtimeMs) };
+    }
+    if (budget && stat.size > budget.remainingBytes) {
+      return {
+        type: "budget-exceeded",
+        size: stat.size,
+        remainingBytes: budget.remainingBytes
+      };
+    }
+    if (budget) {
+      budget.remainingBytes -= stat.size;
     }
     return {
       type: "file",
@@ -168,14 +207,24 @@ function untrackedFilesFingerprintPart(cwd, options = {}) {
     };
   }
   const files = result.stdout.split("\0").filter(Boolean).sort();
+  const budget = untrackedFingerprintBudget(options.env ?? process.env);
+  if (files.length > budget.maxFiles) {
+    return budgetExceededPart(`files=${files.length} maxFiles=${budget.maxFiles}`);
+  }
+  const fingerprints = [];
+  for (const file of files) {
+    const safePath = safeWorkspacePath(cwd, file);
+    const fingerprint = safePath ? fileFingerprint(safePath, budget) : { type: "unsafe-path" };
+    if (fingerprint.type === "budget-exceeded") {
+      return budgetExceededPart(`file=${file} size=${fingerprint.size} remainingBytes=${fingerprint.remainingBytes}`);
+    }
+    fingerprints.push({
+      path: file,
+      fingerprint
+    });
+  }
   return {
-    text: JSON.stringify(files.map((file) => {
-      const safePath = safeWorkspacePath(cwd, file);
-      return {
-        path: file,
-        fingerprint: safePath ? fileFingerprint(safePath) : { type: "unsafe-path" }
-      };
-    })),
+    text: JSON.stringify(fingerprints),
     stdout: result.stdout,
     timedOut: false
   };
