@@ -1880,6 +1880,7 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "stderr-line-buffering",
         "sdk-progress-hook-point",
         "signal-child-group-cleanup",
+        "worker-signal-handler-before-child-spawn",
         "child-process-identity-required",
         "unvalidated-child-no-negative-pgid",
         "process-identity-no-prefix-match",

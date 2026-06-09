@@ -464,6 +464,8 @@ function longRunningLifecycleChecks(pluginRoot) {
   const lifecyclePath = path.join(pluginRoot, "scripts", "lib", "job-lifecycle.mjs");
   const lifecycle = fs.existsSync(lifecyclePath) ? fs.readFileSync(lifecyclePath, "utf8") : "";
   const progressPath = path.join(pluginRoot, "scripts", "lib", "progress.mjs");
+  const workerSignalHandlerIndex = companion.indexOf('process.once("SIGTERM", signalHandler)');
+  const workerSpawnIndex = companion.indexOf("child = spawn(process.execPath");
   return [
     result(fs.existsSync(lifecyclePath), "job-lifecycle-helper", "scripts/lib/job-lifecycle.mjs exists"),
     result(jobs.includes("withJobLock") && jobs.includes("claimQueuedJob") && jobs.includes("claimReservedJob"), "atomic-job-claim-lock", "direct and reserved claims share locked path"),
@@ -498,6 +500,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(companion.includes("makeProgressLineBuffer"), "stderr-line-buffering", "split stderr lines are buffered"),
     result(backend.includes("function maybeWriteSdkProgress(event, options)") && backend.includes("formatProgressEvent") && !backend.includes("event.phase"), "sdk-progress-hook-point", "SDK progress uses real event fields"),
     result(companion.includes("process.kill(-child.pid") && companion.includes("stopChildWithEscalation") && companion.includes("SIGTERM") && companion.includes("SIGINT"), "signal-child-group-cleanup", "child group cleanup is wired"),
+    result(workerSignalHandlerIndex >= 0 && workerSpawnIndex >= 0 && workerSignalHandlerIndex < workerSpawnIndex && companion.includes("if (stopRequested)") && companion.includes('stopChildWithEscalation("SIGTERM")'), "worker-signal-handler-before-child-spawn", "worker signal handler is installed before spawning the supervised child"),
     result(processText.includes("captureProcessGroupIdentity") && processText.includes("missing saved process identity") && companion.includes("Child process group identity could not be validated") && processText.includes("commandHash") && processText.includes("processIdentityCommandMatches"), "child-process-identity-required", "child groups require stable saved private identity before signaling"),
     result(companion.includes("function stopUnvalidatedChild") && companion.includes('stopUnvalidatedChild("SIGKILL")') && companion.includes("Child process group identity could not be validated"), "unvalidated-child-no-negative-pgid", "identity validation failure does not signal an unvalidated process group"),
     result(processText.includes("current === expected") && !processText.includes("expected.includes(current)") && !processText.includes("current.includes(expected)"), "process-identity-no-prefix-match", "process identity validation does not accept prefix/subset command matches"),

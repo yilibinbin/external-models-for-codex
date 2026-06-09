@@ -3476,6 +3476,8 @@ function runStoredJobCommand(job, options = {}) {
     let hardTimedOutAt = 0;
     let childProcessGroupIdentity = null;
     let killTimer = null;
+    let heartbeat = null;
+    let timeout = null;
     let child;
     let childExitedBeforeIdentity = false;
     const progressLines = makeProgressLineBuffer((line) => {
@@ -3544,7 +3546,7 @@ function runStoredJobCommand(job, options = {}) {
       }
     }
 
-    function cleanup(heartbeat, timeout, signalHandler, options = {}) {
+    function cleanup(options = {}) {
       clearInterval(heartbeat);
       clearTimeout(timeout);
       if (!options.keepKillTimer) {
@@ -3562,6 +3564,11 @@ function runStoredJobCommand(job, options = {}) {
       }
     }
 
+    const signalHandler = () => stopChildWithEscalation("SIGTERM");
+
+    process.once("SIGTERM", signalHandler);
+    process.once("SIGINT", signalHandler);
+
     child = spawn(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
       cwd: job.cwd || process.cwd(),
       env: {
@@ -3571,6 +3578,9 @@ function runStoredJobCommand(job, options = {}) {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
+    if (stopRequested) {
+      stopChildWithEscalation("SIGTERM");
+    }
 
     child.stdout?.on("data", (chunk) => stdoutOutput.push(chunk));
     child.stderr?.on("data", (chunk) => {
@@ -3594,6 +3604,7 @@ function runStoredJobCommand(job, options = {}) {
           stderr: "",
           error: "Child process group identity could not be validated after spawn; refusing to supervise an unsafe signal target."
         });
+        cleanup();
         return;
       }
     }
@@ -3603,7 +3614,7 @@ function runStoredJobCommand(job, options = {}) {
       childProcessGroupPid: child.pid ?? null,
       childProcessGroupIdentity
     });
-    const heartbeat = setInterval(() => {
+    heartbeat = setInterval(() => {
       recordJobHeartbeat(stateCwd, job.id, {
         phase: "running",
         childPid: child.pid ?? null,
@@ -3612,15 +3623,11 @@ function runStoredJobCommand(job, options = {}) {
       });
     }, heartbeatIntervalMs());
 
-    const timeout = setTimeout(() => {
+    timeout = setTimeout(() => {
       hardTimedOut = true;
       hardTimedOutAt = Date.now();
       stopChildWithEscalation("SIGTERM");
     }, hardMs);
-    const signalHandler = () => stopChildWithEscalation("SIGTERM");
-
-    process.once("SIGTERM", signalHandler);
-    process.once("SIGINT", signalHandler);
 
     child.once("error", (error) => {
       if (settled) {
@@ -3628,7 +3635,7 @@ function runStoredJobCommand(job, options = {}) {
       }
       settled = true;
       progressLines.flush();
-      cleanup(heartbeat, timeout, signalHandler);
+      cleanup();
       resolve({
         ...commandResult(1, error.message || String(error))
       });
@@ -3640,7 +3647,7 @@ function runStoredJobCommand(job, options = {}) {
       settled = true;
       progressLines.flush();
       if (hardTimedOut && signal !== "SIGKILL") {
-        cleanup(heartbeat, timeout, signalHandler, { keepKillTimer: true });
+        cleanup({ keepKillTimer: true });
         clearTimeout(killTimer);
         const remainingKillGraceMs = Math.max(0, (hardTimedOutAt || Date.now()) + killMs - Date.now());
         killTimer = setTimeout(() => {
@@ -3652,7 +3659,7 @@ function runStoredJobCommand(job, options = {}) {
         }, remainingKillGraceMs);
         return;
       }
-      cleanup(heartbeat, timeout, signalHandler);
+      cleanup();
       resolve({
         ...commandResult(hardTimedOut ? 1 : status ?? (signal ? 1 : 0), hardTimedOut
           ? `Child terminated by ${signal ?? "timeout"} after hard timeout.`
