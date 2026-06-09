@@ -25,6 +25,10 @@ export function captureProcessIdentity(pid) {
   return ps(pid);
 }
 
+export function captureProcessGroupIdentity(pid) {
+  return captureProcessIdentity(pid);
+}
+
 function commandTokens(command) {
   return String(command ?? "")
     .split(/\s+/)

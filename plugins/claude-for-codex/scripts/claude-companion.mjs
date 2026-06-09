@@ -9,16 +9,28 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
   cancelJob,
+  claimJobForRun,
   claimReservedJob,
   createJob,
+  enrichJobLifecycle,
   finishJob,
   listJobs,
   markJobRunning,
+  recordJobHeartbeat,
+  recordJobProgress,
   readJob,
   reserveJob,
   resultForJob,
   updateJob
 } from "./lib/jobs.mjs";
+import {
+  DEFAULT_BACKGROUND_WAIT_MS,
+  HARD_JOB_TIMEOUT_MS,
+  JOB_HEARTBEAT_INTERVAL_MS,
+  MAX_BACKGROUND_WAIT_MS,
+  parsePositiveInteger
+} from "./lib/job-lifecycle.mjs";
+import { progressEventsFromLines } from "./lib/progress.mjs";
 import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib/mailbox.mjs";
 import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
@@ -99,6 +111,7 @@ import {
   turnBaselineFileForCwd
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
+import { captureProcessGroupIdentity } from "./lib/process.mjs";
 
 const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
@@ -508,6 +521,11 @@ function parseArgs(argv, options = {}) {
       parsed.background = true;
     } else if (arg === "--wait") {
       parsed.wait = true;
+    } else if (arg === "--wait-timeout-ms") {
+      parsed.waitTimeoutMs = Number(readOptionValue(tokens, index, arg));
+      index += 1;
+    } else if (arg.startsWith("--wait-timeout-ms=")) {
+      parsed.waitTimeoutMs = Number(arg.slice("--wait-timeout-ms=".length));
     } else if (arg === "--json" || arg === "--json-output") {
       parsed.jsonOutput = true;
     } else if (arg === "--write") {
@@ -534,6 +552,9 @@ function parseArgs(argv, options = {}) {
   }
   if (parsed.parallel && parsed.sequential) {
     throw new Error("Choose either --parallel or --sequential.");
+  }
+  if (parsed.waitTimeoutMs !== undefined && (!Number.isFinite(parsed.waitTimeoutMs) || parsed.waitTimeoutMs < 0)) {
+    throw new Error("--wait-timeout-ms must be a non-negative number.");
   }
   return parsed;
 }
@@ -1174,7 +1195,23 @@ async function claudePrintAsync(prompt, options) {
 }
 
 function stripBackgroundArgs(rawArgs) {
-  return normalizeArgv(rawArgs).filter((arg) => arg !== "--background" && arg !== "--wait");
+  const tokens = normalizeArgv(rawArgs);
+  const output = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--background" || token === "--wait") {
+      continue;
+    }
+    if (token === "--wait-timeout-ms") {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--wait-timeout-ms=")) {
+      continue;
+    }
+    output.push(token);
+  }
+  return output;
 }
 
 function parseJobIdArg(rawArgs) {
@@ -1198,6 +1235,47 @@ function parseJobIdArg(rawArgs) {
 
 function terminalJobStatus(status) {
   return ["succeeded", "failed", "cancelled", "cancel_failed"].includes(status);
+}
+
+function heartbeatIntervalMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS, JOB_HEARTBEAT_INTERVAL_MS, {
+    min: 50,
+    max: 60_000
+  });
+}
+
+function hardJobTimeoutMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS, HARD_JOB_TIMEOUT_MS, {
+    min: 1_000,
+    max: 24 * 60 * 60 * 1000
+  });
+}
+
+function killGraceMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_KILL_GRACE_MS, 5_000, {
+    min: 50,
+    max: 60_000
+  });
+}
+
+function makeProgressLineBuffer(onLine) {
+  let buffer = "";
+  return {
+    push(chunk) {
+      buffer += Buffer.from(chunk).toString("utf8");
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        onLine(line);
+      }
+    },
+    flush() {
+      if (buffer) {
+        onLine(buffer);
+        buffer = "";
+      }
+    }
+  };
 }
 
 function startBackgroundJob(command, rawArgs) {
@@ -1227,20 +1305,46 @@ function startBackgroundJob(command, rawArgs) {
   return readJob(cwd, job.id) ?? job;
 }
 
-function waitForJob(jobId) {
+function elapsedMs(job) {
+  const start = Date.parse(job.startedAt ?? job.createdAt ?? "");
+  if (!Number.isFinite(start)) {
+    return null;
+  }
+  const terminal = terminalJobStatus(job.status);
+  const end = terminal
+    ? Date.parse(job.finishedAt ?? job.updatedAt ?? "")
+    : Date.now();
+  return Math.max(0, (Number.isFinite(end) ? end : Date.now()) - start);
+}
+
+function progressPreview(job) {
+  return [job.lastProgressMessage].filter((value) => typeof value === "string" && value.trim()).slice(-4);
+}
+
+function enrichCompanionJob(job) {
+  return { ...enrichJobLifecycle(job), elapsedMs: elapsedMs(job), progressPreview: progressPreview(job) };
+}
+
+async function waitForJob(jobId, options = {}) {
   const started = Date.now();
-  const timeoutMs = 30 * 60 * 1000;
+  const timeoutMs = parsePositiveInteger(options.timeoutMs, DEFAULT_BACKGROUND_WAIT_MS, {
+    min: 0,
+    max: MAX_BACKGROUND_WAIT_MS
+  });
   while (Date.now() - started < timeoutMs) {
     const job = readJob(process.cwd(), jobId);
     if (job && terminalJobStatus(job.status)) {
-      return job;
+      return { job, waitTimedOut: false };
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  return readJob(process.cwd(), jobId) ?? { id: jobId, status: "unknown" };
+  return {
+    job: readJob(process.cwd(), jobId) ?? { id: jobId, status: "unknown" },
+    waitTimedOut: true
+  };
 }
 
-function maybeStartBackground(command, rawArgs) {
+async function maybeStartBackground(command, rawArgs) {
   let parsed;
   try {
     parsed = validateCommandNativeModeOptions(command, rawArgs);
@@ -1252,11 +1356,16 @@ function maybeStartBackground(command, rawArgs) {
   }
   const job = startBackgroundJob(command, rawArgs);
   if (parsed.wait) {
-    const completed = waitForJob(job.id);
-    process.stdout.write(`${JSON.stringify({ status: completed.status, job: completed }, null, 2)}\n`);
-    process.exit(completed.status === "succeeded" ? 0 : 1);
+    const waited = await waitForJob(job.id, { timeoutMs: parsed.waitTimeoutMs });
+    const stillRunning = waited.waitTimedOut && !terminalJobStatus(waited.job.status);
+    process.stdout.write(`${JSON.stringify({
+      status: stillRunning ? "running" : waited.job.status,
+      waitTimedOut: stillRunning,
+      job: enrichCompanionJob(waited.job)
+    }, null, 2)}\n`);
+    process.exit(waited.job.status === "failed" || waited.job.status === "cancel_failed" ? 1 : 0);
   }
-  process.stdout.write(`${JSON.stringify({ status: "started", job }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ status: "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
   process.exit(0);
 }
 
@@ -2570,7 +2679,7 @@ function renderStructuredRoleReview(results) {
 
 async function runClaudeTask(kind, rawArgs) {
   const startedAt = new Date().toISOString();
-  if (maybeStartBackground(kind, rawArgs)) {
+  if (await maybeStartBackground(kind, rawArgs)) {
     return;
   }
   let args;
@@ -2682,12 +2791,15 @@ async function runClaudeTask(kind, rawArgs) {
     process.stderr.write(`[claude-for-codex rescue] write-mode fingerprint ${rescueBefore} -> ${rescueAfter}\n`);
   }
   recordCommandReport(kind, args, result, startedAt);
+  if (process.env.CLAUDE_FOR_CODEX_JOB_WORKER === "1" && result.stderr) {
+    process.stderr.write(result.stderr);
+  }
   process.stdout.write(result.stdout);
 }
 
 async function runClaudeMultiReview(rawArgs) {
   const startedAt = new Date().toISOString();
-  if (maybeStartBackground("multi-review", rawArgs)) {
+  if (await maybeStartBackground("multi-review", rawArgs)) {
     return;
   }
   let args;
@@ -2966,7 +3078,7 @@ function runCancel(rawArgs) {
   process.exit(payload.status === "cancelled" ? 0 : 1);
 }
 
-function runJobWorker(rawArgs) {
+async function runJobWorker(rawArgs) {
   const jobId = rawArgs[0];
   if (!jobId) {
     process.exit(2);
@@ -2987,31 +3099,21 @@ function runJobWorker(rawArgs) {
     });
     process.exit(2);
   }
-  markJobRunning(process.cwd(), jobId, process.pid);
-  const result = spawnSync(process.execPath, [process.argv[1], job.command, ...(job.args ?? [])], {
-    cwd: job.cwd || process.cwd(),
-    env: {
-      ...process.env,
-      CLAUDE_FOR_CODEX_JOB_WORKER: "1"
-    },
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 30 * 60 * 1000
-  });
+  const claim = claimJobForRun(process.cwd(), jobId, process.pid);
+  if (claim.status !== "claimed") {
+    process.stdout.write(`${JSON.stringify({ status: claim.status, jobId, reason: claim.reason ?? "" }, null, 2)}\n`);
+    process.exit(1);
+  }
+  const result = await runStoredJobCommand(claim.job, { stateCwd: process.cwd() });
   const current = readJob(process.cwd(), jobId);
   if (current?.status === "cancelled") {
     process.exit(0);
   }
-  finishJob(process.cwd(), jobId, {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    error: result.error ? String(result.error.message ?? result.error) : ""
-  });
+  finishJob(process.cwd(), jobId, result);
   process.exit(result.status ?? 1);
 }
 
-function runStoredJobCommand(job) {
+function runStoredJobCommand(job, options = {}) {
   if (!BACKGROUND_CAPABLE_COMMANDS.has(job.command)) {
     return Promise.resolve({
       status: 2,
@@ -3020,28 +3122,39 @@ function runStoredJobCommand(job) {
       error: ""
     });
   }
+  const stateCwd = options.stateCwd ?? process.cwd();
   const foregroundArgs = stripBackgroundArgs(job.args ?? []);
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
-      cwd: job.cwd || process.cwd(),
-      env: {
-        ...process.env,
-        CLAUDE_FOR_CODEX_JOB_WORKER: "1"
-      },
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
+    const hardMs = hardJobTimeoutMs();
+    const killMs = killGraceMs();
     const started = Date.now();
-    const timeout = setTimeout(() => {
-      stopChildGroup("SIGTERM");
-    }, 30 * 60 * 1000);
     const stdoutChunks = [];
     const stderrChunks = [];
     let settled = false;
     let stopRequested = false;
+    let hardTimedOut = false;
+    let childProcessGroupIdentity = null;
+    let killTimer = null;
+    let child;
+    const progressLines = makeProgressLineBuffer((line) => {
+      const parsed = progressEventsFromLines([line]);
+      for (const event of parsed.events) {
+        recordJobProgress(stateCwd, job.id, {
+          phase: event.phase || "running",
+          lastProgressMessage: event.message || "",
+          lastProgressRole: event.role || "",
+          childPid: child?.pid ?? null,
+          childProcessGroupPid: child?.pid ?? null,
+          childProcessGroupIdentity
+        });
+      }
+    });
 
     function stopChildGroup(signal) {
       stopRequested = true;
+      if (!child?.pid) {
+        return;
+      }
       try {
         process.kill(-child.pid, signal);
       } catch {
@@ -3053,23 +3166,81 @@ function runStoredJobCommand(job) {
       }
     }
 
-    function handleWrapperSignal(signal) {
-      stopChildGroup(signal);
+    function cleanup(heartbeat, timeout, signalHandler) {
+      clearInterval(heartbeat);
+      clearTimeout(timeout);
+      clearTimeout(killTimer);
+      process.removeListener("SIGTERM", signalHandler);
+      process.removeListener("SIGINT", signalHandler);
     }
 
-    process.once("SIGTERM", handleWrapperSignal);
-    process.once("SIGINT", handleWrapperSignal);
+    function stopChildWithEscalation(reasonSignal = "SIGTERM") {
+      stopChildGroup(reasonSignal === "SIGKILL" ? "SIGKILL" : "SIGTERM");
+      if (reasonSignal !== "SIGKILL") {
+        clearTimeout(killTimer);
+        killTimer = setTimeout(() => stopChildGroup("SIGKILL"), killMs);
+      }
+    }
+
+    child = spawn(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
+      cwd: job.cwd || process.cwd(),
+      env: {
+        ...process.env,
+        CLAUDE_FOR_CODEX_JOB_WORKER: "1"
+      },
+      detached: true,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    childProcessGroupIdentity = child.pid ? captureProcessGroupIdentity(child.pid) : null;
+    if (child.pid && !childProcessGroupIdentity) {
+      settled = true;
+      stopChildGroup("SIGKILL");
+      resolve({
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: "Child process group identity could not be validated after spawn; refusing to supervise an unsafe signal target."
+      });
+      return;
+    }
+    recordJobProgress(stateCwd, job.id, {
+      phase: "submitted",
+      childPid: child.pid ?? null,
+      childProcessGroupPid: child.pid ?? null,
+      childProcessGroupIdentity
+    });
+    const heartbeat = setInterval(() => {
+      recordJobHeartbeat(stateCwd, job.id, {
+        phase: "running",
+        childPid: child.pid ?? null,
+        childProcessGroupPid: child.pid ?? null,
+        childProcessGroupIdentity
+      });
+    }, heartbeatIntervalMs());
+
+    const timeout = setTimeout(() => {
+      hardTimedOut = true;
+      stopChildWithEscalation("SIGTERM");
+    }, hardMs);
+    const signalHandler = () => stopChildWithEscalation("SIGTERM");
+
+    process.once("SIGTERM", signalHandler);
+    process.once("SIGINT", signalHandler);
 
     child.stdout?.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-    child.stderr?.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
+    child.stderr?.on("data", (chunk) => {
+      const buffer = Buffer.from(chunk);
+      stderrChunks.push(buffer);
+      progressLines.push(buffer);
+    });
     child.once("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
-      process.removeListener("SIGTERM", handleWrapperSignal);
-      process.removeListener("SIGINT", handleWrapperSignal);
+      progressLines.flush();
+      cleanup(heartbeat, timeout, signalHandler);
       resolve({
         status: 1,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
@@ -3082,14 +3253,33 @@ function runStoredJobCommand(job) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
-      process.removeListener("SIGTERM", handleWrapperSignal);
-      process.removeListener("SIGINT", handleWrapperSignal);
+      progressLines.flush();
+      if (hardTimedOut && signal !== "SIGKILL") {
+        clearInterval(heartbeat);
+        clearTimeout(timeout);
+        process.removeListener("SIGTERM", signalHandler);
+        process.removeListener("SIGINT", signalHandler);
+        setTimeout(() => {
+          stopChildGroup("SIGKILL");
+          resolve({
+            status: status ?? 1,
+            stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+            stderr: Buffer.concat(stderrChunks).toString("utf8"),
+            error: `Child terminated by ${signal ?? "SIGTERM"} after hard timeout; SIGKILL sent after grace period.`
+          });
+        }, killMs + 25);
+        return;
+      }
+      cleanup(heartbeat, timeout, signalHandler);
       resolve({
         status: status ?? (signal ? 1 : 0),
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: stopRequested || Date.now() - started >= 30 * 60 * 1000 ? `Child terminated by ${signal ?? "timeout"}.` : ""
+        error: hardTimedOut
+          ? `Child terminated by ${signal ?? "timeout"} after hard timeout.`
+          : stopRequested
+          ? `Child terminated by ${signal ?? "SIGTERM"} after stop request.`
+          : ""
       });
     });
   });
@@ -3120,7 +3310,7 @@ async function runReservedJob(rawArgs) {
     process.exit(1);
   }
 
-  const result = await runStoredJobCommand(claim.job);
+  const result = await runStoredJobCommand(claim.job, { stateCwd: process.cwd() });
   const finished = finishJob(process.cwd(), claim.job.id, result);
   process.stdout.write(`${JSON.stringify({
     status: finished.status,
@@ -3209,7 +3399,7 @@ switch (command) {
     runLeasesCommand(rawArgs);
     break;
   case "__run-job":
-    runJobWorker(rawArgs);
+    await runJobWorker(rawArgs);
     break;
   case "reserve-job":
     try {

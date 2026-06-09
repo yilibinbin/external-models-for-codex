@@ -379,6 +379,222 @@ console.log(JSON.stringify({{ claim, stillLocked }}));
     assert payload["stillLocked"] is True
 
 
+def test_background_worker_heartbeats_during_no_output_child(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "time.sleep(2)\n"
+        "print('NO_OUTPUT_FINISHED')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS"] = "100"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "slow no output"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+    assert started.returncode == 0, started.stderr
+    job_id = json.loads(started.stdout)["job"]["id"]
+    observed = None
+    for _ in range(30):
+        listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+        observed = next(job for job in json.loads(listed.stdout)["jobs"] if job["id"] == job_id)
+        if observed.get("heartbeatSeq", 0) >= 2:
+            break
+        time.sleep(0.1)
+    assert observed["status"] in {"running", "succeeded"}
+    assert observed["heartbeatSeq"] >= 2
+    assert observed["lastHeartbeatAt"]
+
+
+def test_background_worker_line_buffers_split_progress_events(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "sys.stderr.write('[claude-for-codex progress] {\"phase\":\"review')\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(0.1)\n"
+        "sys.stderr.write('ing\",\"message\":\"role started\"}\\n')\n"
+        "sys.stderr.flush()\n"
+        "print('PROGRESS_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "progress"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert started.returncode == 0, started.stderr
+    payload = json.loads(started.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert payload["job"]["lastProgressAt"]
+    assert payload["job"]["phase"] == "succeeded"
+    assert payload["job"]["lastProgressMessage"] == "role started"
+
+
+def test_background_worker_hard_timeout_escalates_to_sigkill(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import signal, sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, lambda signum, frame: None)\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "1000"
+    env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "3000", "timeout"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "failed"
+    assert "timeout" in payload["job"].get("error", "").lower() or "SIGKILL" in payload["job"].get("error", "")
+
+
+def test_foreground_review_still_invokes_claude_after_async_background_refactor(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "foreground-called.txt"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, sys\nif sys.argv[1:] == ['--version']:\n    print('claude fake')\n    raise SystemExit(0)\npathlib.Path({json.dumps(str(marker))}).write_text('called')\nprint('FOREGROUND_OK')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, str(runtime), "review", "foreground check"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert "FOREGROUND_OK" in result.stdout
+
+
+def test_background_wait_timeout_returns_running_job_without_killing_worker(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "finished.txt"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, sys, time\nif sys.argv[1:] == ['--version']:\n    print('claude fake')\n    raise SystemExit(0)\ntime.sleep(1)\npathlib.Path({json.dumps(str(marker))}).write_text('done')\nprint('LATE_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS"] = "100"
+    waited = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "100", "slow"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+    assert waited.returncode == 0, waited.stderr
+    payload = json.loads(waited.stdout)
+    assert payload["status"] == "running"
+    assert payload["waitTimedOut"] is True
+    assert payload["job"]["id"]
+    assert not marker.exists()
+    current = None
+    for _ in range(30):
+        result = subprocess.run([NODE, str(runtime), "result", payload["job"]["id"]], cwd=repo, env=env, capture_output=True, text=True)
+        current = json.loads(result.stdout)["job"]
+        if current["status"] == "succeeded":
+            break
+        time.sleep(0.1)
+    assert marker.exists()
+    assert current["stdout"].strip() == "LATE_DONE"
+
+
+def test_wait_timeout_args_are_not_persisted_or_forwarded_to_child(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    args_file = tmp_path / "args.txt"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, sys\npathlib.Path({json.dumps(str(args_file))}).write_text(' '.join(sys.argv[1:]))\nprint('OK')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms=5000", "strip"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "--wait-timeout-ms" not in " ".join(payload["job"].get("args", []))
+    assert "--wait-timeout-ms" not in args_file.read_text(encoding="utf8")
+
+
+def test_wait_timeout_is_clamped_below_hard_timeout_in_source():
+    lifecycle = (PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs").read_text(encoding="utf8")
+    companion = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    assert "MAX_BACKGROUND_WAIT_MS" in lifecycle
+    assert "MAX_BACKGROUND_WAIT_MS" in companion
+    wait_block = companion[companion.index("async function waitForJob"):companion.index("async function maybeStartBackground")]
+    assert "max: MAX_BACKGROUND_WAIT_MS" in wait_block
+    assert "max: HARD_JOB_TIMEOUT_MS" not in wait_block
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 
