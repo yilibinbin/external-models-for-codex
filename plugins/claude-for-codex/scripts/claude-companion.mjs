@@ -17,7 +17,6 @@ import {
   findActiveJobByIdempotencyKey,
   finishJob,
   listJobs,
-  markJobRunning,
   recordJobHeartbeat,
   recordJobProgress,
   reapLostJobs,
@@ -1670,7 +1669,9 @@ function elapsedMs(job) {
 }
 
 function progressPreview(job) {
-  return [job.lastProgressMessage].filter((value) => typeof value === "string" && value.trim()).slice(-4);
+  return typeof job.lastProgressMessage === "string" && job.lastProgressMessage.trim()
+    ? [job.lastProgressMessage]
+    : [];
 }
 
 function enrichCompanionJob(job) {

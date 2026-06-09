@@ -9546,7 +9546,7 @@ def test_hook_fingerprint_options_clamp_work_under_prompt_hook_timeout():
     script = f"""
 import {{ hookFingerprintOptions }} from {json.dumps(module_uri)};
 const options = hookFingerprintOptions({{
-  CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: "10000",
+  CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: "50",
   CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: "9999999",
   CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES: "999"
 }});

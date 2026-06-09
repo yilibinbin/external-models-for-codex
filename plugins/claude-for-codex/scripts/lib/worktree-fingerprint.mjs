@@ -34,7 +34,7 @@ export function hookFingerprintOptions(env = process.env) {
       CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: String(parsePositiveInteger(
         env.CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS,
         HOOK_GIT_SIGNAL_TIMEOUT_MS,
-        { min: 1, max: HOOK_GIT_SIGNAL_TIMEOUT_MS }
+        { min: 100, max: HOOK_GIT_SIGNAL_TIMEOUT_MS }
       )),
       CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: String(parsePositiveInteger(
         env.CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES,
