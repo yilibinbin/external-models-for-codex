@@ -696,12 +696,17 @@ export function cancelJob(cwd, jobId, env = process.env) {
     }
     if (childTermination.ok && workerTermination.ok) {
       const signalDelivered = Boolean(childTermination.delivered || workerTermination.delivered);
+      const missingStartingChildSupervision = !Number.isInteger(requestedChildGroupPid)
+        && ["starting", "submitted"].includes(String(requested.phase ?? ""));
       if (!signalDelivered) {
         const processMayRemain = !(
           String(workerTermination.reason ?? "").includes("already absent") &&
           String(childTermination.reason ?? "").includes("no child process group")
         );
         return cancelFailure(cwd, jobId, "Running job cancellation did not deliver a signal to a validated worker or child process group.", env, { preserveActive: processMayRemain });
+      }
+      if (missingStartingChildSupervision && workerTermination.delivered) {
+        return cancelFailure(cwd, jobId, "Running job cancellation reached the worker before child supervision metadata was persisted; refusing to report cancelled until reaper/result confirms the child state.", env, { preserveActive: true });
       }
       const updates = {
         status: "cancelled",

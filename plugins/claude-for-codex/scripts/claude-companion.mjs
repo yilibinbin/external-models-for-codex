@@ -1570,6 +1570,9 @@ function reserveBackgroundJob(command, commandArgs, workerCommand) {
       });
     const existing = idempotencyKey ? findActiveJobByIdempotencyKey(cwd, idempotencyKey) : null;
     if (existing) {
+      if (existing.reservationMode !== "host-forwarded" || !Array.isArray(existing.workerCommand)) {
+        return { alreadyRunning: true, job: existing };
+      }
       return { reusedExisting: true, job: existing };
     }
     const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
@@ -1740,6 +1743,19 @@ function handleReserveJob(rawArgs) {
       message: "Claude for Codex already has the maximum number of active background jobs. Use jobs/result/cancel before reserving another."
     };
   }
+  if (reserved?.alreadyRunning) {
+    return {
+      status: "running",
+      reusedExisting: true,
+      job: {
+        id: reserved.job.id,
+        status: reserved.job.status,
+        command: reserved.job.command,
+        args: reserved.job.args ?? []
+      },
+      message: "An active direct background job already covers this request; do not dispatch a forwarding subagent."
+    };
+  }
   const job = reserved.job;
   if (!reserved.reusedExisting) {
     workerCommand.push("--job-id", job.id);
@@ -1749,7 +1765,7 @@ function handleReserveJob(rawArgs) {
     : updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
 
   return {
-    status: reserved.reusedExisting ? "reserved" : "reserved",
+    status: "reserved",
     reusedExisting: Boolean(reserved.reusedExisting),
     job: {
       id: updated.id,

@@ -7496,6 +7496,37 @@ def test_reserve_job_respects_background_capacity_cap(tmp_path):
     assert payload["limit"] == 1
 
 
+def test_reserve_job_does_not_return_worker_command_for_direct_active_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    reserved = subprocess.run([NODE, str(runtime), "reserve-job", "review", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert started.returncode == 0, started.stderr
+    assert reserved.returncode == 0, reserved.stderr
+    started_payload = json.loads(started.stdout)
+    reserved_payload = json.loads(reserved.stdout)
+    assert reserved_payload["status"] == "running"
+    assert reserved_payload["reusedExisting"] is True
+    assert reserved_payload["job"]["id"] == started_payload["job"]["id"]
+    assert "workerCommand" not in reserved_payload
+    assert "do not dispatch" in reserved_payload["message"]
+
+
 def node_exec_path():
     result = subprocess.run(
         [NODE, "-e", "process.stdout.write(process.execPath)"],
