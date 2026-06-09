@@ -469,6 +469,64 @@ console.log(JSON.stringify({{ claim, stillLocked }}));
     assert payload["stillLocked"] is True
 
 
+def test_workspace_lock_does_not_remove_live_owner_after_stale_mtime(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env_json = json.dumps({"CLAUDE_PLUGIN_DATA": str(data), "HOME": str(tmp_path / "home")})
+    holder_script = f"""
+import {{ withWorkspaceJobLock, listJobs }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {env_json};
+const state = listJobs(cwd, env);
+console.log(JSON.stringify({{ stateDir: state.stateDir }}));
+const block = new Int32Array(new SharedArrayBuffer(4));
+withWorkspaceJobLock(cwd, env, () => {{
+  console.log("LOCK_HELD");
+  Atomics.wait(block, 0, 0, 5000);
+  return {{ status: "released" }};
+}});
+"""
+    holder = subprocess.Popen(
+        [NODE, "--input-type=module", "--eval", holder_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        state_line = holder.stdout.readline().strip()
+        assert state_line, holder.stderr.read()
+        state_dir = pathlib.Path(json.loads(state_line)["stateDir"])
+        assert holder.stdout.readline().strip() == "LOCK_HELD"
+        lock_file = state_dir / "jobs" / ".workspace.lock.lock"
+        old = time.time() - 120
+        os.utime(lock_file, (old, old))
+
+        contender_script = f"""
+import {{ withWorkspaceJobLock }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {env_json};
+const result = withWorkspaceJobLock(cwd, env, () => ({{ status: "entered" }}));
+console.log(JSON.stringify(result));
+"""
+        contender = subprocess.run(
+            [NODE, "--input-type=module", "--eval", contender_script],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert contender.returncode == 0, contender.stderr
+        payload = json.loads(contender.stdout)
+        assert payload["status"] == "workspace_locked"
+        assert lock_file.exists()
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=5)
+
+
 def test_background_worker_heartbeats_during_no_output_child(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -991,6 +1049,37 @@ def test_recommend_execution_mode_routes_large_reviews_to_background(tmp_path):
     assert payload["recommendation"] == "background"
     assert payload["changedLineEstimate"] >= 50
     assert payload["reviewable"] is True
+
+
+def test_recommend_execution_mode_routes_committed_base_diff_to_background(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "base.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "base-ref"], cwd=repo, check=True)
+    for index in range(3):
+        (repo / f"changed-{index}.txt").write_text(f"changed {index}\n", encoding="utf8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "feature"], cwd=repo, check=True, capture_output=True, text=True)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "recommend-execution-mode", "--json", "review", "--base", "base-ref"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["reviewable"] is True
+    assert payload["fileCountEstimate"] >= 3
+    assert payload["git"]["base"] == "base-ref"
+    assert payload["git"]["baseDiffAvailable"] is True
 
 
 def test_recommend_execution_mode_distinguishes_git_timeout_from_non_repo(tmp_path):

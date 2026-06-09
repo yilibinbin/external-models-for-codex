@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { createHash } from "node:crypto";
 import path from "node:path";
 import {
   captureProcessIdentity,
@@ -100,10 +99,12 @@ function lockOwnerMatches(owner, identity) {
 }
 
 function currentLockOwner() {
-  const command = process.argv.join(" ");
+  const identity = captureProcessIdentity(process.pid);
   return {
     pid: process.pid,
-    commandHash: createHash("sha256").update(command).digest("hex"),
+    ...(identity?.ppid !== undefined ? { ppid: identity.ppid } : {}),
+    ...(identity?.pgid !== undefined ? { pgid: identity.pgid } : {}),
+    ...(identity?.commandHash ? { commandHash: identity.commandHash } : {}),
     executable: path.basename(process.argv[0] || ""),
     entrypoint: process.argv[1] ? path.basename(process.argv[1]) : "",
     createdAt: new Date().toISOString()

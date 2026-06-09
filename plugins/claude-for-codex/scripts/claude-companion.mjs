@@ -1288,6 +1288,42 @@ function gitShort(args, cwd = process.cwd()) {
   return { ...result, timedOut: gitCommandTimedOut(result) };
 }
 
+function recommendModeArgs(rawArgs) {
+  const tokens = normalizeArgv(rawArgs).filter((arg) => arg !== "--json" && arg !== "--json-output");
+  const args = { command: "review", base: "", paths: [] };
+  let commandSeen = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--") {
+      args.paths.push(...tokens.slice(index + 1).filter(Boolean));
+      break;
+    }
+    if (token === "--base") {
+      args.base = readOptionValue(tokens, index, "--base");
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--base=")) {
+      args.base = token.slice("--base=".length);
+      continue;
+    }
+    if (token === "--path") {
+      args.paths.push(readOptionValue(tokens, index, "--path"));
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--path=")) {
+      args.paths.push(token.slice("--path=".length));
+      continue;
+    }
+    if (!commandSeen && BACKGROUND_CAPABLE_COMMANDS.has(token)) {
+      args.command = token;
+      commandSeen = true;
+    }
+  }
+  return args;
+}
+
 function recommendExecutionMode(cwd = process.cwd(), options = {}) {
   const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd);
   if (inside.timedOut) {
@@ -1312,10 +1348,15 @@ function recommendExecutionMode(cwd = process.cwd(), options = {}) {
       git: { repository: false }
     };
   }
-  const status = gitShort(["status", "--short", "--untracked-files=all"], cwd);
-  const staged = gitShort(["diff", "--shortstat", "--cached"], cwd);
-  const unstaged = gitShort(["diff", "--shortstat"], cwd);
-  if (status.timedOut || staged.timedOut || unstaged.timedOut) {
+  const paths = Array.isArray(options.paths) ? options.paths.filter(Boolean) : [];
+  const pathArgs = paths.length ? ["--", ...paths] : [];
+  const base = typeof options.base === "string" && options.base.trim() ? options.base.trim() : "";
+  const status = gitShort(["status", "--short", "--untracked-files=all", ...pathArgs], cwd);
+  const staged = gitShort(["diff", "--shortstat", "--cached", ...pathArgs], cwd);
+  const unstaged = gitShort(["diff", "--shortstat", ...pathArgs], cwd);
+  const branch = base ? gitShort(["diff", "--shortstat", `${base}...HEAD`, ...pathArgs], cwd) : null;
+  const branchNames = base ? gitShort(["diff", "--name-only", `${base}...HEAD`, ...pathArgs], cwd) : null;
+  if (status.timedOut || staged.timedOut || unstaged.timedOut || branch?.timedOut || branchNames?.timedOut) {
     return {
       recommendation: "background",
       reason: "git signal collection timed out; use a tracked background review or retry status later",
@@ -1326,13 +1367,29 @@ function recommendExecutionMode(cwd = process.cwd(), options = {}) {
       git: { repository: true, timedOut: true }
     };
   }
+  if ((branch && branch.status !== 0) || (branchNames && branchNames.status !== 0)) {
+    return {
+      recommendation: "background",
+      reason: `base diff unavailable for "${base}"; use tracked background review or check the base ref`,
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: true, base, baseDiffAvailable: false }
+    };
+  }
   const statusLines = status.stdout.trim() ? status.stdout.trim().split(/\r?\n/) : [];
   const hasUntracked = statusLines.some((line) => line.startsWith("??"));
+  const branchFileLines = branchNames?.stdout.trim() ? branchNames.stdout.trim().split(/\r?\n/).filter(Boolean) : [];
   const fileCountEstimate = Math.max(
     statusLines.length,
-    shortstatFileCount(staged.stdout) + shortstatFileCount(unstaged.stdout)
+    shortstatFileCount(staged.stdout) + shortstatFileCount(unstaged.stdout),
+    shortstatFileCount(branch?.stdout ?? ""),
+    branchFileLines.length
   );
-  const changedLineEstimate = shortstatChangedLines(staged.stdout) + shortstatChangedLines(unstaged.stdout);
+  const changedLineEstimate = shortstatChangedLines(staged.stdout)
+    + shortstatChangedLines(unstaged.stdout)
+    + shortstatChangedLines(branch?.stdout ?? "");
   const command = options.command ?? "review";
   const forcedBackground = command === "multi-review" || command === "adversarial-review" || command === "rescue";
   const broad = hasUntracked || fileCountEstimate > 2 || changedLineEstimate > 50;
@@ -1344,7 +1401,7 @@ function recommendExecutionMode(cwd = process.cwd(), options = {}) {
     fileCountEstimate,
     changedLineEstimate,
     hasUntracked,
-    git: { repository: true }
+    git: { repository: true, ...(base ? { base, baseDiffAvailable: true } : {}) }
   };
 }
 
@@ -3456,9 +3513,7 @@ function printResult(rawArgs) {
 }
 
 function runRecommendExecutionMode(rawArgs) {
-  const tokens = normalizeArgv(rawArgs).filter((arg) => arg !== "--json" && arg !== "--json-output");
-  const command = tokens[0] && BACKGROUND_CAPABLE_COMMANDS.has(tokens[0]) ? tokens[0] : "review";
-  process.stdout.write(`${JSON.stringify(recommendExecutionMode(process.cwd(), { command }), null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify(recommendExecutionMode(process.cwd(), recommendModeArgs(rawArgs)), null, 2)}\n`);
 }
 
 function runCancel(rawArgs) {
