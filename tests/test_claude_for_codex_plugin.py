@@ -1318,6 +1318,32 @@ def test_background_idempotency_does_not_reuse_when_fingerprint_times_out(tmp_pa
     assert second_payload["job"].get("reusedExisting") is not True
 
 
+def test_duplicate_background_retry_reuses_existing_job_in_non_git_workspace(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "100", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is True
+    assert second_payload["job"]["fingerprintTimedOut"] is False
+
+
 def test_background_idempotency_does_not_reuse_when_git_returns_nonzero(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -3653,13 +3679,14 @@ def test_no_public_review_size_command_ships_without_consumer():
 def test_runtime_applies_pathspec_to_git_context_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
+    assert "const runGit = options.gitRunner ?? git;" in text
     command_patterns = {
-        "status": r'git\(\[\s*"status",\s*"--short",\s*"--untracked-files=all",\s*\.\.\.pathArgs\s*\]\)',
-        "staged stat": r'git\(\[\s*"diff",\s*"--cached",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
-        "unstaged stat": r'git\(\[\s*"diff",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
-        "branch stat": r'git\(\[\s*"diff",\s*"--stat",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
-        "branch names": r'git\(\[\s*"diff",\s*"--name-only",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
-        "head names": r'git\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)',
+        "status": r'runGit\(\[\s*"status",\s*"--short",\s*"--untracked-files=all",\s*\.\.\.pathArgs\s*\]\)',
+        "staged stat": r'runGit\(\[\s*"diff",\s*"--cached",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
+        "unstaged stat": r'runGit\(\[\s*"diff",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
+        "branch stat": r'runGit\(\[\s*"diff",\s*"--stat",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
+        "branch names": r'runGit\(\[\s*"diff",\s*"--name-only",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
+        "head names": r'runGit\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)',
     }
     for label, pattern in command_patterns.items():
         assert re.search(pattern, text), label
@@ -3876,10 +3903,10 @@ def test_runtime_avoids_head_name_only_diff_without_head():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
     assert re.search(
-        r'git\(\[\s*"rev-parse",\s*"--verify",\s*"HEAD"\s*\]\)',
+        r'runGit\(\[\s*"rev-parse",\s*"--verify",\s*"HEAD"\s*\]\)',
         text,
     )
-    assert re.search(r'git\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)', text)
+    assert re.search(r'runGit\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)', text)
     assert re.search(r'includeHeadNameOnly\s*&&\s*status\s*\?\s*changedFilesFromStatus\(status\)', text)
     assert "function changedFilesFromStatus" in text
     assert "changed files from git status fallback" in text

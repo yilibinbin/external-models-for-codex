@@ -436,12 +436,12 @@ function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
   };
 }
 
-function hasHead() {
-  return git(["rev-parse", "--verify", "HEAD"]).status === 0;
+function hasHead(runGit = git) {
+  return runGit(["rev-parse", "--verify", "HEAD"]).status === 0;
 }
 
-function hasBaseRef(base) {
-  return git(["rev-parse", "--verify", `${base}^{commit}`]).status === 0;
+function hasBaseRef(base, runGit = git) {
+  return runGit(["rev-parse", "--verify", `${base}^{commit}`]).status === 0;
 }
 
 function parseArgs(argv, options = {}) {
@@ -887,13 +887,14 @@ function safeResult(stdout) {
 }
 
 function collectGitContext(options) {
+  const runGit = options.gitRunner ?? git;
   const scope = options.scope ?? "auto";
   const base = options.base;
   const paths = options.paths?.length ? options.paths : options.path ? [options.path] : [];
   const pathLabel = paths.join(" ");
   const pathArgs = paths.length ? ["--", ...paths] : [];
-  const headExists = hasHead();
-  const baseExists = Boolean(base) && headExists && hasBaseRef(base);
+  const headExists = hasHead(runGit);
+  const baseExists = Boolean(base) && headExists && hasBaseRef(base, runGit);
   const baseEffective = !base
     ? ""
     : !headExists
@@ -912,24 +913,24 @@ function collectGitContext(options) {
   const includeBaseBranch = (scope === "auto" || scope === "branch") && Boolean(base);
   const includeHeadNameOnly = scope === "auto" && !base;
 
-  const status = includeWorkingTree ? git(["status", "--short", "--untracked-files=all", ...pathArgs]) : null;
-  const stagedStat = includeWorkingTree ? git(["diff", "--cached", "--stat", ...pathArgs]) : null;
-  const stagedDiff = includeWorkingTree ? git(["diff", "--cached", ...pathArgs]) : null;
-  const unstagedStat = includeWorkingTree ? git(["diff", "--stat", ...pathArgs]) : null;
-  const unstagedDiff = includeWorkingTree ? git(["diff", ...pathArgs]) : null;
+  const status = includeWorkingTree ? runGit(["status", "--short", "--untracked-files=all", ...pathArgs]) : null;
+  const stagedStat = includeWorkingTree ? runGit(["diff", "--cached", "--stat", ...pathArgs]) : null;
+  const stagedDiff = includeWorkingTree ? runGit(["diff", "--cached", ...pathArgs]) : null;
+  const unstagedStat = includeWorkingTree ? runGit(["diff", "--stat", ...pathArgs]) : null;
+  const unstagedDiff = includeWorkingTree ? runGit(["diff", ...pathArgs]) : null;
   const branchStat = includeBaseBranch
     ? baseExists
-      ? git(["diff", "--stat", `${base}...HEAD`, ...pathArgs])
+      ? runGit(["diff", "--stat", `${base}...HEAD`, ...pathArgs])
       : safeResult(`(${baseIssue}; branch diff skipped)`)
     : null;
   const branchNameOnly = includeBaseBranch
     ? baseExists
-      ? git(["diff", "--name-only", `${base}...HEAD`, ...pathArgs])
+      ? runGit(["diff", "--name-only", `${base}...HEAD`, ...pathArgs])
       : includeWorkingTree && status
         ? changedFilesFromStatus(status)
         : safeResult(`(${baseIssue}; branch name-only skipped)`)
     : includeHeadNameOnly && headExists
-      ? git(["diff", "--name-only", "HEAD", ...pathArgs])
+      ? runGit(["diff", "--name-only", "HEAD", ...pathArgs])
       : includeHeadNameOnly && status
         ? changedFilesFromStatus(status)
         : null;
@@ -2791,6 +2792,10 @@ async function runReviewGate(rawArgs) {
     return;
   }
   args.scope = "working-tree";
+  const gateQualityRequest = args.quality ?? process.env[QUALITY_ENV];
+  if (gateQualityRequest === undefined || String(gateQualityRequest).trim().toLowerCase() === "auto") {
+    args.quality = "standard";
+  }
   try {
     applyCommandQualityPolicy("review-gate", args);
   } catch (error) {
@@ -2825,7 +2830,10 @@ async function runReviewGate(rawArgs) {
     warnGate(`semantic context unavailable (${args.semantic.report.semanticFailureReason}); running degraded gate`);
   }
 
-  const gitContext = collectGitContext(args);
+  const gitContext = collectGitContext({
+    ...args,
+    gitRunner: (gitArgs) => gitShort(gitArgs, cwd)
+  });
   const blocks = [];
   for (const role of roles) {
     const prompt = reviewGateRolePrompt(role, args, gitContext);

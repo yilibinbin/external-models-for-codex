@@ -52,10 +52,27 @@ function isUnbornHead(args, result) {
     && stderr.includes("unknown revision or path not in the working tree");
 }
 
+function isNotGitRepository(result) {
+  const stderr = String(result?.stderr ?? "");
+  return result?.status !== 0 && stderr.includes("not a git repository");
+}
+
 function workingTreeFingerprintPart(cwd, args, options = {}) {
   const result = runGit(cwd, args, options);
   if (gitCommandTimedOut(result)) {
     return { text: `ETIMEDOUT ${args.join(" ")}`, timedOut: true };
+  }
+  if (isNotGitRepository(result)) {
+    return {
+      text: [
+        `NON_GIT_REPOSITORY ${args.join(" ")}`,
+        `status=${result.status}`,
+        result.stderr
+      ].join("\n"),
+      stdout: "",
+      timedOut: false,
+      nonGit: true
+    };
   }
   if (isUnbornHead(args, result)) {
     return {
@@ -126,6 +143,17 @@ function untrackedFilesFingerprintPart(cwd, options = {}) {
   if (gitCommandTimedOut(result)) {
     return { text: "ETIMEDOUT ls-files --others --exclude-standard -z", stdout: "", timedOut: true };
   }
+  if (isNotGitRepository(result)) {
+    return {
+      text: [
+        "NON_GIT_REPOSITORY ls-files --others --exclude-standard -z",
+        `status=${result.status}`,
+        result.stderr
+      ].join("\n"),
+      stdout: "",
+      timedOut: false
+    };
+  }
   if (result.errorCode || result.status !== 0) {
     return {
       text: [
@@ -177,6 +205,14 @@ function hashStdoutParts(parts) {
 export function workingTreeFingerprintDetails(cwd = process.cwd(), args = [], options = {}) {
   const baseRef = optionValue(args, "--base");
   const headPart = workingTreeFingerprintPart(cwd, ["rev-parse", "HEAD"], options);
+  if (headPart.nonGit) {
+    return {
+      hash: hashParts([headPart]),
+      legacyHashes: [],
+      timedOut: false,
+      nonGit: true
+    };
+  }
   const basePart = baseRef ? workingTreeFingerprintPart(cwd, ["rev-parse", baseRef], options) : null;
   const statusPart = workingTreeFingerprintPart(cwd, ["status", "--short", "--untracked-files=all"], options);
   const stagedDiffPart = workingTreeFingerprintPart(cwd, ["diff", "--cached"], options);
