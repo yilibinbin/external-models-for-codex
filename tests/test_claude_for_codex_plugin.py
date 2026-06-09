@@ -7395,7 +7395,9 @@ def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path)
     assert json.loads(cancel.stdout)["status"] == "not_found"
 
 
-def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
+def test_result_marks_terminal_viewed_but_preserves_unread_running_jobs(tmp_path):
+    import datetime
+
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
@@ -7414,16 +7416,16 @@ def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
     assert jobs.returncode == 0, jobs.stderr
     state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
     jobs_dir = state_dir / "jobs"
-    job_file = jobs_dir / "job-1.json"
-    job_file.write_text(json.dumps({
-        "id": "job-1",
-        "status": "queued",
+    terminal_job_file = jobs_dir / "job-terminal.json"
+    terminal_job_file.write_text(json.dumps({
+        "id": "job-terminal",
+        "status": "succeeded",
         "createdAt": "2026-05-30T00:00:00.000Z",
         "result": "ready"
     }))
 
     result = subprocess.run(
-        [NODE, str(runtime), "result", "job-1"],
+        [NODE, str(runtime), "result", "job-terminal"],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -7433,10 +7435,96 @@ def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
     result_payload = json.loads(result.stdout)
     assert result_payload["status"] == "ok"
     assert result_payload["job"]["resultViewedAt"]
-    assert json.loads(job_file.read_text())["resultViewedAt"]
+    assert json.loads(terminal_job_file.read_text())["resultViewedAt"]
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    running_job_file = jobs_dir / "job-running.json"
+    running_job_file.write_text(json.dumps({
+        "id": "job-running",
+        "status": "running",
+        "createdAt": now,
+        "startedAt": now,
+        "lastHeartbeatAt": now
+    }))
+
+    running_result = subprocess.run(
+        [NODE, str(runtime), "result", "job-running"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert running_result.returncode == 0, running_result.stderr
+    running_payload = json.loads(running_result.stdout)
+    assert running_payload["status"] == "ok"
+    assert "resultViewedAt" not in running_payload["job"]
+    assert "resultViewedAt" not in json.loads(running_job_file.read_text())
+
+    finished_running_job = json.loads(running_job_file.read_text())
+    finished_running_job.update({
+        "status": "succeeded",
+        "finishedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "stdout": "done"
+    })
+    running_job_file.write_text(json.dumps(finished_running_job))
+    prompt_hook = PLUGIN / "hooks" / "unread-result.mjs"
+    prompted = subprocess.run(
+        [NODE, str(prompt_hook)],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+    assert prompted.returncode == 0
+    assert "job-running (succeeded)" in prompted.stderr
+
+
+def test_cancel_persists_queued_job_state_after_result_peek(tmp_path):
+    import datetime
+
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    jobs_dir = state_dir / "jobs"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    job_file = jobs_dir / "job-queued.json"
+    job_file.write_text(json.dumps({
+        "id": "job-queued",
+        "status": "queued",
+        "createdAt": now,
+        "lastHeartbeatAt": now
+    }))
+
+    result = subprocess.run(
+        [NODE, str(runtime), "result", "job-queued"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    result_payload = json.loads(result.stdout)
+    assert result_payload["status"] == "ok"
+    assert "resultViewedAt" not in result_payload["job"]
+    assert "resultViewedAt" not in json.loads(job_file.read_text())
 
     cancel = subprocess.run(
-        [NODE, str(runtime), "cancel", "job-1"],
+        [NODE, str(runtime), "cancel", "job-queued"],
         cwd=repo,
         env=env,
         capture_output=True,

@@ -562,6 +562,9 @@ export function resultForJob(cwd, jobId, env = process.env) {
   if (job.status === "corrupt") {
     return { status: "corrupt", jobId, job };
   }
+  if (!isTerminalJobStatus(job.status)) {
+    return { status: "ok", job };
+  }
   const updated = updateJob(cwd, jobId, {
     resultViewedAt: new Date().toISOString()
   }, env) ?? job;
