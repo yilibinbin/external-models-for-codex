@@ -1335,6 +1335,7 @@ console.log(JSON.stringify(details));
     assert result.returncode == 0, result.stderr
     details = json.loads(result.stdout)
     assert details["timedOut"] is True
+    assert details["budgetExceeded"] is True
     assert details["hash"]
 
 
@@ -7645,6 +7646,56 @@ def test_result_marks_terminal_viewed_but_preserves_unread_running_jobs(tmp_path
     assert "job-running (succeeded)" in prompted.stderr
 
 
+def test_result_and_cancel_accept_job_id_option_form(tmp_path):
+    import datetime
+
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    jobs_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"]) / "jobs"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    job_file = jobs_dir / "job-option.json"
+    job_file.write_text(json.dumps({
+        "id": "job-option",
+        "status": "queued",
+        "createdAt": now,
+        "lastHeartbeatAt": now
+    }))
+
+    result = subprocess.run(
+        [NODE, str(runtime), "result", "--json", "--job-id", "job-option"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["job"]["id"] == "job-option"
+
+    cancel = subprocess.run(
+        [NODE, str(runtime), "cancel", "--json", "--job-id", "job-option"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert cancel.returncode == 0, cancel.stderr
+    assert json.loads(cancel.stdout)["status"] == "cancelled"
+
+
 def test_cancel_persists_queued_job_state_after_result_peek(tmp_path):
     import datetime
 
@@ -8364,6 +8415,36 @@ def test_subagent_command_rejects_sdk_subagents_without_sdk_backend(tmp_path):
 
     assert result.returncode == 2
     assert "--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk." in result.stderr
+
+
+def test_reserve_job_rejects_sdk_subagents_without_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND")
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "multi-review", "--agent-team", "sdk-subagents"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk." in result.stderr
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    assert json.loads(jobs.stdout)["jobs"] == []
 
 
 def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_path):
@@ -9809,6 +9890,46 @@ os.execv({json.dumps(real_git)}, ["git", *args])
     assert result.stdout == ""
     assert "git status timed out; allowing stop" in result.stderr
     assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_untracked_budget_exceeded_still_runs_review_without_cache(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    (repo / "large-untracked.txt").write_text("12345\n", encoding="utf8")
+    env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] = "4"
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+
+    first = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == ""
+    assert second.stdout == ""
+    assert "fingerprint budget exceeded; running review without cached gate decision" in first.stderr
+    assert "fingerprint budget exceeded; running review without cached gate decision" in second.stderr
+    assert len(list(capture_dir.glob("prompt-*.txt"))) == 10
 
 
 def test_review_gate_all_allow_exits_without_block(tmp_path):

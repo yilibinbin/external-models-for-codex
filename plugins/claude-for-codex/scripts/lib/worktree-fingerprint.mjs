@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { gitCommandTimedOut } from "./git-timeout.mjs";
 
 const MAX_WORKTREE_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_UNTRACKED_FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -64,10 +65,6 @@ function runGit(cwd, args, options = {}) {
     error: result.error ? String(result.error.message ?? result.error) : "",
     errorCode: result.error?.code ? String(result.error.code) : ""
   };
-}
-
-function gitCommandTimedOut(result) {
-  return String(result?.errorCode ?? "") === "ETIMEDOUT";
 }
 
 function isUnbornHead(args, result) {
@@ -308,7 +305,8 @@ export function workingTreeFingerprintDetails(cwd = process.cwd(), args = [], op
       hashParts([statusPart, stagedDiffPart, unstagedDiffPart]),
       hashStdoutParts([statusPart, stagedDiffPart, unstagedDiffPart])
     ],
-    timedOut: parts.some((part) => part.timedOut)
+    timedOut: parts.some((part) => part.timedOut),
+    budgetExceeded: parts.some((part) => part.budgetExceeded)
   };
 }
 

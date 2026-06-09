@@ -118,6 +118,7 @@ import {
   turnBaselineFileForCwd
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
+import { gitCommandTimedOut } from "./lib/git-timeout.mjs";
 import {
   captureProcessGroupIdentity,
   currentProcessPlatform,
@@ -1280,10 +1281,6 @@ function gitSignalTimeoutMs(env = process.env) {
   });
 }
 
-function gitCommandTimedOut(result) {
-  return String(result?.errorCode ?? "") === "ETIMEDOUT";
-}
-
 function gitShort(args, cwd = process.cwd()) {
   const result = run("git", args, { cwd, timeout: gitSignalTimeoutMs() });
   return { ...result, timedOut: gitCommandTimedOut(result) };
@@ -1792,6 +1789,7 @@ function handleReserveJob(rawArgs) {
   const parsed = validateCommandNativeModeOptions(command, commandArgs);
   validateBackendArgs(parsed);
   validateBackendCompatibleOptions(parsed);
+  validateSdkSubagentsBackend(parsed);
   const workerCommand = [
     process.argv0 || process.execPath,
     process.argv[1],
@@ -2758,16 +2756,22 @@ async function runReviewGate(rawArgs) {
   }
   const diffFingerprint = workingTreeFingerprintDetails(cwd, [], hookFingerprintOptions());
   const diffHash = diffFingerprint.hash;
-  if (diffFingerprint.timedOut) {
+  const diffFingerprintUsable = !diffFingerprint.timedOut;
+  if (diffFingerprint.timedOut && !diffFingerprint.budgetExceeded) {
     warnGate("working-tree fingerprint timed out; allowing stop and skipping cached gate decision");
     return;
   }
-  const baseline = readJson(turnBaselineFileForCwd(cwd), null);
-  if (workingTreeFingerprintMatches(baseline?.workingTreeFingerprint, diffFingerprint)) {
-    return;
+  if (diffFingerprint.budgetExceeded) {
+    warnGate("working-tree fingerprint budget exceeded; running review without cached gate decision");
   }
-  if (config.lastAllowedReviewGateDiffHash === diffHash) {
-    return;
+  if (diffFingerprintUsable) {
+    const baseline = readJson(turnBaselineFileForCwd(cwd), null);
+    if (workingTreeFingerprintMatches(baseline?.workingTreeFingerprint, diffFingerprint)) {
+      return;
+    }
+    if (config.lastAllowedReviewGateDiffHash === diffHash) {
+      return;
+    }
   }
 
   let roles;
@@ -2877,7 +2881,9 @@ async function runReviewGate(rawArgs) {
     error: "",
     errorCode: ""
   }, startedAt);
-  setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
+  if (diffFingerprintUsable) {
+    setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
+  }
 }
 
 function parseStructuredReviewResult(stdout, options = {}) {
@@ -3502,8 +3508,10 @@ function printJobs() {
 }
 
 function printResult(rawArgs) {
-  const jobId = rawArgs[0];
-  if (!jobId) {
+  let jobId;
+  try {
+    jobId = parseJobIdArg(rawArgs);
+  } catch (_error) {
     console.error("Usage: claude-companion.mjs result <job-id>");
     process.exit(2);
   }
@@ -3527,8 +3535,10 @@ function runRecommendExecutionMode(rawArgs) {
 }
 
 function runCancel(rawArgs) {
-  const jobId = rawArgs[0];
-  if (!jobId) {
+  let jobId;
+  try {
+    jobId = parseJobIdArg(rawArgs);
+  } catch (_error) {
     console.error("Usage: claude-companion.mjs cancel <job-id>");
     process.exit(2);
   }
