@@ -957,6 +957,41 @@ console.log(job.id);
             child.kill()
 
 
+def test_release_check_knows_long_running_lifecycle_guards():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run([NODE, str(runtime), "release-check", "--ci-simulate"], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    for name in [
+        "job-lifecycle-helper",
+        "atomic-job-claim-lock",
+        "async-background-worker",
+        "short-wait-window",
+        "wait-window-ceiling",
+        "wait-timeout-stripped",
+        "job-idempotency-reuse",
+        "job-result-sanitized",
+        "queued-worker-bootstrap-reaper",
+        "progress-event-parser",
+        "stderr-line-buffering",
+        "sdk-progress-hook-point",
+        "signal-child-group-cleanup",
+        "child-process-identity-required",
+        "hard-timeout-sigkill",
+        "cancel-sigkill-escalation",
+        "owner-aware-file-locks",
+        "process-aware-reaper",
+        "execution-mode-recommendation",
+        "git-timeout-not-nonrepo",
+        "background-concurrency-cap",
+        "review-gate-no-background",
+        "review-gate-no-reserve-job",
+        "review-gate-bounded-fail-open",
+    ]:
+        assert checks[name]["ok"] is True
+
+
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
     return run_fake_claude_review(tmp_path, args, extra_env=extra_env, command="plan")
 
