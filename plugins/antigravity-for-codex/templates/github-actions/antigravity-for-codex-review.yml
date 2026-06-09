@@ -45,6 +45,27 @@ jobs:
           npm install -g @openai/codex
           codex plugin marketplace add yilibinbin/external-models-for-codex --ref {{RELEASE_REF}}
           codex plugin add antigravity-for-codex@external-models-for-codex
+          codex plugin list --json > /tmp/codex-plugins.json
+          ANTIGRAVITY_PLUGIN_ROOT=$(node <<'NODE'
+          const fs = require('fs');
+          const payload = JSON.parse(fs.readFileSync('/tmp/codex-plugins.json', 'utf8'));
+          const installed = Array.isArray(payload.installed) ? payload.installed : [];
+          const plugin = installed.find((item) =>
+            item.pluginId === 'antigravity-for-codex@external-models-for-codex' ||
+            (item.name === 'antigravity-for-codex' && item.marketplaceName === 'external-models-for-codex')
+          );
+          const root = plugin?.source?.path || plugin?.path || '';
+          if (!root) {
+            process.exit(1);
+          }
+          process.stdout.write(root);
+          NODE
+          )
+          if [[ ! -f "$ANTIGRAVITY_PLUGIN_ROOT/scripts/antigravity-companion.mjs" ]]; then
+            echo "Antigravity for Codex runtime was not found at installed plugin root: $ANTIGRAVITY_PLUGIN_ROOT" >&2
+            exit 1
+          fi
+          echo "ANTIGRAVITY_PLUGIN_ROOT=$ANTIGRAVITY_PLUGIN_ROOT" >> "$GITHUB_ENV"
 
       - name: Run Antigravity review
         shell: bash
@@ -57,4 +78,4 @@ jobs:
           args+=("Review this pull request using the prepared PR diff below.
 
 $(cat /tmp/antigravity-pr-diff.txt)")
-          node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs "${args[@]}"
+          node "$ANTIGRAVITY_PLUGIN_ROOT/scripts/antigravity-companion.mjs" "${args[@]}"

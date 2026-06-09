@@ -289,6 +289,15 @@ function readRepoText(relativePath) {
   return fs.readFileSync(path.join(REPO_ROOT_DIR, relativePath), "utf8");
 }
 
+function readDistributionText(relativePath) {
+  const pluginPrefix = `plugins${path.sep}antigravity-for-codex${path.sep}`;
+  const normalized = path.normalize(relativePath);
+  if (normalized.startsWith(pluginPrefix)) {
+    return readText(normalized.slice(pluginPrefix.length));
+  }
+  return readRepoText(relativePath);
+}
+
 function exists(relativePath) {
   return fs.existsSync(path.join(ROOT_DIR, relativePath));
 }
@@ -1109,24 +1118,36 @@ function runReleaseCheck(rawArgs) {
   });
   const repoTextIfExists = (relativePath) => {
     try {
-      return readRepoText(relativePath);
+      return readDistributionText(relativePath);
     } catch {
       return "";
     }
   };
   const githubActionsForbiddenPathDocs = (naturalLanguageRoutingContract.githubActionsInitForbiddenPaths || [])
     .map((relativePath) => ({ relativePath, text: repoTextIfExists(relativePath) }));
-  const githubActionsForbiddenPathsExist = githubActionsForbiddenPathDocs.every(({ text }) => Boolean(text));
+  const pluginPathPrefix = `plugins${path.sep}antigravity-for-codex${path.sep}`;
+  const githubActionsForbiddenPluginPathsExist = githubActionsForbiddenPathDocs
+    .filter(({ relativePath }) => path.normalize(relativePath).startsWith(pluginPathPrefix))
+    .every(({ text }) => Boolean(text));
   const githubActionsInitHidesInternalFlags = githubActionsForbiddenPathDocs
+    .filter(({ text }) => Boolean(text))
     .every(({ text }) => {
       return text
         && (naturalLanguageRoutingContract.githubActionsInitForbiddenSubstrings || []).every((forbidden) => !text.includes(forbidden));
     });
-  const marketplaceInstallDocs = [
-    readRepoText("README.md"),
-    readRepoText(path.join("docs", "README.en.md")),
-    readRepoText(path.join("docs", "README.zh-CN.md"))
+  const marketplaceDocPaths = [
+    "README.md",
+    path.join("docs", "README.en.md"),
+    path.join("docs", "README.zh-CN.md")
   ];
+  const marketplaceDocs = marketplaceDocPaths.map((relativePath) => ({
+    existsInRepo: fs.existsSync(path.join(REPO_ROOT_DIR, relativePath)),
+    text: repoTextIfExists(relativePath)
+  }));
+  const marketplaceDocsExistInRepo = marketplaceDocs.some((doc) => doc.existsInRepo);
+  const marketplaceDocsReleaseRefOk = marketplaceDocs
+    .filter((doc) => doc.existsInRepo)
+    .every((doc) => doc.text.includes(`--ref ${RELEASE_REF}`));
   const hooks = exists("hooks/hooks.json") ? readText("hooks/hooks.json") : "";
   const renderedWorkflow = renderWorkflow(ROOT_DIR, { releaseRef: RELEASE_REF });
   const workflowValidation = validateWorkflow(renderedWorkflow);
@@ -1138,17 +1159,21 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(manifest.version === PLUGIN_VERSION, "manifest-version"),
     releaseCheckResult(versionHelper.includes(`PLUGIN_VERSION = "${manifest.version}"`), "version-helper"),
     releaseCheckResult(readme.includes(`Version: ${PLUGIN_VERSION}`) && changelog.includes(`## ${PLUGIN_VERSION} `), "docs-version-aligned"),
-    releaseCheckResult(marketplaceInstallDocs.every((doc) => doc.includes(`--ref ${RELEASE_REF}`)), "marketplace-docs-release-ref"),
+    releaseCheckResult(
+      !marketplaceDocsExistInRepo || marketplaceDocsReleaseRefOk,
+      "marketplace-docs-release-ref",
+      !marketplaceDocsExistInRepo ? "skipped repo-level docs in installed plugin layout" : ""
+    ),
     releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
     releaseCheckResult(manifestCapabilities.includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
-    releaseCheckResult(githubActionsForbiddenPathsExist, "skills-natural-language-routing-paths"),
+    releaseCheckResult(githubActionsForbiddenPluginPathsExist, "skills-natural-language-routing-paths"),
     releaseCheckResult(
       naturalLanguageRoutingContractLoaded
         && routedSkillsHaveNaturalLanguageRouting
         && routedSkillsHaveExpectedMarkers
         && routedSkillUserExamplesHideInternalFlags
-        && githubActionsForbiddenPathsExist
+        && githubActionsForbiddenPluginPathsExist
         && githubActionsInitHidesInternalFlags,
       "skills-natural-language-routing"
     ),
@@ -1170,6 +1195,8 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(exists("templates/github-actions/antigravity-for-codex-review.yml"), "github-actions-template"),
     releaseCheckResult(renderedWorkflow.includes(RELEASE_REF), "github-actions-release-ref"),
     releaseCheckResult(renderWorkflow(ROOT_DIR).includes(`--ref ${RELEASE_REF}`), "github-actions-default-ref-derived"),
+    releaseCheckResult(workflowValidation.checks.some((check) => check.name === "plugin-root-resolved" && check.ok), "github-actions-plugin-root-resolved"),
+    releaseCheckResult(workflowValidation.checks.some((check) => check.name === "no-repo-relative-runtime-path" && check.ok), "github-actions-no-repo-relative-runtime-path"),
     releaseCheckResult(!printHotPath.includes("antigravityModelCatalog") && !printHotPath.includes("antigravityModelDiagnostics"), "model-catalog-not-in-hot-path"),
     releaseCheckResult(companion.includes("antigravityModelDiagnostics") && companion.includes("modelCatalog"), "model-catalog-diagnostics"),
     releaseCheckResult(jobs.includes("stateDirForCwd") && mailbox.includes("stateDirForCwd") && leases.includes("stateDirForCwd"), "repo-external-state"),

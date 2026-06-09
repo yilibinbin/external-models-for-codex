@@ -1,6 +1,6 @@
 {
   "name": "antigravity-for-codex",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "description": "Use Antigravity CLI from Codex for mature plugin-managed review, planning, reports, jobs, GitHub Actions, release checks, and opt-in Stop gates with explicit Gemini or Claude model selection.",
   "author": {
     "name": "fanghao",

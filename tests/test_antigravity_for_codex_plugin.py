@@ -16,7 +16,7 @@ if not NODE:
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.5.3"
+    assert manifest["version"] == "0.5.4"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
@@ -1558,6 +1558,10 @@ def test_github_actions_init_validate_and_render(tmp_path):
     assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in rendered.stdout
     assert 'git diff --stat "$PR_BASE_SHA" "$PR_HEAD_SHA"' in rendered.stdout
     assert 'git diff "$PR_BASE_SHA" "$PR_HEAD_SHA" -- .' in rendered.stdout
+    assert "codex plugin list --json" in rendered.stdout
+    assert "ANTIGRAVITY_PLUGIN_ROOT=$ANTIGRAVITY_PLUGIN_ROOT" in rendered.stdout
+    assert 'node "$ANTIGRAVITY_PLUGIN_ROOT/scripts/antigravity-companion.mjs"' in rendered.stdout
+    assert "node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs" not in rendered.stdout
     run_blocks = rendered.stdout.split("run: |")
     assert all("${{ github." not in block.split("\n      - name:", 1)[0] for block in run_blocks[1:])
 
@@ -1802,7 +1806,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.5.3\n"
+        "# antigravity-for-codex-v0.5.4\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -1840,7 +1844,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.5.3\n"
+        "          echo --ref antigravity-for-codex-v0.5.4\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
@@ -2054,6 +2058,8 @@ def test_release_check_passes():
     assert "PASS no-print-argv" in result.stdout
     assert "PASS github-actions-template" in result.stdout
     assert "PASS github-actions-release-ref" in result.stdout
+    assert "PASS github-actions-plugin-root-resolved" in result.stdout
+    assert "PASS github-actions-no-repo-relative-runtime-path" in result.stdout
     assert "PASS skill-antigravity-role-packs" in result.stdout
     assert "PASS skill-antigravity-status" in result.stdout
     assert "PASS skill-antigravity-result" in result.stdout
@@ -2068,6 +2074,35 @@ def test_release_check_passes():
     assert "PASS docs-ci-authenticated-agy" in result.stdout
     assert "PASS model-catalog-not-in-hot-path" in result.stdout
     assert "PASS all-mature-commands" in result.stdout
+
+
+def test_release_check_passes_from_installed_plugin_layout(tmp_path):
+    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.5.4"
+    shutil.copytree(PLUGIN, installed)
+    runtime = installed / "scripts" / "antigravity-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=installed, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PASS marketplace-docs-release-ref - skipped repo-level docs in installed plugin layout" in result.stdout
+    assert "PASS skills-natural-language-routing" in result.stdout
+    assert "PASS github-actions-no-repo-relative-runtime-path" in result.stdout
+
+
+def test_release_check_enforces_repo_docs_when_source_layout_has_docs(tmp_path):
+    repo = tmp_path / "repo"
+    plugin = repo / "plugins" / "antigravity-for-codex"
+    shutil.copytree(PLUGIN, plugin)
+    (repo / "docs").mkdir(parents=True)
+    (repo / "README.md").write_text("codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.0.0\n", encoding="utf8")
+    (repo / "docs" / "README.en.md").write_text("missing current release ref\n", encoding="utf8")
+    (repo / "docs" / "README.zh-CN.md").write_text("missing current release ref\n", encoding="utf8")
+    runtime = plugin / "scripts" / "antigravity-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "release-check failed: marketplace-docs-release-ref" in result.stderr
 
 
 def test_version_helper_matches_manifest():
