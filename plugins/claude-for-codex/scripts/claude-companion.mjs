@@ -1552,6 +1552,44 @@ function startBackgroundJob(command, rawArgs) {
   });
 }
 
+function reserveBackgroundJob(command, commandArgs, workerCommand) {
+  const cwd = process.cwd();
+  const session = readJson(currentSessionFileForCwd(cwd), {});
+  const fingerprint = workingTreeFingerprintDetails(cwd, commandArgs);
+  const executionControls = backgroundExecutionControls(process.env);
+  return withWorkspaceJobLock(cwd, process.env, () => {
+    reapLostJobs(cwd);
+    const idempotencyKey = fingerprint.timedOut
+      ? ""
+      : deriveJobIdempotencyKey({
+        command,
+        args: commandArgs,
+        cwd,
+        workspaceFingerprint: fingerprint.hash,
+        executionControls
+      });
+    const existing = idempotencyKey ? findActiveJobByIdempotencyKey(cwd, idempotencyKey) : null;
+    if (existing) {
+      return { reusedExisting: true, job: existing };
+    }
+    const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
+    if (!capacity.ok) {
+      return { capacityBlocked: true, capacity };
+    }
+    const job = reserveJob(cwd, {
+      command,
+      args: commandArgs,
+      cwd,
+      focus: commandArgs.join(" "),
+      sessionId: session?.sessionId || "",
+      submissionState: "starting",
+      idempotencyKey,
+      fingerprintTimedOut: fingerprint.timedOut
+    }, workerCommand);
+    return { job };
+  });
+}
+
 function elapsedMs(job) {
   const start = Date.parse(job.startedAt ?? job.createdAt ?? "");
   if (!Number.isFinite(start)) {
@@ -1687,24 +1725,39 @@ function handleReserveJob(rawArgs) {
     process.argv[1],
     "run-reserved-job"
   ];
-  const job = reserveJob(process.cwd(), {
-    command,
-    args: commandArgs,
-    cwd: process.cwd(),
-    focus: commandArgs.join(" ")
-  }, workerCommand);
-  workerCommand.push("--job-id", job.id);
-  const updated = updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
+  const reserved = reserveBackgroundJob(command, commandArgs, workerCommand);
+  if (reserved?.status === "workspace_locked") {
+    return {
+      status: "workspace_locked",
+      message: reserved.reason ?? "Claude for Codex workspace job state is busy; retry later."
+    };
+  }
+  if (reserved?.capacityBlocked) {
+    return {
+      status: "capacity_blocked",
+      activeCount: reserved.capacity.activeCount,
+      limit: reserved.capacity.limit,
+      message: "Claude for Codex already has the maximum number of active background jobs. Use jobs/result/cancel before reserving another."
+    };
+  }
+  const job = reserved.job;
+  if (!reserved.reusedExisting) {
+    workerCommand.push("--job-id", job.id);
+  }
+  const updated = reserved.reusedExisting
+    ? job
+    : updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
 
   return {
-    status: "reserved",
+    status: reserved.reusedExisting ? "reserved" : "reserved",
+    reusedExisting: Boolean(reserved.reusedExisting),
     job: {
       id: updated.id,
       status: updated.status,
       command: updated.command,
       args: updated.args ?? []
     },
-    workerCommand,
+    workerCommand: updated.workerCommand ?? workerCommand,
     forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once, must not inspect or reinterpret the repository, and must return only the command result."
   };
 }
@@ -3561,7 +3614,28 @@ function runStoredJobCommand(job, options = {}) {
       stopChildGroup(reasonSignal === "SIGKILL" ? "SIGKILL" : "SIGTERM");
       if (reasonSignal !== "SIGKILL") {
         clearTimeout(killTimer);
-        killTimer = setTimeout(() => stopChildGroup("SIGKILL"), killMs);
+        killTimer = setTimeout(() => {
+          const delivered = stopChildGroup("SIGKILL", { requireLiveGroup: hardTimedOut });
+          if (!hardTimedOut) {
+            return;
+          }
+          killTimer = setTimeout(() => {
+            if (settled) {
+              return;
+            }
+            const stillAlive = child?.pid ? (isProcessAlive(child.pid) || processGroupHasLiveMembers(child.pid)) : false;
+            settled = true;
+            progressLines.flush();
+            cleanup();
+            resolve({
+              ...commandResult(1, stillAlive
+                ? "Child process group still alive after hard timeout SIGKILL escalation."
+                : delivered
+                ? "Child process did not emit close after hard timeout SIGKILL escalation."
+                : "Child process group was not live when hard timeout SIGKILL escalation ran.")
+            });
+          }, 1_000);
+        }, killMs);
       }
     }
 
@@ -3795,7 +3869,11 @@ switch (command) {
     break;
   case "reserve-job":
     try {
-      process.stdout.write(`${JSON.stringify(handleReserveJob(rawArgs), null, 2)}\n`);
+      const payload = handleReserveJob(rawArgs);
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      if (payload.status === "capacity_blocked" || payload.status === "workspace_locked") {
+        process.exit(2);
+      }
     } catch (error) {
       console.error(error.message || String(error));
       process.exit(2);

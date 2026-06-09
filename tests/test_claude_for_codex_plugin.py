@@ -1895,6 +1895,7 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "wait-cancelled-nonzero",
         "wait-timeout-stripped",
         "job-idempotency-reuse",
+        "reserve-job-cap-idempotency",
         "job-idempotency-fingerprint-controls",
         "job-idempotency-timeout-no-reuse",
         "review-gate-baseline-shared-fingerprint",
@@ -7435,6 +7436,64 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert str(runtime) in payload["workerCommand"]
     assert "run-reserved-job" in payload["workerCommand"]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+
+
+def test_reserve_job_reuses_existing_reserved_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    first = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert second_payload["reusedExisting"] is True
+    assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["workerCommand"] == first_payload["workerCommand"]
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert len(json.loads(jobs.stdout)["jobs"]) == 1
+
+
+def test_reserve_job_respects_background_capacity_cap(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS"] = "1"
+
+    first = subprocess.run([NODE, str(runtime), "reserve-job", "review", "one"], cwd=repo, env=env, capture_output=True, text=True)
+    second = subprocess.run([NODE, str(runtime), "reserve-job", "review", "two"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 2
+    payload = json.loads(second.stdout)
+    assert payload["status"] == "capacity_blocked"
+    assert payload["activeCount"] == 1
+    assert payload["limit"] == 1
 
 
 def node_exec_path():
