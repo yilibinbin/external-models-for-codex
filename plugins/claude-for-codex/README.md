@@ -258,6 +258,8 @@ The generated GitHub Actions workflow is a template. It uses `pull_request`, pin
 
 `--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
 
+If a host-forwarded reservation is still unclaimed and the same request is started directly with `--background`, the direct path starts its own tracked worker instead of waiting on the reservation. That avoids a silent no-op on abandoned reservations, but it can temporarily consume two active slots if the forwarding subagent later claims the original reservation.
+
 ## Codex subagent delegation
 
 For foreground read-only delegation, the parent Codex turn uses `subagent-command` for review commands instead of hand-building Claude invocations:

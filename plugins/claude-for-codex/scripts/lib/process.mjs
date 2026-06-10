@@ -304,7 +304,13 @@ export function terminateValidatedJobWorker(pid, jobId, options = {}) {
       }
       validation = refreshed;
       escalated = true;
-      process.kill(validation.signalPid, "SIGKILL");
+      try {
+        process.kill(validation.signalPid, "SIGKILL");
+      } catch (error) {
+        if (error?.code !== "ESRCH") {
+          throw error;
+        }
+      }
       const killDeadline = Date.now() + 1_000;
       while (Date.now() < killDeadline && workerStillAlive()) {
         sleepSync(25);

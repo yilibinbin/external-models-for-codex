@@ -408,19 +408,6 @@ export function recordJobProgress(cwd, jobId, updates = {}, env = process.env) {
   }, env);
 }
 
-export function markJobRunning(cwd, jobId, workerPid, env = process.env) {
-  return updateJob(cwd, jobId, {
-    status: "running",
-    phase: "starting",
-    workerPid,
-    pidIdentity: captureProcessIdentity(workerPid),
-    startedAt: new Date().toISOString(),
-    lastHeartbeatAt: new Date().toISOString(),
-    submissionState: "in-flight",
-    submittedAt: new Date().toISOString()
-  }, env);
-}
-
 export function finishJob(cwd, jobId, result, env = process.env) {
   return mutateJobUnderLock(cwd, jobId, env, (current) => {
     if (isTerminalJobStatus(current.status)) {
@@ -505,6 +492,9 @@ export function enrichJobLifecycle(job, options = {}) {
 
 export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.env) {
   const now = Number.isFinite(options.now) ? options.now : Date.now();
+  // Test-only race seam: lets regression tests mutate a job after the unlocked
+  // list snapshot and before the locked revalidation write.
+  const beforeLostJobUpdate = options.beforeLostJobUpdate;
   const updates = [];
   for (const job of listJobs(cwd, env).jobs) {
     const lifecycle = classifyJobLiveness(job, { now, env, queuedLostAfterMs: queuedLostAfterMs(env) });
@@ -516,7 +506,7 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       const workerGone = Number.isInteger(job.workerPid) && !validateJobWorkerProcess(job.workerPid, job.id).ok;
       const abandonedReservation = !Number.isInteger(job.workerPid) && job.reservationMode === "host-forwarded";
       if (workerGone || missingDirectWorker || abandonedReservation) {
-        options.beforeLostJobUpdate?.(job, lifecycle);
+        beforeLostJobUpdate?.(job, lifecycle);
         updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
           if (current.status !== "queued") {
             return null;
@@ -544,7 +534,7 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       continue;
     }
     if (Number.isInteger(job.workerPid) && validateJobWorkerProcess(job.workerPid, job.id).ok) {
-      options.beforeLostJobUpdate?.(job, lifecycle);
+      beforeLostJobUpdate?.(job, lifecycle);
       updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
         if (!Number.isInteger(current.workerPid) || !validateJobWorkerProcess(current.workerPid, current.id).ok) {
           return null;
@@ -563,7 +553,7 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       ? validateProcessGroupLeader(childGroupPid, job.childProcessGroupIdentity)
       : { ok: false };
     if (childGroupValidation.ok || (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity && processGroupHasLiveMembers(childGroupPid))) {
-      options.beforeLostJobUpdate?.(job, lifecycle);
+      beforeLostJobUpdate?.(job, lifecycle);
       updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
         const currentChildGroupPid = Number.isInteger(current.childProcessGroupPid) ? current.childProcessGroupPid : current.childPid;
         const currentChildGroupValidation = Number.isInteger(currentChildGroupPid) && current.childProcessGroupIdentity
@@ -588,7 +578,7 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       continue;
     }
     if (Number.isInteger(childGroupPid) && !job.childProcessGroupIdentity && captureProcessIdentity(childGroupPid)) {
-      options.beforeLostJobUpdate?.(job, lifecycle);
+      beforeLostJobUpdate?.(job, lifecycle);
       updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
         const currentChildGroupPid = Number.isInteger(current.childProcessGroupPid) ? current.childProcessGroupPid : current.childPid;
         if (!Number.isInteger(currentChildGroupPid) || current.childProcessGroupIdentity || !captureProcessIdentity(currentChildGroupPid)) {
@@ -604,7 +594,7 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       }));
       continue;
     }
-    options.beforeLostJobUpdate?.(job, lifecycle);
+    beforeLostJobUpdate?.(job, lifecycle);
     updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => ({
       ...current,
       status: "failed",
