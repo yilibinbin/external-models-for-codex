@@ -358,6 +358,23 @@ export function updateJobUnlessTerminal(cwd, jobId, updates, env = process.env) 
   });
 }
 
+function mutateLostJobUnderLock(cwd, snapshotJob, options, env, mutator) {
+  return mutateJobUnderLock(cwd, snapshotJob.id, env, (current) => {
+    if (isTerminalJobStatus(current.status)) {
+      return null;
+    }
+    const lifecycle = classifyJobLiveness(current, {
+      now: options.now,
+      env,
+      queuedLostAfterMs: queuedLostAfterMs(env)
+    });
+    if (lifecycle.state !== "lost") {
+      return null;
+    }
+    return mutator(current, lifecycle);
+  });
+}
+
 function hasEffectiveCancelRequest(job) {
   if (!job?.cancelRequestedAt) {
     return false;
@@ -499,24 +516,46 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       const workerGone = Number.isInteger(job.workerPid) && !validateJobWorkerProcess(job.workerPid, job.id).ok;
       const abandonedReservation = !Number.isInteger(job.workerPid) && job.reservationMode === "host-forwarded";
       if (workerGone || missingDirectWorker || abandonedReservation) {
-        updates.push(updateJobUnlessTerminal(cwd, job.id, {
-          status: "failed",
-          phase: abandonedReservation ? "reservation-expired" : "worker-launch-failed",
-          error: abandonedReservation
-            ? "Host-forwarded reserved job was not claimed before the queued timeout; releasing background capacity without resubmitting the Claude request."
-            : "Background worker exited or never exposed a valid worker before claiming the queued job; the plugin did not resubmit the Claude request.",
-          finishedAt: new Date(now).toISOString(),
-          workerPid: null
-        }, env));
+        options.beforeLostJobUpdate?.(job, lifecycle);
+        updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
+          if (current.status !== "queued") {
+            return null;
+          }
+          const currentMissingDirectWorker = !Number.isInteger(current.workerPid)
+            && current.reservationMode !== "host-forwarded"
+            && current.submissionState === "starting";
+          const currentWorkerGone = Number.isInteger(current.workerPid) && !validateJobWorkerProcess(current.workerPid, current.id).ok;
+          const currentAbandonedReservation = !Number.isInteger(current.workerPid) && current.reservationMode === "host-forwarded";
+          if (!currentWorkerGone && !currentMissingDirectWorker && !currentAbandonedReservation) {
+            return null;
+          }
+          return {
+            ...current,
+            status: "failed",
+            phase: currentAbandonedReservation ? "reservation-expired" : "worker-launch-failed",
+            error: currentAbandonedReservation
+              ? "Host-forwarded reserved job was not claimed before the queued timeout; releasing background capacity without resubmitting the Claude request."
+              : "Background worker exited or never exposed a valid worker before claiming the queued job; the plugin did not resubmit the Claude request.",
+            finishedAt: new Date(now).toISOString(),
+            workerPid: null
+          };
+        }));
       }
       continue;
     }
     if (Number.isInteger(job.workerPid) && validateJobWorkerProcess(job.workerPid, job.id).ok) {
-      updates.push(updateJobUnlessTerminal(cwd, job.id, {
-        phase: "lost",
-        lastProgressMessage: "Worker heartbeat is stale, but a validated worker process is still alive.",
-        lifecycleState: "lost"
-      }, env));
+      options.beforeLostJobUpdate?.(job, lifecycle);
+      updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
+        if (!Number.isInteger(current.workerPid) || !validateJobWorkerProcess(current.workerPid, current.id).ok) {
+          return null;
+        }
+        return {
+          ...current,
+          phase: "lost",
+          lastProgressMessage: "Worker heartbeat is stale, but a validated worker process is still alive.",
+          lifecycleState: "lost"
+        };
+      }));
       continue;
     }
     const childGroupPid = Number.isInteger(job.childProcessGroupPid) ? job.childProcessGroupPid : job.childPid;
@@ -524,33 +563,57 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
       ? validateProcessGroupLeader(childGroupPid, job.childProcessGroupIdentity)
       : { ok: false };
     if (childGroupValidation.ok || (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity && processGroupHasLiveMembers(childGroupPid))) {
-      updates.push(updateJobUnlessTerminal(cwd, job.id, {
-        phase: childGroupValidation.ok ? "orphaned" : "leaderless-orphaned",
-        lastProgressMessage: childGroupValidation.ok
-          ? "Worker heartbeat is lost but the supervised process-group leader still exists; not freeing capacity or resubmitting."
-          : "Worker heartbeat is lost but live members remain in the supervised process group; not freeing capacity or resubmitting.",
-        lifecycleState: "lost",
-        workerPid: null
-      }, env));
+      options.beforeLostJobUpdate?.(job, lifecycle);
+      updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
+        const currentChildGroupPid = Number.isInteger(current.childProcessGroupPid) ? current.childProcessGroupPid : current.childPid;
+        const currentChildGroupValidation = Number.isInteger(currentChildGroupPid) && current.childProcessGroupIdentity
+          ? validateProcessGroupLeader(currentChildGroupPid, current.childProcessGroupIdentity)
+          : { ok: false };
+        const currentLeaderlessGroupLive = Number.isInteger(currentChildGroupPid)
+          && current.childProcessGroupIdentity
+          && processGroupHasLiveMembers(currentChildGroupPid);
+        if (!currentChildGroupValidation.ok && !currentLeaderlessGroupLive) {
+          return null;
+        }
+        return {
+          ...current,
+          phase: currentChildGroupValidation.ok ? "orphaned" : "leaderless-orphaned",
+          lastProgressMessage: currentChildGroupValidation.ok
+            ? "Worker heartbeat is lost but the supervised process-group leader still exists; not freeing capacity or resubmitting."
+            : "Worker heartbeat is lost but live members remain in the supervised process group; not freeing capacity or resubmitting.",
+          lifecycleState: "lost",
+          workerPid: null
+        };
+      }));
       continue;
     }
     if (Number.isInteger(childGroupPid) && !job.childProcessGroupIdentity && captureProcessIdentity(childGroupPid)) {
-      updates.push(updateJobUnlessTerminal(cwd, job.id, {
-        phase: "unsafe-child-identity",
-        lastProgressMessage: "A child PID still exists but has no saved identity; refusing to signal possible PID reuse and preserving capacity until manual inspection.",
-        lifecycleState: "lost",
-        workerPid: null
-      }, env));
+      options.beforeLostJobUpdate?.(job, lifecycle);
+      updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
+        const currentChildGroupPid = Number.isInteger(current.childProcessGroupPid) ? current.childProcessGroupPid : current.childPid;
+        if (!Number.isInteger(currentChildGroupPid) || current.childProcessGroupIdentity || !captureProcessIdentity(currentChildGroupPid)) {
+          return null;
+        }
+        return {
+          ...current,
+          phase: "unsafe-child-identity",
+          lastProgressMessage: "A child PID still exists but has no saved identity; refusing to signal possible PID reuse and preserving capacity until manual inspection.",
+          lifecycleState: "lost",
+          workerPid: null
+        };
+      }));
       continue;
     }
-    updates.push(updateJobUnlessTerminal(cwd, job.id, {
+    options.beforeLostJobUpdate?.(job, lifecycle);
+    updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => ({
+      ...current,
       status: "failed",
       phase: "lost",
       error: "Tracked worker heartbeat was lost and no validated worker or supervised process group remains; the plugin did not resubmit the Claude request.",
       finishedAt: new Date(now).toISOString(),
       workerPid: null,
       childPid: null
-    }, env));
+    })));
   }
   return updates.filter(Boolean);
 }

@@ -1584,6 +1584,47 @@ def test_abandoned_host_forwarded_reservation_is_reaped_from_queued(tmp_path):
     assert "reserved job was not claimed" in job["error"]
 
 
+def test_reaper_does_not_expire_reserved_job_claimed_after_snapshot(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ claimReservedJob, reapLostJobs, readJob, reserveJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+reserveJob(cwd, {{
+  id: "job-race",
+  command: "review",
+  args: ["race"],
+  cwd,
+  createdAt: "2026-06-09T00:00:00.000Z",
+  updatedAt: "2026-06-09T00:00:00.000Z"
+}}, [{json.dumps(NODE)}, {json.dumps(str(runtime))}, "run-reserved-job", "--job-id", "job-race"], env);
+let callbackCount = 0;
+const updates = reapLostJobs(cwd, {{
+  now: Date.parse("2026-06-09T00:20:00.000Z"),
+  beforeLostJobUpdate: (job) => {{
+    if (job.id === "job-race") {{
+      callbackCount += 1;
+      claimReservedJob(cwd, job.id, process.pid, env);
+    }}
+  }}
+}}, env);
+console.log(JSON.stringify({{ callbackCount, updates, job: readJob(cwd, "job-race", env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["callbackCount"] == 1
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["phase"] == "starting"
+    assert payload["job"].get("error") is None
+    assert payload["job"].get("finishedAt") is None
+
+
 def test_background_wait_reaps_bootstrap_dead_worker(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -9692,7 +9733,8 @@ def test_prompt_and_stop_hooks_share_bounded_fingerprint_options():
     prompt_commands = hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
     assert any(command.get("timeout") == 5 for command in prompt_commands)
     assert "workingTreeFingerprint(cwd, [], hookFingerprintOptions())" in unread
-    assert "workingTreeFingerprintDetails(cwd, [], hookFingerprintOptions())" in runtime
+    assert "const hookOptions = hookFingerprintOptions()" in runtime
+    assert "workingTreeFingerprintDetails(cwd, [], hookOptions)" in runtime
 
 
 def test_setup_can_enable_and_disable_review_gate(tmp_path):
@@ -9919,6 +9961,57 @@ os.execv({json.dumps(real_git)}, ["git", *args])
     )
     fake_git.chmod(0o755)
     env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "git status timed out; allowing stop" in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_reviewable_git_uses_hook_safe_timeout_cap(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    time.sleep(1)
+    print(" M file.txt")
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "60000"
 
     result = subprocess.run(
         ["node", str(runtime), "review-gate"],

@@ -1281,8 +1281,9 @@ function gitSignalTimeoutMs(env = process.env) {
   });
 }
 
-function gitShort(args, cwd = process.cwd()) {
-  const result = run("git", args, { cwd, timeout: gitSignalTimeoutMs() });
+function gitShort(args, cwd = process.cwd(), options = {}) {
+  const env = options.env ?? process.env;
+  const result = run("git", args, { cwd, timeout: gitSignalTimeoutMs(env) });
   return { ...result, timedOut: gitCommandTimedOut(result) };
 }
 
@@ -1904,15 +1905,15 @@ function handleSubagentCommand(rawArgs) {
   };
 }
 
-function hasReviewableGitChanges(cwd = process.cwd()) {
-  const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd);
+function hasReviewableGitChanges(cwd = process.cwd(), options = {}) {
+  const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd, options);
   if (inside.timedOut) {
     return { reviewable: false, reason: "git repository check timed out", timedOut: true };
   }
   if (inside.status !== 0) {
     return { reviewable: false, reason: "not a git repository" };
   }
-  const status = gitShort(["status", "--short", "--untracked-files=all"], cwd);
+  const status = gitShort(["status", "--short", "--untracked-files=all"], cwd, options);
   if (status.timedOut) {
     return { reviewable: false, reason: "git status timed out", timedOut: true };
   }
@@ -2754,14 +2755,15 @@ async function runReviewGate(rawArgs) {
     return;
   }
 
-  const reviewable = hasReviewableGitChanges(cwd);
+  const hookOptions = hookFingerprintOptions();
+  const reviewable = hasReviewableGitChanges(cwd, hookOptions);
   if (!reviewable.reviewable) {
     if (reviewable.timedOut) {
       warnGate(`${reviewable.reason}; allowing stop`);
     }
     return;
   }
-  const diffFingerprint = workingTreeFingerprintDetails(cwd, [], hookFingerprintOptions());
+  const diffFingerprint = workingTreeFingerprintDetails(cwd, [], hookOptions);
   const diffHash = diffFingerprint.hash;
   const diffFingerprintUsable = !diffFingerprint.timedOut;
   if (diffFingerprint.timedOut && !diffFingerprint.budgetExceeded) {
@@ -2845,7 +2847,7 @@ async function runReviewGate(rawArgs) {
 
   const gitContext = collectGitContext({
     ...args,
-    gitRunner: (gitArgs) => gitShort(gitArgs, cwd)
+    gitRunner: (gitArgs) => gitShort(gitArgs, cwd, hookOptions)
   });
   const blocks = [];
   for (const role of roles) {
