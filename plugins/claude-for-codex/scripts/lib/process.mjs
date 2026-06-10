@@ -2,6 +2,9 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import process from "node:process";
 
+const DEFAULT_PS_TIMEOUT_MS = 2_000;
+const DEFAULT_PS_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
+
 export function supportsPosixProcessGroups(platform = process.platform) {
   return platform !== "win32";
 }
@@ -10,10 +13,33 @@ export function currentProcessPlatform(env = process.env) {
   return env.CLAUDE_FOR_CODEX_PROCESS_PLATFORM || process.platform;
 }
 
-function ps(pid) {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "command="], {
-    encoding: "utf8"
+function parseBoundedInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(min, Math.min(Math.trunc(parsed), max));
+}
+
+function psProbeTimeoutMs(env = process.env) {
+  return parseBoundedInteger(env.CLAUDE_FOR_CODEX_PS_TIMEOUT_MS, DEFAULT_PS_TIMEOUT_MS, { min: 1, max: 30_000 });
+}
+
+function psProbeMaxBufferBytes(env = process.env) {
+  return parseBoundedInteger(env.CLAUDE_FOR_CODEX_PS_MAX_BUFFER_BYTES, DEFAULT_PS_MAX_BUFFER_BYTES, { min: 1_024, max: 100 * 1024 * 1024 });
+}
+
+function runPs(args) {
+  return spawnSync("ps", args, {
+    encoding: "utf8",
+    timeout: psProbeTimeoutMs(),
+    killSignal: "SIGKILL",
+    maxBuffer: psProbeMaxBufferBytes()
   });
+}
+
+function ps(pid) {
+  const result = runPs(["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "stat=", "-o", "command="]);
   if (result.status !== 0 || !result.stdout.trim()) {
     return null;
   }
@@ -61,11 +87,9 @@ export function processGroupHasLiveMembers(pgid) {
   if (!Number.isInteger(pgid)) {
     return false;
   }
-  const result = spawnSync("ps", ["-eo", "pid=", "-o", "pgid=", "-o", "stat="], {
-    encoding: "utf8"
-  });
+  const result = runPs(["-eo", "pid=", "-o", "pgid=", "-o", "stat="]);
   if (result.status !== 0 || !result.stdout.trim()) {
-    return false;
+    return true;
   }
   return result.stdout.split(/\r?\n/).some((line) => {
     const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);

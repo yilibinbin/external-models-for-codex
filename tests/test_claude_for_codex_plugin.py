@@ -2376,6 +2376,71 @@ try {{
             child.kill()
 
 
+def test_process_group_scan_is_bounded_and_fail_closed_on_ps_timeout(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ps = fake_bin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_PS_TIMEOUT_MS"] = "25"
+    script = f"""
+import {{ captureProcessIdentity, processGroupHasLiveMembers }} from {json.dumps(process_lib.as_uri())};
+const start = Date.now();
+console.log(JSON.stringify({{
+  identity: captureProcessIdentity(123456),
+  groupLive: processGroupHasLiveMembers(123456),
+  elapsedMs: Date.now() - start
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["identity"] is None
+    assert payload["groupLive"] is True
+    assert payload["elapsedMs"] < 1000
+
+
+def test_process_group_scan_fail_closed_on_ps_max_buffer(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ps = fake_bin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if '-eo' in sys.argv:\n"
+        "    print('1 1 S')\n"
+        "    print('x' * 20000)\n"
+        "else:\n"
+        "    print('123456 1 123456 S fake-command')\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_PS_MAX_BUFFER_BYTES"] = "1024"
+    script = f"""
+import {{ captureProcessIdentity, processGroupHasLiveMembers }} from {json.dumps(process_lib.as_uri())};
+console.log(JSON.stringify({{
+  identity: captureProcessIdentity(123456),
+  groupLive: processGroupHasLiveMembers(123456)
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["identity"]["pid"] == 123456
+    assert payload["groupLive"] is True
+
+
 def test_process_group_cancel_refuses_unvalidated_leaderless_group(tmp_path):
     process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
     info_file = tmp_path / "leaderless-cancel.json"
@@ -2626,6 +2691,7 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "cancel-preserves-terminal-race",
         "cancel-request-finish-semantics",
         "leaderless-child-group-cleanup",
+        "process-ps-probe-bounds",
         "hard-timeout-sigkill",
         "hard-timeout-nonzero-status",
         "cancel-sigkill-escalation",
