@@ -212,8 +212,10 @@ import {{
   deriveJobIdempotencyKey,
   isTerminalJobStatus,
   parsePositiveInteger,
+  reservationClaimMs,
   DEFAULT_BACKGROUND_WAIT_MS,
-  HARD_JOB_TIMEOUT_MS
+  HARD_JOB_TIMEOUT_MS,
+  JOB_RESERVATION_CLAIM_MS
 }} from {json.dumps(lifecycle.as_uri())};
 
 const now = Date.parse("2026-06-09T00:10:00.000Z");
@@ -223,14 +225,18 @@ const payload = {{
   suspect: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:05:00.000Z" }}, {{ now }}),
   lost: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:00:00.000Z" }}, {{ now }}),
   queued: classifyJobLiveness({{ status: "queued", createdAt: "2026-06-09T00:09:30.000Z" }}, {{ now }}),
+  reservationStillQueued: classifyJobLiveness({{ status: "queued", reservationMode: "host-forwarded", createdAt: "2026-06-09T00:09:00.000Z" }}, {{ now, queuedLostAfterMs: 100, reservationClaimMs: 120000 }}),
+  reservationExpired: classifyJobLiveness({{ status: "queued", reservationMode: "host-forwarded", createdAt: "2026-06-09T00:08:00.000Z" }}, {{ now, queuedLostAfterMs: 100, reservationClaimMs: 1000 }}),
   terminal: isTerminalJobStatus("succeeded"),
   nonterminal: isTerminalJobStatus("running"),
   activeLimit: parsePositiveInteger("4", 3, {{ min: 1, max: 20 }}),
   invalidLimit: parsePositiveInteger("bad", 3, {{ min: 1, max: 20 }}),
+  reservationLimit: reservationClaimMs({{ CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS: "5000" }}),
   key1: deriveJobIdempotencyKey({{ command: "review", args: ["--base", "main"], cwd: "/workspace/demo" }}),
   key2: deriveJobIdempotencyKey({{ command: "review", args: ["--base", "main"], cwd: "/workspace/demo" }}),
   wait: DEFAULT_BACKGROUND_WAIT_MS,
-  hard: HARD_JOB_TIMEOUT_MS
+  hard: HARD_JOB_TIMEOUT_MS,
+  reservationDefault: JOB_RESERVATION_CLAIM_MS
 }};
 console.log(JSON.stringify(payload));
 """
@@ -242,14 +248,18 @@ console.log(JSON.stringify(payload));
     assert payload["suspect"]["state"] == "suspect"
     assert payload["lost"]["state"] == "lost"
     assert payload["queued"]["state"] == "queued"
+    assert payload["reservationStillQueued"]["state"] == "queued"
+    assert payload["reservationExpired"]["state"] == "lost"
     assert payload["terminal"] is True
     assert payload["nonterminal"] is False
     assert payload["activeLimit"] == 4
     assert payload["invalidLimit"] == 3
+    assert payload["reservationLimit"] == 5000
     assert payload["key1"] == payload["key2"]
     assert payload["key1"].startswith("sha256:")
     assert payload["wait"] <= 60_000
     assert payload["hard"] >= 30 * 60 * 1000
+    assert payload["reservationDefault"] == 10 * 60 * 1000
 
 
 def test_progress_events_parse_sanitize_and_count_malformed_lines(tmp_path):
@@ -1565,6 +1575,7 @@ def test_abandoned_host_forwarded_reservation_is_reaped_from_queued(tmp_path):
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
     env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+    env["CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS"] = "1000"
 
     reserved = subprocess.run(
         [NODE, str(runtime), "reserve-job", "review", "abandoned"],
@@ -1576,7 +1587,7 @@ def test_abandoned_host_forwarded_reservation_is_reaped_from_queued(tmp_path):
     assert reserved.returncode == 0, reserved.stderr
     job_id = json.loads(reserved.stdout)["job"]["id"]
 
-    time.sleep(1.2)
+    time.sleep(1.5)
     listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
     job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == job_id)
     assert job["status"] == "failed"
@@ -6304,6 +6315,62 @@ def test_sdk_review_stream_progress_is_sanitized_and_report_omits_raw_chunks(tmp
     serialized = json.dumps(json.loads(latest.stdout)["report"])
     assert secret_chunk not in serialized
     assert secret_session not in serialized
+
+
+def test_sdk_background_review_auto_streams_progress_to_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+    sdk_module, capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout="SDK_BACKGROUND_OK",
+        extra_js="""
+  yield {
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'background progress chunk' }] },
+    session_id: 'sdk-session-secret'
+  };
+""",
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "review",
+            "--backend",
+            "sdk",
+            "--background",
+            "--wait",
+            "--wait-timeout-ms",
+            "10000",
+            "--scope",
+            "working-tree",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert payload["job"]["lastProgressAt"]
+    assert payload["job"]["lastProgressMessage"] == "result event received"
+    assert payload["job"]["progressPreview"] == ["result event received"]
+    assert "SDK_BACKGROUND_OK" in payload["job"]["stdout"]
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert query["includePartialMessages"] is True
+    assert query["options"]["includePartialMessages"] is True
 
 
 def test_sdk_subagent_mode_parses_nested_role_results_and_failed_status(tmp_path):

@@ -156,7 +156,9 @@ For `--json` modes, exit status reports command/parsing success. Inspect `verdic
 
 ## Host-forwarded background jobs
 
-`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
+`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. The returned command carries an explicit `--cwd` so it can claim the correct workspace state even if the forwarding shell starts elsewhere. Existing detached runtime background jobs remain as a compatibility fallback.
+
+Unclaimed host-forwarded reservations use a separate claim deadline from direct worker bootstrap cleanup: the default is ten minutes and can be adjusted with `CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS=<milliseconds>`. SDK-backed background and reserved jobs automatically enable sanitized stream progress for tracked job previews.
 
 ## MCP-backed read-only Git review
 

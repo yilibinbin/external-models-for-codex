@@ -6,6 +6,7 @@ export const JOB_HEARTBEAT_INTERVAL_MS = 15_000;
 export const JOB_SUSPECT_AFTER_MS = 3 * 60 * 1000;
 export const JOB_LOST_AFTER_MS = 10 * 60 * 1000;
 export const JOB_QUEUED_LOST_AFTER_MS = 60 * 1000;
+export const JOB_RESERVATION_CLAIM_MS = 10 * 60 * 1000;
 export const DEFAULT_BACKGROUND_WAIT_MS = 45_000;
 export const MAX_BACKGROUND_WAIT_MS = 5 * 60 * 1000;
 export const HARD_JOB_TIMEOUT_MS = 30 * 60 * 1000;
@@ -36,6 +37,13 @@ export function queuedLostAfterMs(env = process.env) {
   });
 }
 
+export function reservationClaimMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS, JOB_RESERVATION_CLAIM_MS, {
+    min: 1_000,
+    max: 30 * 60 * 1000
+  });
+}
+
 export function deriveJobIdempotencyKey({ command, args = [], cwd = "", workspaceFingerprint = "", executionControls = {} }) {
   const hash = crypto.createHash("sha256");
   hash.update(JSON.stringify({
@@ -62,9 +70,13 @@ export function classifyJobLiveness(job, options = {}) {
     const queuedLostMs = Number.isFinite(options.queuedLostAfterMs)
       ? options.queuedLostAfterMs
       : queuedLostAfterMs(options.env ?? process.env);
+    const reservationLostMs = Number.isFinite(options.reservationClaimMs)
+      ? options.reservationClaimMs
+      : reservationClaimMs(options.env ?? process.env);
     const missingDirectWorker = !Number.isInteger(job.workerPid) && job.reservationMode !== "host-forwarded" && job.submissionState === "starting";
     const abandonedReservation = !Number.isInteger(job.workerPid) && job.reservationMode === "host-forwarded";
-    if (staleForMs !== null && staleForMs >= queuedLostMs && (Number.isInteger(job.workerPid) || missingDirectWorker || abandonedReservation)) {
+    const lostAfterMs = abandonedReservation ? reservationLostMs : queuedLostMs;
+    if (staleForMs !== null && staleForMs >= lostAfterMs && (Number.isInteger(job.workerPid) || missingDirectWorker || abandonedReservation)) {
       return { state: "lost", status, staleForMs, queued: true };
     }
     return { state: "queued", status, staleForMs: staleForMs ?? 0 };

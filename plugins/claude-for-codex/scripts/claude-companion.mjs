@@ -1245,6 +1245,19 @@ function stripBackgroundArgs(rawArgs) {
   return output;
 }
 
+function materializeBackgroundArgs(command, rawArgs) {
+  const foregroundArgs = stripBackgroundArgs(rawArgs);
+  if (!STREAM_PROGRESS_COMMANDS.has(command)) {
+    return foregroundArgs;
+  }
+  const parsed = validateCommandNativeModeOptions(command, foregroundArgs);
+  validateBackendArgs(parsed);
+  if (parsed.backend === "sdk" && !parsed.streamProgress) {
+    return [...foregroundArgs, "--stream-progress"];
+  }
+  return foregroundArgs;
+}
+
 function parseJobIdArg(rawArgs) {
   const tokens = normalizeArgv(rawArgs);
   for (let index = 0; index < tokens.length; index += 1) {
@@ -1555,7 +1568,7 @@ function startBackgroundJob(command, rawArgs) {
     return { unsupportedPlatform: true, platform: support.platform, message: support.message };
   }
   const cwd = process.cwd();
-  const foregroundArgs = stripBackgroundArgs(rawArgs);
+  const foregroundArgs = materializeBackgroundArgs(command, rawArgs);
   const session = readJson(currentSessionFileForCwd(cwd), {});
   const fingerprint = workingTreeFingerprintDetails(cwd, foregroundArgs);
   const executionControls = backgroundExecutionControls(process.env);
@@ -1822,7 +1835,7 @@ function handleReserveJob(rawArgs) {
   if (!BACKGROUND_CAPABLE_COMMANDS.has(command)) {
     throw new Error(`Command "${command}" cannot be reserved as a background job.`);
   }
-  const commandArgs = stripBackgroundArgs(tokens.slice(1));
+  const commandArgs = materializeBackgroundArgs(command, tokens.slice(1));
   const parsed = validateCommandNativeModeOptions(command, commandArgs);
   validateBackendArgs(parsed);
   validateBackendCompatibleOptions(parsed);
