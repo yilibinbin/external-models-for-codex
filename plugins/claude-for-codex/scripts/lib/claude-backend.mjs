@@ -113,7 +113,8 @@ export function parseUnknownDenyToolFailure({ stdout = "", stderr = "" } = {}, c
   const trimmedStdout = stdoutText.trim();
   const trimmedStderr = stderrText.trim();
   const stdoutOnlyUnknownDeny = trimmedStdout && !trimmedStderr && UNKNOWN_DENY_PATTERN.test(trimmedStdout);
-  if (trimmedStdout && !stdoutOnlyUnknownDeny && !nonModelStdoutDiagnostic(trimmedStdout)) {
+  const stderrUnknownDeny = trimmedStderr && UNKNOWN_DENY_PATTERN.test(trimmedStderr);
+  if (trimmedStdout && !stdoutOnlyUnknownDeny && !stderrUnknownDeny && !nonModelStdoutDiagnostic(trimmedStdout)) {
     return null;
   }
   const diagnosticText = stdoutOnlyUnknownDeny ? stdoutText : stderrText;

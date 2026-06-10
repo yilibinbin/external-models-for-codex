@@ -1117,9 +1117,10 @@ function claudePrint(prompt, options) {
         mcpConfig.cleanup();
       }
     }
-    if (options.write || result.status === 0) {
+    if (options.write) {
       return result;
     }
+    // Newer Claude runtimes may warn about an unknown deny tool and still emit stdout; retry before trusting that run.
     const candidate = parseUnknownDenyToolFailure(result, denyTools);
     if (!candidate || omitted.has(candidate)) {
       return result;
@@ -1228,9 +1229,10 @@ async function claudePrintAsync(prompt, options) {
         mcpConfig.cleanup();
       }
     }
-    if (options.write || result.status === 0) {
+    if (options.write) {
       return result;
     }
+    // Newer Claude runtimes may warn about an unknown deny tool and still emit stdout; retry before trusting that run.
     const candidate = parseUnknownDenyToolFailure(result, denyTools);
     if (!candidate || omitted.has(candidate)) {
       return result;

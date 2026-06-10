@@ -63,7 +63,7 @@ def test_env_override_rejects_empty_effective_deny_list():
     assert "Edit, Write, MultiEdit, Bash" in output
 
 
-def test_unknown_deny_parser_accepts_only_pre_model_permission_failure():
+def test_unknown_deny_parser_accepts_runtime_permission_warning_from_stderr():
     source = f"""
       import {{ parseUnknownDenyToolFailure }} from {json.dumps(BACKEND.as_uri())};
       const cases = [
@@ -80,7 +80,7 @@ def test_unknown_deny_parser_accepts_only_pre_model_permission_failure():
       ];
       console.log(JSON.stringify(cases));
     """
-    assert json.loads(node_eval(source)) == ["MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", None, None, None, None, None]
+    assert json.loads(node_eval(source)) == ["MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", "MultiEdit", None, None, None, None]
 
 
 def test_lifecycle_progress_does_not_remove_read_only_permission_fence():
@@ -198,6 +198,78 @@ def test_cli_retry_omits_unknown_deny_candidate_from_stdout(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "ALLOW" in result.stdout
+    assert 'rejected deny rule "MultiEdit"' in result.stderr
+    invocations = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    deny_lists = [
+        args[args.index("--disallowedTools") + 1]
+        for args in invocations
+        if "--disallowedTools" in args
+    ]
+    assert deny_lists == ["Edit,Write,MultiEdit,Bash", "Edit,Write,Bash"]
+
+
+def test_cli_retry_omits_unknown_deny_candidate_before_accepting_success_stdout(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "origin/main"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\nbranch\n", encoding="utf8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "branch"], cwd=repo, check=True, capture_output=True, text=True)
+
+    fake_claude = tmp_path / "claude"
+    log_file = tmp_path / "claude-args.jsonl"
+    first_payload = {"verdict": "approve", "summary": "first unsafe result", "findings": [], "next_steps": []}
+    second_payload = {"verdict": "approve", "summary": "retried safely", "findings": [], "next_steps": []}
+    fake_claude.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env node
+            const fs = require("fs");
+            const args = process.argv.slice(2);
+            fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify(args) + "\\n");
+            const denyIndex = args.indexOf("--disallowedTools");
+            const deny = denyIndex >= 0 ? args[denyIndex + 1] : "";
+            if (deny.split(",").includes("MultiEdit")) {{
+              console.error('Permission deny rule "MultiEdit" matches no known tool — check for typos.');
+              process.stdout.write({json.dumps(json.dumps(first_payload) + "\n")});
+              process.exit(0);
+            }}
+            process.stdout.write({json.dumps(json.dumps(second_payload) + "\n")});
+            """
+        ),
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            "node",
+            str(COMPANION),
+            "review",
+            "--quality",
+            "strong",
+            "--scope",
+            "branch",
+            "--base",
+            "origin/main",
+            "--json",
+        ],
+        cwd=repo,
+        env={**os.environ, "CLAUDE_CODE_PATH": str(fake_claude)},
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["summary"] == "retried safely"
+    assert "first unsafe result" not in result.stdout
     assert 'rejected deny rule "MultiEdit"' in result.stderr
     invocations = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
     deny_lists = [
