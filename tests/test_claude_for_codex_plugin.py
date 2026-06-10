@@ -7999,10 +7999,14 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert payload["status"] == "reserved"
     assert payload["job"]["status"] == "queued"
     assert payload["job"]["command"] == "review"
-    assert payload["workerCommand"][0] == NODE
-    assert str(runtime) in payload["workerCommand"]
-    assert "run-reserved-job" in payload["workerCommand"]
+    assert payload["cwd"] == str(repo)
+    assert payload["workerCommand"][0] == node_exec_path()
+    assert payload["workerCommand"][1] == str(runtime.resolve())
+    assert payload["workerCommand"][2:4] == ["run-reserved-job", "--job-id"]
+    assert payload["workerCommand"][4] == payload["job"]["id"]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+    assert "workerCommand once as argv" in payload["forwardingInstructions"]
+    assert "returned cwd" in payload["forwardingInstructions"]
 
 
 def test_reserve_job_reuses_existing_reserved_job(tmp_path):
@@ -8037,6 +8041,7 @@ def test_reserve_job_reuses_existing_reserved_job(tmp_path):
     second_payload = json.loads(second.stdout)
     assert second_payload["reusedExisting"] is True
     assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["cwd"] == str(repo)
     assert second_payload["workerCommand"] == first_payload["workerCommand"]
     jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
     assert len(json.loads(jobs.stdout)["jobs"]) == 1

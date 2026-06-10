@@ -124,7 +124,8 @@ import {
   currentProcessPlatform,
   isProcessAlive,
   processGroupHasLiveMembers,
-  supportsPosixProcessGroups
+  supportsPosixProcessGroups,
+  validateProcessGroupLeader
 } from "./lib/process.mjs";
 import {
   hookFingerprintOptions,
@@ -1799,8 +1800,8 @@ function handleReserveJob(rawArgs) {
   validateBackendCompatibleOptions(parsed);
   validateSdkSubagentsBackend(parsed);
   const workerCommand = [
-    process.argv0 || process.execPath,
-    process.argv[1],
+    process.execPath,
+    path.resolve(process.argv[1]),
     "run-reserved-job",
     "--job-id",
     `job-${randomUUID()}`
@@ -1845,8 +1846,9 @@ function handleReserveJob(rawArgs) {
       command: updated.command,
       args: updated.args ?? []
     },
+    cwd: process.cwd(),
     workerCommand: updated.workerCommand ?? workerCommand,
-    forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once, must not inspect or reinterpret the repository, and must return only the command result."
+    forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once as argv from the returned cwd, must not inspect or reinterpret the repository, and must return only the command result."
   };
 }
 
@@ -3640,8 +3642,12 @@ function runStoredJobCommand(job, options = {}) {
     let timeout = null;
     let child;
     let childExitedBeforeIdentity = false;
+    let deliveredToValidatedChildGroup = false;
     const progressLines = makeProgressLineBuffer((line) => {
       const parsed = progressEventsFromLines([line]);
+      // Malformed counts are parser diagnostics for tests and future telemetry.
+      // The worker ignores them here to avoid turning model stderr into noisy
+      // supervision output while still accepting well-formed progress events.
       for (const event of parsed.events) {
         recordJobProgress(stateCwd, job.id, {
           phase: event.phase || "running",
@@ -3673,6 +3679,34 @@ function runStoredJobCommand(job, options = {}) {
       stopRequested = true;
       if (!child?.pid) {
         return false;
+      }
+      if (childProcessGroupIdentity) {
+        const validation = validateProcessGroupLeader(child.pid, childProcessGroupIdentity);
+        if (!validation.ok) {
+          if (
+            validation.reason === "process not found"
+            && deliveredToValidatedChildGroup
+            && processGroupHasLiveMembers(child.pid)
+          ) {
+            try {
+              process.kill(-child.pid, signal);
+              return true;
+            } catch {
+              return false;
+            }
+          }
+          return false;
+        }
+        if (options.requireLiveGroup && !processGroupHasLiveMembers(child.pid)) {
+          return false;
+        }
+        try {
+          process.kill(validation.signalPid, signal);
+          deliveredToValidatedChildGroup = true;
+          return true;
+        } catch {
+          return false;
+        }
       }
       if (options.requireLiveGroup && !processGroupHasLiveMembers(child.pid)) {
         return false;
