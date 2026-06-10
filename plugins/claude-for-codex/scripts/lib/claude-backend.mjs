@@ -6,6 +6,7 @@ import path from "node:path";
 import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { createGitMcpConfig } from "./mcp-config.mjs";
+import { formatProgressEvent } from "./progress.mjs";
 
 export const READ_ONLY_BUILTIN_TOOLS = Object.freeze(["Read", "Grep", "Glob"]);
 export const READ_ONLY_MCP_TOOLS = Object.freeze([
@@ -112,7 +113,8 @@ export function parseUnknownDenyToolFailure({ stdout = "", stderr = "" } = {}, c
   const trimmedStdout = stdoutText.trim();
   const trimmedStderr = stderrText.trim();
   const stdoutOnlyUnknownDeny = trimmedStdout && !trimmedStderr && UNKNOWN_DENY_PATTERN.test(trimmedStdout);
-  if (trimmedStdout && !stdoutOnlyUnknownDeny && !nonModelStdoutDiagnostic(trimmedStdout)) {
+  const stderrUnknownDeny = trimmedStderr && UNKNOWN_DENY_PATTERN.test(trimmedStderr);
+  if (trimmedStdout && !stdoutOnlyUnknownDeny && !stderrUnknownDeny && !nonModelStdoutDiagnostic(trimmedStdout)) {
     return null;
   }
   const diagnosticText = stdoutOnlyUnknownDeny ? stdoutText : stderrText;
@@ -417,6 +419,17 @@ function maybeWriteSdkProgress(event, options) {
     return;
   }
   process.stderr.write(`${sanitizedSdkProgressLine(event)}\n`);
+  const eventType = event && typeof event === "object" && typeof event.type === "string"
+    ? event.type
+    : typeof event;
+  const role = event && typeof event === "object"
+    ? (event.agent_name ?? event.agentName ?? event.subagent_name ?? event.subagentName ?? "")
+    : "";
+  process.stderr.write(formatProgressEvent({
+    phase: `sdk-${eventType}`,
+    message: `${eventType} event received`,
+    role
+  }, { cwd: options.cwd ?? process.cwd() }));
 }
 
 function shouldCollectSdkText(event, options) {
@@ -532,7 +545,8 @@ async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disa
       includePartialMessages: sdkOptions.includePartialMessages
     });
     const output = await collectSdkOutput(queryResult, {
-      streamProgress: Boolean(args.streamProgress || options.streamProgress)
+      streamProgress: Boolean(args.streamProgress || options.streamProgress),
+      cwd: options.cwd ?? process.cwd()
     });
     return {
       status: 0,

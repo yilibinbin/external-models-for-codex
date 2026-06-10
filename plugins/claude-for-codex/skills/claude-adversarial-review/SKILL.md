@@ -23,6 +23,7 @@ When converting the user's request to companion invocation:
 - Use `--parallel` only when the user asks for independent adversarial lenses or parallel skeptical agents.
 - Use `--quality strong` for strict, deep, high-risk, security-sensitive, or release-sensitive adversarial review.
 - Use `--quality max` only when the user explicitly asks for the strongest local adversarial Claude review.
+- Before choosing foreground for an unforced review, run `recommend-execution-mode --json` or apply the same threshold: foreground only for tiny one-to-two-file work; use background for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, or unclear scope.
 - Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
 
 Internal invocation examples, not for users:
@@ -78,6 +79,7 @@ Rules:
 - Do not apply fixes until the user chooses which findings to adopt.
 - Preserve file paths, line numbers, uncertainty markers, residual-risk notes, and evidence boundaries exactly.
 - If Claude fails or returns malformed structured output, report that failure instead of replacing it with Codex guesses.
+- Do not rerun an adversarial review just because a previous `--wait` observation window expired; use `claude-status` or `claude-result <job-id>`.
 
 Arguments:
 - `--adversarial-lenses skeptic,architect,minimalist` selects an ordered lens subset.

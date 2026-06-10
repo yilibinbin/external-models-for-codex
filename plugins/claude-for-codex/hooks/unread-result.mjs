@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import fs from "node:fs";
 import process from "node:process";
+import { isTerminalJobStatus } from "../scripts/lib/job-lifecycle.mjs";
 import { listJobs } from "../scripts/lib/jobs.mjs";
 import { atomicWriteJson, turnBaselineFileForCwd } from "../scripts/lib/state.mjs";
+import { hookFingerprintOptions, workingTreeFingerprint } from "../scripts/lib/worktree-fingerprint.mjs";
 
 function readHookInput() {
   if (process.stdin.isTTY) {
@@ -15,27 +15,9 @@ function readHookInput() {
   return raw ? JSON.parse(raw) : {};
 }
 
-function git(cwd, args) {
-  const result = spawnSync("git", args, {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 10 * 1024 * 1024
-  });
-  return result.status === 0 ? result.stdout : "";
-}
-
-function workingTreeFingerprint(cwd) {
-  const parts = [
-    git(cwd, ["status", "--short", "--untracked-files=all"]),
-    git(cwd, ["diff", "--cached"]),
-    git(cwd, ["diff"])
-  ];
-  return createHash("sha256").update(parts.join("\n--- claude-for-codex ---\n")).digest("hex");
-}
-
 function notifyUnreadResults(cwd, sessionId) {
   const unread = listJobs(cwd).jobs.filter((job) =>
-    ["succeeded", "failed", "cancelled", "cancel_failed"].includes(job.status)
+    isTerminalJobStatus(job.status)
       && !job.resultViewedAt
       && (!sessionId || job.sessionId === sessionId)
   );
@@ -54,7 +36,7 @@ try {
     sessionId,
     cwd,
     promptSubmittedAt: new Date().toISOString(),
-    workingTreeFingerprint: workingTreeFingerprint(cwd)
+    workingTreeFingerprint: workingTreeFingerprint(cwd, [], hookFingerprintOptions())
   });
   notifyUnreadResults(cwd, sessionId);
 } catch (error) {

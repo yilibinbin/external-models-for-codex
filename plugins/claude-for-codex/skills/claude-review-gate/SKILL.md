@@ -68,6 +68,7 @@ Rules:
 - The gate reviews current git working-tree changes, not an exact per-turn edit set.
 - The enabled gate uses the default multi-role review set: correctness, security, tests, release, adversarial.
 - The installed Stop hook does not force `--quality strong` or `--quality max`; it stays conservative unless a user manually runs `review-gate --quality strong|max`.
+- The review gate never starts background jobs, never calls `reserve-job`, and never invokes ultrareview. It is a bounded fail-open Stop hook only.
 - Explicit `review-gate --role-pack <pack>` is allowed only for gate-compatible built-in packs. `review-gate --role-pack default` is rejected because the gate accepts only gate-compatible packs; bare `review-gate` keeps the existing default set.
 - Only explicit `BLOCK:` verdicts from Claude block Stop.
 - Semantic context is off by default for the gate and never implicitly uses `auto`. If explicitly enabled and unavailable, the gate records degraded metadata such as `DEGRADED_PASS` and still blocks only on explicit Claude `BLOCK:`.

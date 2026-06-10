@@ -25,6 +25,7 @@ When converting the user's request to companion invocation:
 - Use `--quality max` only when the user explicitly asks for the strongest local multi-role Claude review.
 - Use `--agent-team sdk-subagents --backend sdk` only when the user explicitly asks for native Claude SDK subagents or native subagent orchestration.
 - Use `--background` for more than three roles, large diffs, slow providers, or broad scope.
+- Before choosing foreground for an unforced review, run `recommend-execution-mode --json` or apply the same threshold: foreground only for tiny one-to-two-file work; use background for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, or unclear scope.
 - Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
 
 Internal invocation examples, not for users:
@@ -84,6 +85,7 @@ Rules:
 - Do not fix review findings in the same turn unless the user explicitly asks which findings to adopt.
 - Use `--background` for long multi-role reviews through the background routing contract above and retrieve the job with `claude-result`.
 - Tiny one-to-two file reviews can run foreground; broader or unclear reviews should use background.
+- Do not rerun a multi-review just because a previous `--wait` observation window expired; use `claude-status` or `claude-result <job-id>`.
 
 Default roles:
 - `correctness`: bugs, regressions, edge cases, and contract breaks.

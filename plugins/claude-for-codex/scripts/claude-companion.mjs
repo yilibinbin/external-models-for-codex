@@ -1,24 +1,46 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
   cancelJob,
+  activeJobsFromList,
+  canStartBackgroundJobFromActive,
+  claimJobForRun,
   claimReservedJob,
   createJob,
+  enrichJobLifecycle,
+  findActiveJobByIdempotencyKeyFromActive,
   finishJob,
   listJobs,
-  markJobRunning,
+  recordJobHeartbeat,
+  recordJobProgress,
+  reapLostJobs,
   readJob,
   reserveJob,
   resultForJob,
-  updateJob
+  updateJobUnlessTerminal,
+  withWorkspaceJobLock
 } from "./lib/jobs.mjs";
+import {
+  DEFAULT_BACKGROUND_WAIT_MS,
+  DEFAULT_MAX_ACTIVE_JOBS,
+  HARD_JOB_TIMEOUT_MS,
+  JOB_HEARTBEAT_INTERVAL_MS,
+  MAX_BACKGROUND_WAIT_MS,
+  MAX_STORED_OUTPUT_BYTES,
+  deriveJobIdempotencyKey,
+  gitSignalTimeoutMs,
+  isTerminalJobStatus,
+  parsePositiveInteger
+} from "./lib/job-lifecycle.mjs";
+import { progressEventsFromLines } from "./lib/progress.mjs";
 import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib/mailbox.mjs";
 import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
@@ -99,8 +121,24 @@ import {
   turnBaselineFileForCwd
 } from "./lib/state.mjs";
 import { extractJsonObject, validateAdversarialJson } from "./lib/structured-output.mjs";
+import { gitCommandTimedOut } from "./lib/git-timeout.mjs";
+import {
+  captureProcessGroupIdentity,
+  currentProcessPlatform,
+  isProcessAlive,
+  processGroupHasLiveMembers,
+  supportsPosixProcessGroups,
+  validateJobWorkerProcess,
+  validateProcessGroupLeader
+} from "./lib/process.mjs";
+import {
+  hookFingerprintOptions,
+  workingTreeFingerprint,
+  workingTreeFingerprintDetails,
+  workingTreeFingerprintMatches
+} from "./lib/worktree-fingerprint.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
@@ -125,6 +163,15 @@ const READ_ONLY_MCP_TOOLS = Object.freeze([
   "mcp__claude-for-codex-git__git_blame",
   "mcp__claude-for-codex-git__git_grep",
   "mcp__claude-for-codex-git__git_ls_files"
+]);
+const BACKGROUND_EXECUTION_CONTROL_ENVS = Object.freeze([
+  CLAUDE_CODE_PATH_ENV,
+  QUALITY_ENV,
+  "CLAUDE_FOR_CODEX_BACKEND",
+  "CLAUDE_FOR_CODEX_DENY_TOOLS",
+  "CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG",
+  "CLAUDE_FOR_CODEX_ROLE_PACK_DIR",
+  "CLAUDE_FOR_CODEX_SDK_MODULE"
 ]);
 const STRUCTURED_REVIEW_FINDING_SCHEMA = Object.freeze({
   type: "object",
@@ -395,12 +442,12 @@ function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
   };
 }
 
-function hasHead() {
-  return git(["rev-parse", "--verify", "HEAD"]).status === 0;
+function hasHead(runGit = git) {
+  return runGit(["rev-parse", "--verify", "HEAD"]).status === 0;
 }
 
-function hasBaseRef(base) {
-  return git(["rev-parse", "--verify", `${base}^{commit}`]).status === 0;
+function hasBaseRef(base, runGit = git) {
+  return runGit(["rev-parse", "--verify", `${base}^{commit}`]).status === 0;
 }
 
 function parseArgs(argv, options = {}) {
@@ -415,9 +462,9 @@ function parseArgs(argv, options = {}) {
       parsed.scope = readOptionValue(tokens, index, arg);
       index += 1;
     } else if (arg === "--path" || arg === "--paths") {
-      const path = readOptionValue(tokens, index, arg);
-      parsed.paths.push(path);
-      parsed.path = path;
+      const pathValue = readOptionValue(tokens, index, arg);
+      parsed.paths.push(pathValue);
+      parsed.path = pathValue;
       index += 1;
     } else if (arg === "--model") {
       parsed.model = assertSafeModelAliasOrId(readOptionValue(tokens, index, arg));
@@ -508,6 +555,11 @@ function parseArgs(argv, options = {}) {
       parsed.background = true;
     } else if (arg === "--wait") {
       parsed.wait = true;
+    } else if (arg === "--wait-timeout-ms") {
+      parsed.waitTimeoutMs = Number(readOptionValue(tokens, index, arg));
+      index += 1;
+    } else if (arg.startsWith("--wait-timeout-ms=")) {
+      parsed.waitTimeoutMs = Number(arg.slice("--wait-timeout-ms=".length));
     } else if (arg === "--json" || arg === "--json-output") {
       parsed.jsonOutput = true;
     } else if (arg === "--write") {
@@ -534,6 +586,9 @@ function parseArgs(argv, options = {}) {
   }
   if (parsed.parallel && parsed.sequential) {
     throw new Error("Choose either --parallel or --sequential.");
+  }
+  if (parsed.waitTimeoutMs !== undefined && (!Number.isFinite(parsed.waitTimeoutMs) || parsed.waitTimeoutMs < 0)) {
+    throw new Error("--wait-timeout-ms must be a non-negative number.");
   }
   return parsed;
 }
@@ -838,13 +893,14 @@ function safeResult(stdout) {
 }
 
 function collectGitContext(options) {
+  const runGit = options.gitRunner ?? git;
   const scope = options.scope ?? "auto";
   const base = options.base;
   const paths = options.paths?.length ? options.paths : options.path ? [options.path] : [];
   const pathLabel = paths.join(" ");
   const pathArgs = paths.length ? ["--", ...paths] : [];
-  const headExists = hasHead();
-  const baseExists = Boolean(base) && headExists && hasBaseRef(base);
+  const headExists = hasHead(runGit);
+  const baseExists = Boolean(base) && headExists && hasBaseRef(base, runGit);
   const baseEffective = !base
     ? ""
     : !headExists
@@ -863,24 +919,24 @@ function collectGitContext(options) {
   const includeBaseBranch = (scope === "auto" || scope === "branch") && Boolean(base);
   const includeHeadNameOnly = scope === "auto" && !base;
 
-  const status = includeWorkingTree ? git(["status", "--short", "--untracked-files=all", ...pathArgs]) : null;
-  const stagedStat = includeWorkingTree ? git(["diff", "--cached", "--stat", ...pathArgs]) : null;
-  const stagedDiff = includeWorkingTree ? git(["diff", "--cached", ...pathArgs]) : null;
-  const unstagedStat = includeWorkingTree ? git(["diff", "--stat", ...pathArgs]) : null;
-  const unstagedDiff = includeWorkingTree ? git(["diff", ...pathArgs]) : null;
+  const status = includeWorkingTree ? runGit(["status", "--short", "--untracked-files=all", ...pathArgs]) : null;
+  const stagedStat = includeWorkingTree ? runGit(["diff", "--cached", "--stat", ...pathArgs]) : null;
+  const stagedDiff = includeWorkingTree ? runGit(["diff", "--cached", ...pathArgs]) : null;
+  const unstagedStat = includeWorkingTree ? runGit(["diff", "--stat", ...pathArgs]) : null;
+  const unstagedDiff = includeWorkingTree ? runGit(["diff", ...pathArgs]) : null;
   const branchStat = includeBaseBranch
     ? baseExists
-      ? git(["diff", "--stat", `${base}...HEAD`, ...pathArgs])
+      ? runGit(["diff", "--stat", `${base}...HEAD`, ...pathArgs])
       : safeResult(`(${baseIssue}; branch diff skipped)`)
     : null;
   const branchNameOnly = includeBaseBranch
     ? baseExists
-      ? git(["diff", "--name-only", `${base}...HEAD`, ...pathArgs])
+      ? runGit(["diff", "--name-only", `${base}...HEAD`, ...pathArgs])
       : includeWorkingTree && status
         ? changedFilesFromStatus(status)
         : safeResult(`(${baseIssue}; branch name-only skipped)`)
     : includeHeadNameOnly && headExists
-      ? git(["diff", "--name-only", "HEAD", ...pathArgs])
+      ? runGit(["diff", "--name-only", "HEAD", ...pathArgs])
       : includeHeadNameOnly && status
         ? changedFilesFromStatus(status)
         : null;
@@ -1062,9 +1118,10 @@ function claudePrint(prompt, options) {
         mcpConfig.cleanup();
       }
     }
-    if (options.write || result.status === 0) {
+    if (options.write) {
       return result;
     }
+    // Newer Claude runtimes may warn about an unknown deny tool and still emit stdout; retry before trusting that run.
     const candidate = parseUnknownDenyToolFailure(result, denyTools);
     if (!candidate || omitted.has(candidate)) {
       return result;
@@ -1081,21 +1138,32 @@ function claudePrint(prompt, options) {
 
 function runClaudeAsync(args, options = {}) {
   return new Promise((resolve) => {
+    const childEnv = options.env ? { ...process.env, ...options.env } : process.env;
     const child = spawn(claudeCommand(), args, {
       cwd: options.cwd ?? process.cwd(),
-      env: options.env ? { ...process.env, ...options.env } : process.env,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const stdoutChunks = [];
     const stderrChunks = [];
     let settled = false;
+    let timedOut = false;
+    let killTimeout = null;
     const timeout = options.timeout
       ? setTimeout(() => {
+          timedOut = true;
           try {
             child.kill("SIGTERM");
           } catch {
             // Process may already have exited.
           }
+          killTimeout = setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Process may already have exited.
+            }
+          }, claudeKillGraceMs(childEnv));
         }, options.timeout)
       : null;
 
@@ -1109,12 +1177,15 @@ function runClaudeAsync(args, options = {}) {
       if (timeout) {
         clearTimeout(timeout);
       }
+      if (killTimeout) {
+        clearTimeout(killTimeout);
+      }
       resolve({
         status: 1,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: error.message || String(error),
-        errorCode: error.code ? String(error.code) : ""
+        error: timedOut ? "ETIMEDOUT" : error.message || String(error),
+        errorCode: timedOut ? "ETIMEDOUT" : error.code ? String(error.code) : ""
       });
     });
     child.once("close", (status, signal) => {
@@ -1125,12 +1196,15 @@ function runClaudeAsync(args, options = {}) {
       if (timeout) {
         clearTimeout(timeout);
       }
+      if (killTimeout) {
+        clearTimeout(killTimeout);
+      }
       resolve({
-        status: status ?? (signal ? 1 : 0),
+        status: timedOut ? 1 : status ?? (signal ? 1 : 0),
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: "",
-        errorCode: ""
+        error: timedOut ? "ETIMEDOUT" : "",
+        errorCode: timedOut ? "ETIMEDOUT" : ""
       });
     });
   });
@@ -1156,9 +1230,10 @@ async function claudePrintAsync(prompt, options) {
         mcpConfig.cleanup();
       }
     }
-    if (options.write || result.status === 0) {
+    if (options.write) {
       return result;
     }
+    // Newer Claude runtimes may warn about an unknown deny tool and still emit stdout; retry before trusting that run.
     const candidate = parseUnknownDenyToolFailure(result, denyTools);
     if (!candidate || omitted.has(candidate)) {
       return result;
@@ -1174,7 +1249,36 @@ async function claudePrintAsync(prompt, options) {
 }
 
 function stripBackgroundArgs(rawArgs) {
-  return normalizeArgv(rawArgs).filter((arg) => arg !== "--background" && arg !== "--wait");
+  const tokens = normalizeArgv(rawArgs);
+  const output = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--background" || token === "--wait") {
+      continue;
+    }
+    if (token === "--wait-timeout-ms") {
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--wait-timeout-ms=")) {
+      continue;
+    }
+    output.push(token);
+  }
+  return output;
+}
+
+function materializeBackgroundArgs(command, rawArgs) {
+  const foregroundArgs = stripBackgroundArgs(rawArgs);
+  if (!STREAM_PROGRESS_COMMANDS.has(command)) {
+    return foregroundArgs;
+  }
+  const parsed = validateCommandNativeModeOptions(command, foregroundArgs);
+  validateBackendArgs(parsed);
+  if (parsed.backend === "sdk" && !parsed.streamProgress) {
+    return [...foregroundArgs, "--stream-progress"];
+  }
+  return foregroundArgs;
 }
 
 function parseJobIdArg(rawArgs) {
@@ -1196,8 +1300,304 @@ function parseJobIdArg(rawArgs) {
   return positional;
 }
 
-function terminalJobStatus(status) {
-  return ["succeeded", "failed", "cancelled", "cancel_failed"].includes(status);
+function parseReservedJobRunArgs(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  let cwd = process.cwd();
+  const jobTokens = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--cwd") {
+      const value = tokens[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("Missing --cwd value.");
+      }
+      cwd = path.resolve(value);
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--cwd=")) {
+      const value = token.slice("--cwd=".length);
+      if (!value) {
+        throw new Error("Missing --cwd value.");
+      }
+      cwd = path.resolve(value);
+      continue;
+    }
+    jobTokens.push(token);
+  }
+  return { jobId: parseJobIdArg(jobTokens), cwd };
+}
+
+function shortstatFileCount(text) {
+  const match = String(text ?? "").match(/(\d+)\s+files?\s+changed/);
+  return match ? Number(match[1]) : 0;
+}
+
+function shortstatChangedLines(text) {
+  const insertions = String(text ?? "").match(/(\d+)\s+insertions?/);
+  const deletions = String(text ?? "").match(/(\d+)\s+deletions?/);
+  return (insertions ? Number(insertions[1]) : 0) + (deletions ? Number(deletions[1]) : 0);
+}
+
+function gitShort(args, cwd = process.cwd(), options = {}) {
+  const env = options.env ?? process.env;
+  const result = run("git", args, { cwd, timeout: gitSignalTimeoutMs(env) });
+  return { ...result, timedOut: gitCommandTimedOut(result) };
+}
+
+function recommendModeArgs(rawArgs) {
+  const tokens = normalizeArgv(rawArgs).filter((arg) => arg !== "--json" && arg !== "--json-output");
+  const args = { command: "review", base: "", paths: [] };
+  let commandSeen = false;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--") {
+      args.paths.push(...tokens.slice(index + 1).filter(Boolean));
+      break;
+    }
+    if (token === "--base") {
+      args.base = readOptionValue(tokens, index, "--base");
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--base=")) {
+      args.base = token.slice("--base=".length);
+      continue;
+    }
+    if (token === "--path") {
+      args.paths.push(readOptionValue(tokens, index, "--path"));
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--path=")) {
+      args.paths.push(token.slice("--path=".length));
+      continue;
+    }
+    if (!commandSeen && BACKGROUND_CAPABLE_COMMANDS.has(token)) {
+      args.command = token;
+      commandSeen = true;
+    }
+  }
+  return args;
+}
+
+function recommendExecutionMode(cwd = process.cwd(), options = {}) {
+  const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd);
+  if (inside.timedOut) {
+    return {
+      recommendation: "background",
+      reason: "git signal collection timed out; use a tracked background review or retry status later",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: null, timedOut: true }
+    };
+  }
+  if (inside.status !== 0) {
+    return {
+      recommendation: "background",
+      reason: "not a git repository; manual/background review recommended",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: false }
+    };
+  }
+  const paths = Array.isArray(options.paths) ? options.paths.filter(Boolean) : [];
+  const pathArgs = paths.length ? ["--", ...paths] : [];
+  const base = typeof options.base === "string" && options.base.trim() ? options.base.trim() : "";
+  const status = gitShort(["status", "--short", "--untracked-files=all", ...pathArgs], cwd);
+  const staged = gitShort(["diff", "--shortstat", "--cached", ...pathArgs], cwd);
+  const unstaged = gitShort(["diff", "--shortstat", ...pathArgs], cwd);
+  const branch = base ? gitShort(["diff", "--shortstat", `${base}...HEAD`, ...pathArgs], cwd) : null;
+  const branchNames = base ? gitShort(["diff", "--name-only", `${base}...HEAD`, ...pathArgs], cwd) : null;
+  if (status.timedOut || staged.timedOut || unstaged.timedOut || branch?.timedOut || branchNames?.timedOut) {
+    return {
+      recommendation: "background",
+      reason: "git signal collection timed out; use a tracked background review or retry status later",
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: true, timedOut: true }
+    };
+  }
+  if ((branch && branch.status !== 0) || (branchNames && branchNames.status !== 0)) {
+    return {
+      recommendation: "background",
+      reason: `base diff unavailable for "${base}"; use tracked background review or check the base ref`,
+      reviewable: false,
+      fileCountEstimate: 0,
+      changedLineEstimate: 0,
+      hasUntracked: false,
+      git: { repository: true, base, baseDiffAvailable: false }
+    };
+  }
+  const statusLines = status.stdout.trim() ? status.stdout.trim().split(/\r?\n/) : [];
+  const hasUntracked = statusLines.some((line) => line.startsWith("??"));
+  const branchFileLines = branchNames?.stdout.trim() ? branchNames.stdout.trim().split(/\r?\n/).filter(Boolean) : [];
+  const fileCountEstimate = Math.max(
+    statusLines.length,
+    shortstatFileCount(staged.stdout) + shortstatFileCount(unstaged.stdout),
+    shortstatFileCount(branch?.stdout ?? ""),
+    branchFileLines.length
+  );
+  const changedLineEstimate = shortstatChangedLines(staged.stdout)
+    + shortstatChangedLines(unstaged.stdout)
+    + shortstatChangedLines(branch?.stdout ?? "");
+  const command = options.command ?? "review";
+  const forcedBackground = command === "multi-review" || command === "adversarial-review" || command === "rescue";
+  const broad = hasUntracked || fileCountEstimate > 2 || changedLineEstimate > 50;
+  const recommendation = forcedBackground || broad ? "background" : "foreground";
+  return {
+    recommendation,
+    reason: recommendation === "background" ? "review appears broader than a small foreground review" : "small review scope",
+    reviewable: statusLines.length > 0 || fileCountEstimate > 0,
+    fileCountEstimate,
+    changedLineEstimate,
+    hasUntracked,
+    git: { repository: true, ...(base ? { base, baseDiffAvailable: true } : {}) }
+  };
+}
+
+function heartbeatIntervalMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS, JOB_HEARTBEAT_INTERVAL_MS, {
+    min: 50,
+    max: 60_000
+  });
+}
+
+function hardJobTimeoutMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS, HARD_JOB_TIMEOUT_MS, {
+    min: 1_000,
+    max: 24 * 60 * 60 * 1000
+  });
+}
+
+function killGraceMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_KILL_GRACE_MS, 5_000, {
+    min: 50,
+    max: 60_000
+  });
+}
+
+function maxActiveJobs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS, DEFAULT_MAX_ACTIVE_JOBS, {
+    min: 1,
+    max: 20
+  });
+}
+
+function reviewGateTimeoutMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS, REVIEW_GATE_TIMEOUT_MS, {
+    min: 1_000,
+    max: 30 * 60 * 1000
+  });
+}
+
+function claudeKillGraceMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_CLAUDE_KILL_GRACE_MS, 1_000, {
+    min: 100,
+    max: 10_000
+  });
+}
+
+function workerNodeBinary(env = process.env) {
+  return env.CLAUDE_FOR_CODEX_WORKER_NODE || process.execPath;
+}
+
+function backgroundPlatformSupport(env = process.env) {
+  const platform = currentProcessPlatform(env);
+  if (supportsPosixProcessGroups(platform)) {
+    return { ok: true, platform };
+  }
+  return {
+    ok: false,
+    platform,
+    message: `Claude for Codex background jobs require POSIX process groups; platform "${platform}" is not supported. Run a foreground command or use a POSIX environment.`
+  };
+}
+
+function assertBackgroundPlatformSupported(env = process.env) {
+  const support = backgroundPlatformSupport(env);
+  if (!support.ok) {
+    throw new Error(support.message);
+  }
+  return support;
+}
+
+function backgroundExecutionControls(env = process.env) {
+  const controls = Object.fromEntries(
+    BACKGROUND_EXECUTION_CONTROL_ENVS.map((name) => [name, String(env[name] ?? "")])
+  );
+  controls.claudeCommand = claudeCommand();
+  return controls;
+}
+
+function makeProgressLineBuffer(onLine) {
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+  return {
+    push(chunk) {
+      buffer += decoder.write(Buffer.from(chunk));
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        onLine(line);
+      }
+    },
+    flush() {
+      buffer += decoder.end();
+      if (buffer) {
+        onLine(buffer);
+        buffer = "";
+      }
+    }
+  };
+}
+
+function makeCappedOutputAccumulator(maxBytes = MAX_STORED_OUTPUT_BYTES) {
+  const chunks = [];
+  let totalBytes = 0;
+  let storedBytes = 0;
+  let truncated = false;
+  return {
+    push(chunk) {
+      const buffer = Buffer.from(chunk);
+      totalBytes += buffer.length;
+      const remaining = maxBytes - storedBytes;
+      if (remaining <= 0) {
+        truncated = true;
+        return;
+      }
+      if (buffer.length > remaining) {
+        chunks.push(buffer.subarray(0, remaining));
+        storedBytes += remaining;
+        truncated = true;
+        return;
+      }
+      chunks.push(buffer);
+      storedBytes += buffer.length;
+    },
+    text() {
+      return Buffer.concat(chunks, storedBytes).toString("utf8");
+    },
+    metadata() {
+      return { bytes: totalBytes, storedBytes, truncated };
+    }
+  };
+}
+
+function jobSnapshotAfterReap(cwd) {
+  const jobs = listJobs(cwd).jobs;
+  const updates = reapLostJobs(cwd, { jobs });
+  if (!updates.length) {
+    return jobs;
+  }
+  const byId = new Map(updates.map((job) => [job.id, job]));
+  return jobs.map((job) => byId.get(job.id) ?? job);
 }
 
 function startBackgroundJob(command, rawArgs) {
@@ -1205,42 +1605,234 @@ function startBackgroundJob(command, rawArgs) {
     console.error(`${command} does not support --background.`);
     process.exit(2);
   }
-  const cwd = process.cwd();
-  const foregroundArgs = stripBackgroundArgs(rawArgs);
-  const session = readJson(currentSessionFileForCwd(cwd), {});
-  const job = createJob(cwd, {
-    command,
-    args: foregroundArgs,
-    cwd,
-    sessionId: session?.sessionId || ""
-  });
-  const child = spawn(process.execPath, [process.argv[1], "__run-job", job.id], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore"
-  });
-  child.unref();
-  updateJob(cwd, job.id, {
-    workerPid: child.pid
-  });
-  return readJob(cwd, job.id) ?? job;
-}
-
-function waitForJob(jobId) {
-  const started = Date.now();
-  const timeoutMs = 30 * 60 * 1000;
-  while (Date.now() - started < timeoutMs) {
-    const job = readJob(process.cwd(), jobId);
-    if (job && terminalJobStatus(job.status)) {
-      return job;
-    }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
+  const support = backgroundPlatformSupport(process.env);
+  if (!support.ok) {
+    return { unsupportedPlatform: true, platform: support.platform, message: support.message };
   }
-  return readJob(process.cwd(), jobId) ?? { id: jobId, status: "unknown" };
+  const cwd = process.cwd();
+  const foregroundArgs = materializeBackgroundArgs(command, rawArgs);
+  const session = readJson(currentSessionFileForCwd(cwd), {});
+  const fingerprint = workingTreeFingerprintDetails(cwd, foregroundArgs);
+  const executionControls = backgroundExecutionControls(process.env);
+  return withWorkspaceJobLock(cwd, process.env, () => {
+    const jobs = jobSnapshotAfterReap(cwd);
+    const active = activeJobsFromList(jobs);
+    const idempotencyKey = fingerprint.reuseDisabled
+      ? ""
+      : deriveJobIdempotencyKey({
+        command,
+        args: foregroundArgs,
+        cwd,
+        workspaceFingerprint: fingerprint.hash,
+        executionControls
+      });
+    const existing = findActiveJobByIdempotencyKeyFromActive(active, idempotencyKey);
+    if (existing) {
+      const existingIsQueuedHostForwardedReservation = existing.reservationMode === "host-forwarded"
+        && Array.isArray(existing.workerCommand)
+        && existing.status === "queued";
+      // A queued host-forwarded reservation is waiting for a Codex subagent to
+      // claim it; a direct --background request must start its own worker.
+      if (!existingIsQueuedHostForwardedReservation) {
+        return { ...existing, reusedExisting: true };
+      }
+    }
+    const capacity = canStartBackgroundJobFromActive(active, maxActiveJobs());
+    if (!capacity.ok) {
+      return { capacityBlocked: true, capacity };
+    }
+    const job = createJob(cwd, {
+      command,
+      args: foregroundArgs,
+      cwd,
+      sessionId: session?.sessionId || "",
+      submissionState: "starting",
+      idempotencyKey,
+      fingerprintTimedOut: fingerprint.timedOut,
+      fingerprintReuseDisabled: fingerprint.reuseDisabled
+    });
+    const workerNode = workerNodeBinary(process.env);
+    if (!fs.existsSync(workerNode)) {
+      const failed = finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: `Worker node binary not found: ${workerNode}`
+      });
+      return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
+    }
+    let child;
+    try {
+      child = spawn(workerNode, [process.argv[1], "__run-job", job.id], {
+        cwd,
+        env: process.env,
+        detached: true,
+        stdio: "ignore"
+      });
+    } catch (error) {
+      const failed = finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: error.message || String(error)
+      });
+      return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
+    }
+    child.once("error", (error) => {
+      finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: error.message || String(error)
+      });
+    });
+    if (!child.pid) {
+      const failed = finishJob(cwd, job.id, {
+        status: 1,
+        stdout: "",
+        stderr: "",
+        error: "Worker process did not expose a pid."
+      });
+      return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
+    }
+    child.unref();
+    const stamped = updateJobUnlessTerminal(cwd, job.id, {
+      workerPid: child.pid
+    });
+    if (!stamped || stamped.status === "locked") {
+      return {
+        ...job,
+        workerPid: child.pid,
+        workerPidUpdatePending: stamped?.status === "locked",
+        workerPidUpdateReason: stamped?.reason ?? ""
+      };
+    }
+    return stamped;
+  });
 }
 
-function maybeStartBackground(command, rawArgs) {
+function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
+  const cwd = process.cwd();
+  const session = readJson(currentSessionFileForCwd(cwd), {});
+  const fingerprint = workingTreeFingerprintDetails(cwd, commandArgs);
+  const executionControls = backgroundExecutionControls(process.env);
+  return withWorkspaceJobLock(cwd, process.env, () => {
+    const jobs = jobSnapshotAfterReap(cwd);
+    const active = activeJobsFromList(jobs);
+    const idempotencyKey = fingerprint.reuseDisabled
+      ? ""
+      : deriveJobIdempotencyKey({
+        command,
+        args: commandArgs,
+        cwd,
+        workspaceFingerprint: fingerprint.hash,
+        executionControls
+      });
+    const existing = findActiveJobByIdempotencyKeyFromActive(active, idempotencyKey);
+    if (existing) {
+      if (existing.reservationMode !== "host-forwarded" || !Array.isArray(existing.workerCommand)) {
+        return { alreadyRunning: true, job: existing };
+      }
+      if (existing.status !== "queued") {
+        return { alreadyRunning: true, job: existing };
+      }
+      return { reusedExisting: true, job: existing };
+    }
+    const capacity = canStartBackgroundJobFromActive(active, maxActiveJobs());
+    if (!capacity.ok) {
+      return { capacityBlocked: true, capacity };
+    }
+    const job = reserveJob(cwd, {
+      id: jobId,
+      command,
+      args: commandArgs,
+      cwd,
+      focus: commandArgs.join(" "),
+      sessionId: session?.sessionId || "",
+      submissionState: "starting",
+      idempotencyKey,
+      fingerprintTimedOut: fingerprint.timedOut,
+      fingerprintReuseDisabled: fingerprint.reuseDisabled
+    }, workerCommand);
+    return { job };
+  });
+}
+
+function elapsedMs(job) {
+  const start = Date.parse(job.startedAt ?? job.createdAt ?? "");
+  if (!Number.isFinite(start)) {
+    return null;
+  }
+  const terminal = isTerminalJobStatus(job.status);
+  const end = terminal
+    ? Date.parse(job.finishedAt ?? job.updatedAt ?? "")
+    : Date.now();
+  return Math.max(0, (Number.isFinite(end) ? end : Date.now()) - start);
+}
+
+function progressPreview(job) {
+  return typeof job.lastProgressMessage === "string" && job.lastProgressMessage.trim()
+    ? [job.lastProgressMessage]
+    : [];
+}
+
+function enrichCompanionJob(job) {
+  const enriched = enrichJobLifecycle(job);
+  if (
+    enriched.lifecycle?.state === "lost" &&
+    job.status === "queued" &&
+    Number.isInteger(job.workerPid) &&
+    validateJobWorkerProcess(job.workerPid, job.id).ok
+  ) {
+    enriched.lifecycle = {
+      ...enriched.lifecycle,
+      state: "queued-stale",
+      workerAlive: true
+    };
+  }
+  return { ...enriched, elapsedMs: elapsedMs(job), progressPreview: progressPreview(job) };
+}
+
+function isExpectedActiveWaitStatus(status) {
+  return status === "queued" || status === "running";
+}
+
+async function waitForJob(jobId, options = {}) {
+  const started = Date.now();
+  const cwd = process.cwd();
+  const timeoutMs = parsePositiveInteger(options.timeoutMs, DEFAULT_BACKGROUND_WAIT_MS, {
+    min: 0,
+    max: MAX_BACKGROUND_WAIT_MS
+  });
+  let nextReapAt = 0;
+  const maybeReapLostJobs = () => {
+    const now = Date.now();
+    if (now < nextReapAt) {
+      return;
+    }
+    reapLostJobs(cwd);
+    nextReapAt = now + 5_000;
+  };
+  while (Date.now() - started < timeoutMs) {
+    maybeReapLostJobs();
+    const job = readJob(cwd, jobId);
+    if (job && isTerminalJobStatus(job.status)) {
+      return { job, waitTimedOut: false };
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  reapLostJobs(cwd);
+  const job = readJob(cwd, jobId);
+  if (job && isTerminalJobStatus(job.status)) {
+    return { job, waitTimedOut: false };
+  }
+  return {
+    job: job ?? { id: jobId, status: "unknown" },
+    waitTimedOut: true
+  };
+}
+
+async function maybeStartBackground(command, rawArgs) {
   let parsed;
   try {
     parsed = validateCommandNativeModeOptions(command, rawArgs);
@@ -1251,16 +1843,58 @@ function maybeStartBackground(command, rawArgs) {
     return false;
   }
   const job = startBackgroundJob(command, rawArgs);
-  if (parsed.wait) {
-    const completed = waitForJob(job.id);
-    process.stdout.write(`${JSON.stringify({ status: completed.status, job: completed }, null, 2)}\n`);
-    process.exit(completed.status === "succeeded" ? 0 : 1);
+  if (job?.unsupportedPlatform) {
+    process.stdout.write(`${JSON.stringify({
+      status: "unsupported_platform",
+      platform: job.platform,
+      message: job.message
+    }, null, 2)}\n`);
+    process.exit(2);
   }
-  process.stdout.write(`${JSON.stringify({ status: "started", job }, null, 2)}\n`);
+  if (job?.status === "workspace_locked") {
+    process.stdout.write(`${JSON.stringify({
+      status: "workspace_locked",
+      message: job.reason ?? "Claude for Codex workspace job state is busy; retry later."
+    }, null, 2)}\n`);
+    process.exit(2);
+  }
+  if (job?.capacityBlocked) {
+    process.stdout.write(`${JSON.stringify({
+      status: "capacity_blocked",
+      activeCount: job.capacity.activeCount,
+      limit: job.capacity.limit,
+      message: "Claude for Codex already has the maximum number of active background jobs. Use jobs/result/cancel before starting another."
+    }, null, 2)}\n`);
+    process.exit(2);
+  }
+  if (job?.launchFailed) {
+    process.stdout.write(`${JSON.stringify({
+      status: "launch_failed",
+      job: enrichCompanionJob(job.job),
+      message: "Claude for Codex could not start the background worker; the job was marked failed and will not occupy active capacity."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
+  if (parsed.wait) {
+    const waited = await waitForJob(job.id, { timeoutMs: parsed.waitTimeoutMs });
+    const stillRunning = waited.waitTimedOut && isExpectedActiveWaitStatus(waited.job.status);
+    const responseJob = {
+      ...waited.job,
+      ...(job.reusedExisting ? { reusedExisting: true } : {})
+    };
+    process.stdout.write(`${JSON.stringify({
+      status: stillRunning ? "running" : waited.job.status,
+      waitTimedOut: waited.waitTimedOut,
+      job: enrichCompanionJob(responseJob)
+    }, null, 2)}\n`);
+    process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1);
+  }
+  process.stdout.write(`${JSON.stringify({ status: job.reusedExisting ? job.status : "queued", job: enrichCompanionJob(job) }, null, 2)}\n`);
   process.exit(0);
 }
 
 function handleReserveJob(rawArgs) {
+  assertBackgroundPlatformSupported(process.env);
   const tokens = normalizeArgv(rawArgs);
   const command = tokens[0];
   if (!command) {
@@ -1269,34 +1903,64 @@ function handleReserveJob(rawArgs) {
   if (!BACKGROUND_CAPABLE_COMMANDS.has(command)) {
     throw new Error(`Command "${command}" cannot be reserved as a background job.`);
   }
-  const commandArgs = stripBackgroundArgs(tokens.slice(1));
+  const commandArgs = materializeBackgroundArgs(command, tokens.slice(1));
   const parsed = validateCommandNativeModeOptions(command, commandArgs);
   validateBackendArgs(parsed);
   validateBackendCompatibleOptions(parsed);
+  validateSdkSubagentsBackend(parsed);
+  const jobId = `job-${randomUUID()}`;
   const workerCommand = [
-    process.argv0 || process.execPath,
-    process.argv[1],
-    "run-reserved-job"
+    process.execPath,
+    path.resolve(process.argv[1]),
+    "run-reserved-job",
+    "--job-id",
+    jobId,
+    "--cwd",
+    process.cwd()
   ];
-  const job = reserveJob(process.cwd(), {
-    command,
-    args: commandArgs,
-    cwd: process.cwd(),
-    focus: commandArgs.join(" ")
-  }, workerCommand);
-  workerCommand.push("--job-id", job.id);
-  const updated = updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
+  const reserved = reserveBackgroundJob(command, commandArgs, workerCommand, jobId);
+  if (reserved?.status === "workspace_locked") {
+    return {
+      status: "workspace_locked",
+      message: reserved.reason ?? "Claude for Codex workspace job state is busy; retry later."
+    };
+  }
+  if (reserved?.capacityBlocked) {
+    return {
+      status: "capacity_blocked",
+      activeCount: reserved.capacity.activeCount,
+      limit: reserved.capacity.limit,
+      message: "Claude for Codex already has the maximum number of active background jobs. Use jobs/result/cancel before reserving another."
+    };
+  }
+  if (reserved?.alreadyRunning) {
+    return {
+      status: "running",
+      reusedExisting: true,
+      job: {
+        id: reserved.job.id,
+        status: reserved.job.status,
+        command: reserved.job.command,
+        args: reserved.job.args ?? []
+      },
+      message: "An active background job already covers this request; do not dispatch a forwarding subagent."
+    };
+  }
+  const job = reserved.job;
+  const updated = job;
 
   return {
     status: "reserved",
+    reusedExisting: Boolean(reserved.reusedExisting),
     job: {
       id: updated.id,
       status: updated.status,
       command: updated.command,
       args: updated.args ?? []
     },
-    workerCommand,
-    forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once, must not inspect or reinterpret the repository, and must return only the command result."
+    cwd: process.cwd(),
+    workerCommand: updated.workerCommand ?? workerCommand,
+    forwardingInstructions: "Dispatch exactly one forwarding subagent. The child must run workerCommand once as argv from the returned cwd, must not inspect or reinterpret the repository, and must return only the command result."
   };
 }
 
@@ -1355,11 +2019,18 @@ function handleSubagentCommand(rawArgs) {
   };
 }
 
-function hasReviewableGitChanges(cwd = process.cwd()) {
-  if (run("git", ["rev-parse", "--is-inside-work-tree"], { cwd }).status !== 0) {
+function hasReviewableGitChanges(cwd = process.cwd(), options = {}) {
+  const inside = gitShort(["rev-parse", "--is-inside-work-tree"], cwd, options);
+  if (inside.timedOut) {
+    return { reviewable: false, reason: "git repository check timed out", timedOut: true };
+  }
+  if (inside.status !== 0) {
     return { reviewable: false, reason: "not a git repository" };
   }
-  const status = run("git", ["status", "--short", "--untracked-files=all"], { cwd });
+  const status = gitShort(["status", "--short", "--untracked-files=all"], cwd, options);
+  if (status.timedOut) {
+    return { reviewable: false, reason: "git status timed out", timedOut: true };
+  }
   if (status.status !== 0) {
     return { reviewable: false, reason: "git status failed" };
   }
@@ -1367,15 +2038,6 @@ function hasReviewableGitChanges(cwd = process.cwd()) {
     reviewable: Boolean(status.stdout.trim()),
     reason: status.stdout.trim() ? "git working tree has changes" : "no git changes"
   };
-}
-
-function workingTreeFingerprint(cwd = process.cwd()) {
-  const parts = [
-    run("git", ["status", "--short", "--untracked-files=all"], { cwd }).stdout,
-    run("git", ["diff", "--cached"], { cwd }).stdout,
-    run("git", ["diff"], { cwd }).stdout
-  ];
-  return createHash("sha256").update(parts.join("\n--- claude-for-codex ---\n")).digest("hex");
 }
 
 function adversarialLensSection(lenses) {
@@ -2165,6 +2827,10 @@ async function runReviewGate(rawArgs) {
     warnGate(`argument parse failed; allowing stop: ${error.message || String(error)}`);
     return;
   }
+  if (rawArgs.includes("reserve-job") || args.background || args.wait) {
+    warnGate("background/wait/reserve-job flags are ignored for Stop hook review gate; allowing stop");
+    return;
+  }
 
   let input = {};
   try {
@@ -2203,17 +2869,32 @@ async function runReviewGate(rawArgs) {
     return;
   }
 
-  const reviewable = hasReviewableGitChanges(cwd);
+  const hookOptions = hookFingerprintOptions();
+  const reviewable = hasReviewableGitChanges(cwd, hookOptions);
   if (!reviewable.reviewable) {
+    if (reviewable.timedOut) {
+      warnGate(`${reviewable.reason}; allowing stop`);
+    }
     return;
   }
-  const diffHash = workingTreeFingerprint(cwd);
-  const baseline = readJson(turnBaselineFileForCwd(cwd), null);
-  if (baseline?.workingTreeFingerprint === diffHash) {
+  const diffFingerprint = workingTreeFingerprintDetails(cwd, [], hookOptions);
+  const diffHash = diffFingerprint.hash;
+  const diffFingerprintUsable = !diffFingerprint.reuseDisabled;
+  if (diffFingerprint.reuseDisabled && !diffFingerprint.budgetExceeded) {
+    const reason = diffFingerprint.failureKind === "timeout"
+      ? "working-tree fingerprint timed out"
+      : "working-tree fingerprint inconclusive";
+    warnGate(`${reason}; allowing stop and skipping cached gate decision`);
     return;
   }
-  if (config.lastAllowedReviewGateDiffHash === diffHash) {
-    return;
+  if (diffFingerprint.budgetExceeded) {
+    warnGate("working-tree fingerprint budget exceeded; running review without cached gate decision");
+  }
+  if (diffFingerprintUsable) {
+    const baseline = readJson(turnBaselineFileForCwd(cwd), null);
+    if (workingTreeFingerprintMatches(baseline?.workingTreeFingerprint, diffFingerprint)) {
+      return;
+    }
   }
 
   let roles;
@@ -2240,13 +2921,20 @@ async function runReviewGate(rawArgs) {
     return;
   }
   args.scope = "working-tree";
+  const gateQualityRequest = args.quality ?? process.env[QUALITY_ENV];
+  if (gateQualityRequest === undefined || String(gateQualityRequest).trim().toLowerCase() === "auto") {
+    args.quality = "standard";
+  }
   try {
     applyCommandQualityPolicy("review-gate", args);
   } catch (error) {
     warnGate(`quality policy failed; allowing stop: ${error.message || String(error)}`);
     return;
   }
-  args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
+  const gateCacheKey = diffFingerprintUsable ? reviewGateCacheKey(diffHash, args, roles) : "";
+  if (diffFingerprintUsable && config.lastAllowedReviewGateDiffHash === gateCacheKey) {
+    return;
+  }
   try {
     attachSemanticContext(args, { reviewGate: true, command: "review-gate" });
   } catch (error) {
@@ -2274,16 +2962,33 @@ async function runReviewGate(rawArgs) {
     warnGate(`semantic context unavailable (${args.semantic.report.semanticFailureReason}); running degraded gate`);
   }
 
-  const gitContext = collectGitContext(args);
+  const gitContext = collectGitContext({
+    ...args,
+    gitRunner: (gitArgs) => gitShort(gitArgs, cwd, hookOptions)
+  });
   const blocks = [];
+  const gateDeadline = Date.now() + reviewGateTimeoutMs();
+  let allowCount = 0;
+  let gateReviewComplete = true;
   for (const role of roles) {
+    const remainingMs = gateDeadline - Date.now();
+    if (remainingMs <= 0) {
+      gateReviewComplete = false;
+      warnGate("review gate aggregate timeout reached; allowing stop");
+      break;
+    }
     const prompt = reviewGateRolePrompt(role, args, gitContext);
-    const result = await claudePrintAsync(prompt, args);
+    const result = await claudePrintAsync(prompt, {
+      ...args,
+      timeout: Math.min(REVIEW_GATE_ROLE_TIMEOUT_MS, remainingMs)
+    });
     if (result.errorCode === "ETIMEDOUT" || result.error.includes("ETIMEDOUT")) {
+      gateReviewComplete = false;
       warnGate(`role ${role.name} timed out; allowing stop`);
       continue;
     }
     if (result.status !== 0) {
+      gateReviewComplete = false;
       const detail = claudeFailureDiagnostic(result).trim();
       warnGate(`role ${role.name} failed; allowing stop: ${detail}`);
       continue;
@@ -2291,7 +2996,10 @@ async function runReviewGate(rawArgs) {
     const verdict = parseGateVerdict(result.stdout);
     if (verdict.kind === "block") {
       blocks.push({ role: role.name, reason: verdict.reason, output: verdict.output });
+    } else if (verdict.kind === "allow") {
+      allowCount += 1;
     } else if (verdict.kind === "invalid") {
+      gateReviewComplete = false;
       warnGate(`role ${role.name} returned invalid gate output; allowing stop: ${verdict.reason}`);
     }
   }
@@ -2316,7 +3024,17 @@ async function runReviewGate(rawArgs) {
     error: "",
     errorCode: ""
   }, startedAt);
-  setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
+  if (diffFingerprintUsable && gateReviewComplete && allowCount > 0) {
+    setConfig(cwd, "lastAllowedReviewGateDiffHash", gateCacheKey);
+  }
+}
+
+function reviewGateCacheKey(diffHash, args, roles) {
+  return createHash("sha256").update(JSON.stringify({
+    diffHash,
+    quality: args.quality ?? "",
+    roles: roles.map((role) => role.name)
+  })).digest("hex");
 }
 
 function parseStructuredReviewResult(stdout, options = {}) {
@@ -2570,7 +3288,7 @@ function renderStructuredRoleReview(results) {
 
 async function runClaudeTask(kind, rawArgs) {
   const startedAt = new Date().toISOString();
-  if (maybeStartBackground(kind, rawArgs)) {
+  if (await maybeStartBackground(kind, rawArgs)) {
     return;
   }
   let args;
@@ -2682,12 +3400,15 @@ async function runClaudeTask(kind, rawArgs) {
     process.stderr.write(`[claude-for-codex rescue] write-mode fingerprint ${rescueBefore} -> ${rescueAfter}\n`);
   }
   recordCommandReport(kind, args, result, startedAt);
+  if (process.env.CLAUDE_FOR_CODEX_JOB_WORKER === "1" && result.stderr) {
+    process.stderr.write(result.stderr);
+  }
   process.stdout.write(result.stdout);
 }
 
 async function runClaudeMultiReview(rawArgs) {
   const startedAt = new Date().toISOString();
-  if (maybeStartBackground("multi-review", rawArgs)) {
+  if (await maybeStartBackground("multi-review", rawArgs)) {
     return;
   }
   let args;
@@ -2929,29 +3650,46 @@ function runClaudeUltrareview(rawArgs) {
 }
 
 function printJobs() {
-  process.stdout.write(`${JSON.stringify(listJobs(process.cwd()), null, 2)}\n`);
+  reapLostJobs(process.cwd());
+  const payload = listJobs(process.cwd());
+  process.stdout.write(`${JSON.stringify({
+    ...payload,
+    jobs: payload.jobs.map((job) => enrichCompanionJob(job))
+  }, null, 2)}\n`);
 }
 
 function printResult(rawArgs) {
-  const jobId = rawArgs[0];
-  if (!jobId) {
+  let jobId;
+  try {
+    jobId = parseJobIdArg(rawArgs);
+  } catch (_error) {
     console.error("Usage: claude-companion.mjs result <job-id>");
     process.exit(2);
   }
   let payload;
   try {
+    reapLostJobs(process.cwd());
     payload = resultForJob(process.cwd(), jobId);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
   }
+  if (payload.job) {
+    payload = { ...payload, job: enrichCompanionJob(payload.job) };
+  }
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.status === "ok" ? 0 : 1);
 }
 
+function runRecommendExecutionMode(rawArgs) {
+  process.stdout.write(`${JSON.stringify(recommendExecutionMode(process.cwd(), recommendModeArgs(rawArgs)), null, 2)}\n`);
+}
+
 function runCancel(rawArgs) {
-  const jobId = rawArgs[0];
-  if (!jobId) {
+  let jobId;
+  try {
+    jobId = parseJobIdArg(rawArgs);
+  } catch (_error) {
     console.error("Usage: claude-companion.mjs cancel <job-id>");
     process.exit(2);
   }
@@ -2966,7 +3704,13 @@ function runCancel(rawArgs) {
   process.exit(payload.status === "cancelled" ? 0 : 1);
 }
 
-function runJobWorker(rawArgs) {
+async function runJobWorker(rawArgs) {
+  try {
+    assertBackgroundPlatformSupported(process.env);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
   const jobId = rawArgs[0];
   if (!jobId) {
     process.exit(2);
@@ -2987,31 +3731,40 @@ function runJobWorker(rawArgs) {
     });
     process.exit(2);
   }
-  markJobRunning(process.cwd(), jobId, process.pid);
-  const result = spawnSync(process.execPath, [process.argv[1], job.command, ...(job.args ?? [])], {
-    cwd: job.cwd || process.cwd(),
-    env: {
-      ...process.env,
-      CLAUDE_FOR_CODEX_JOB_WORKER: "1"
-    },
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 30 * 60 * 1000
-  });
+  const claim = claimJobForRun(process.cwd(), jobId, process.pid);
+  if (claim.status !== "claimed") {
+    process.stdout.write(`${JSON.stringify({ status: claim.status, jobId, reason: claim.reason ?? "" }, null, 2)}\n`);
+    process.exit(1);
+  }
+  const result = await runStoredJobCommand(claim.job, { stateCwd: process.cwd() });
   const current = readJob(process.cwd(), jobId);
   if (current?.status === "cancelled") {
     process.exit(0);
   }
-  finishJob(process.cwd(), jobId, {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    error: result.error ? String(result.error.message ?? result.error) : ""
-  });
-  process.exit(result.status ?? 1);
+  const finished = finishJob(process.cwd(), jobId, result);
+  if (!finished || finished.status === "locked") {
+    process.stdout.write(`${JSON.stringify({
+      status: "finish_failed",
+      jobId,
+      exitStatus: result.status ?? 1,
+      message: finished?.reason ?? "Background job finished but final state could not be persisted."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
+  process.exit(finished.status === "cancelled" ? 0 : result.status ?? 1);
 }
 
-function runStoredJobCommand(job) {
+function runStoredJobCommand(job, options = {}) {
+  try {
+    assertBackgroundPlatformSupported(process.env);
+  } catch (error) {
+    return Promise.resolve({
+      status: 2,
+      stdout: "",
+      stderr: error.message || String(error),
+      error: ""
+    });
+  }
   if (!BACKGROUND_CAPABLE_COMMANDS.has(job.command)) {
     return Promise.resolve({
       status: 2,
@@ -3020,9 +3773,170 @@ function runStoredJobCommand(job) {
       error: ""
     });
   }
+  const stateCwd = options.stateCwd ?? process.cwd();
   const foregroundArgs = stripBackgroundArgs(job.args ?? []);
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
+    const hardMs = hardJobTimeoutMs();
+    const killMs = killGraceMs();
+    const started = Date.now();
+    const stdoutOutput = makeCappedOutputAccumulator();
+    const stderrOutput = makeCappedOutputAccumulator();
+    let settled = false;
+    let stopRequested = false;
+    let hardTimedOut = false;
+    let hardTimedOutAt = 0;
+    let childProcessGroupIdentity = null;
+    let killTimer = null;
+    let heartbeat = null;
+    let timeout = null;
+    let child;
+    let childExitedBeforeIdentity = false;
+    let deliveredToValidatedChildGroup = false;
+    const progressLines = makeProgressLineBuffer((line) => {
+      const parsed = progressEventsFromLines([line]);
+      // Malformed counts are parser diagnostics for tests and future telemetry.
+      // The worker ignores them here to avoid turning model stderr into noisy
+      // supervision output while still accepting well-formed progress events.
+      for (const event of parsed.events) {
+        recordJobProgress(stateCwd, job.id, {
+          phase: event.phase || "running",
+          lastProgressMessage: event.message || "",
+          lastProgressRole: event.role || "",
+          childPid: child?.pid ?? null,
+          childProcessGroupPid: child?.pid ?? null,
+          childProcessGroupIdentity
+        });
+      }
+    });
+
+    function commandResult(status, error = "") {
+      const stdout = stdoutOutput.metadata();
+      const stderr = stderrOutput.metadata();
+      return {
+        status,
+        stdout: stdoutOutput.text(),
+        stderr: stderrOutput.text(),
+        stdoutBytes: stdout.bytes,
+        stderrBytes: stderr.bytes,
+        stdoutTruncated: stdout.truncated,
+        stderrTruncated: stderr.truncated,
+        error
+      };
+    }
+
+    function stopChildGroup(signal, options = {}) {
+      stopRequested = true;
+      if (!child?.pid) {
+        return false;
+      }
+      if (childProcessGroupIdentity) {
+        const validation = validateProcessGroupLeader(child.pid, childProcessGroupIdentity);
+        if (!validation.ok) {
+          if (
+            validation.reason === "process not found"
+            && deliveredToValidatedChildGroup
+            && processGroupHasLiveMembers(child.pid)
+          ) {
+            try {
+              process.kill(-child.pid, signal);
+              return true;
+            } catch {
+              return false;
+            }
+          }
+          return false;
+        }
+        if (options.requireLiveGroup && !processGroupHasLiveMembers(child.pid)) {
+          return false;
+        }
+        try {
+          process.kill(validation.signalPid, signal);
+          deliveredToValidatedChildGroup = true;
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      if (options.requireLiveGroup && !processGroupHasLiveMembers(child.pid)) {
+        return false;
+      }
+      try {
+        process.kill(-child.pid, signal);
+        return true;
+      } catch {
+        if (options.requireLiveGroup) {
+          return false;
+        }
+        try {
+          child.kill(signal);
+          return true;
+        } catch {
+          // Child may already have exited.
+        }
+      }
+      return false;
+    }
+
+    function stopUnvalidatedChild(signal) {
+      stopRequested = true;
+      if (!child?.pid) {
+        return;
+      }
+      try {
+        child.kill(signal);
+      } catch {
+        // Child may already have exited.
+      }
+    }
+
+    function cleanup(options = {}) {
+      clearInterval(heartbeat);
+      clearTimeout(timeout);
+      if (!options.keepKillTimer) {
+        clearTimeout(killTimer);
+      }
+      process.removeListener("SIGTERM", signalHandler);
+      process.removeListener("SIGINT", signalHandler);
+    }
+
+    function stopChildWithEscalation(reasonSignal = "SIGTERM") {
+      // Invariant: every path that resolves the worker result sets `settled`
+      // first. `killTimer` belongs to the active escalation branch until close
+      // either cancels it or intentionally keeps/replaces it below.
+      stopChildGroup(reasonSignal === "SIGKILL" ? "SIGKILL" : "SIGTERM");
+      if (reasonSignal !== "SIGKILL") {
+        clearTimeout(killTimer);
+        killTimer = setTimeout(() => {
+          const delivered = stopChildGroup("SIGKILL", { requireLiveGroup: hardTimedOut });
+          if (!hardTimedOut) {
+            return;
+          }
+          killTimer = setTimeout(() => {
+            if (settled) {
+              return;
+            }
+            const stillAlive = child?.pid ? (isProcessAlive(child.pid) || processGroupHasLiveMembers(child.pid)) : false;
+            settled = true;
+            progressLines.flush();
+            cleanup();
+            resolve({
+              ...commandResult(1, stillAlive
+                ? "Child process group still alive after hard timeout SIGKILL escalation."
+                : delivered
+                ? "Child process did not emit close after hard timeout SIGKILL escalation."
+                : "Child process group was not live when hard timeout SIGKILL escalation ran.")
+            });
+          }, 1_000);
+        }, killMs);
+      }
+    }
+
+    const signalHandler = () => stopChildWithEscalation("SIGTERM");
+
+    process.once("SIGTERM", signalHandler);
+    process.once("SIGINT", signalHandler);
+
+    child = spawn(process.execPath, [process.argv[1], job.command, ...foregroundArgs], {
       cwd: job.cwd || process.cwd(),
       env: {
         ...process.env,
@@ -3031,50 +3945,71 @@ function runStoredJobCommand(job) {
       detached: true,
       stdio: ["ignore", "pipe", "pipe"]
     });
-    const started = Date.now();
-    const timeout = setTimeout(() => {
-      stopChildGroup("SIGTERM");
-    }, 30 * 60 * 1000);
-    const stdoutChunks = [];
-    const stderrChunks = [];
-    let settled = false;
-    let stopRequested = false;
+    if (stopRequested) {
+      stopChildWithEscalation("SIGTERM");
+    }
 
-    function stopChildGroup(signal) {
-      stopRequested = true;
-      try {
-        process.kill(-child.pid, signal);
-      } catch {
-        try {
-          child.kill(signal);
-        } catch {
-          // Child may already have exited.
-        }
+    child.stdout?.on("data", (chunk) => stdoutOutput.push(chunk));
+    child.stderr?.on("data", (chunk) => {
+      const buffer = Buffer.from(chunk);
+      stderrOutput.push(buffer);
+      progressLines.push(buffer);
+    });
+    child.once("exit", () => {
+      childExitedBeforeIdentity = true;
+    });
+
+    // This bounded synchronous probe runs only at child startup. It prevents
+    // PID-reuse-unsafe process-group signaling; signals delivered during the
+    // short probe are handled immediately after it returns.
+    childProcessGroupIdentity = child.pid ? captureProcessGroupIdentity(child.pid) : null;
+    if (child.pid && !childProcessGroupIdentity) {
+      const fastExited = childExitedBeforeIdentity || child.exitCode !== null || child.signalCode !== null || !isProcessAlive(child.pid);
+      if (fastExited) {
+        childExitedBeforeIdentity = true;
+      } else {
+        settled = true;
+        stopUnvalidatedChild("SIGKILL");
+        resolve({
+          status: 1,
+          stdout: "",
+          stderr: "",
+          error: "Child process group identity could not be validated after spawn; refusing to supervise an unsafe signal target."
+        });
+        cleanup();
+        return;
       }
     }
+    recordJobProgress(stateCwd, job.id, {
+      phase: "submitted",
+      childPid: child.pid ?? null,
+      childProcessGroupPid: child.pid ?? null,
+      childProcessGroupIdentity
+    });
+    heartbeat = setInterval(() => {
+      recordJobHeartbeat(stateCwd, job.id, {
+        phase: "running",
+        childPid: child.pid ?? null,
+        childProcessGroupPid: child.pid ?? null,
+        childProcessGroupIdentity
+      });
+    }, heartbeatIntervalMs());
 
-    function handleWrapperSignal(signal) {
-      stopChildGroup(signal);
-    }
+    timeout = setTimeout(() => {
+      hardTimedOut = true;
+      hardTimedOutAt = Date.now();
+      stopChildWithEscalation("SIGTERM");
+    }, hardMs);
 
-    process.once("SIGTERM", handleWrapperSignal);
-    process.once("SIGINT", handleWrapperSignal);
-
-    child.stdout?.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-    child.stderr?.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
     child.once("error", (error) => {
       if (settled) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
-      process.removeListener("SIGTERM", handleWrapperSignal);
-      process.removeListener("SIGINT", handleWrapperSignal);
+      progressLines.flush();
+      cleanup();
       resolve({
-        status: 1,
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: error.message || String(error)
+        ...commandResult(1, error.message || String(error))
       });
     });
     child.once("close", (status, signal) => {
@@ -3082,14 +4017,30 @@ function runStoredJobCommand(job) {
         return;
       }
       settled = true;
-      clearTimeout(timeout);
-      process.removeListener("SIGTERM", handleWrapperSignal);
-      process.removeListener("SIGINT", handleWrapperSignal);
+      progressLines.flush();
+      if (hardTimedOut && signal !== "SIGKILL") {
+        // The child closed during the hard-timeout grace window. Keep ownership
+        // of the escalation timer long enough to preserve timeout-as-failure
+        // semantics even if the process reports a clean exit after SIGTERM.
+        cleanup({ keepKillTimer: true });
+        clearTimeout(killTimer);
+        const remainingKillGraceMs = Math.max(0, (hardTimedOutAt || Date.now()) + killMs - Date.now());
+        killTimer = setTimeout(() => {
+          stopChildGroup("SIGKILL", { requireLiveGroup: true });
+          clearTimeout(killTimer);
+          resolve({
+            ...commandResult(1, `Child terminated by ${signal ?? "SIGTERM"} after hard timeout before SIGKILL escalation.`)
+          });
+        }, remainingKillGraceMs);
+        return;
+      }
+      cleanup();
       resolve({
-        status: status ?? (signal ? 1 : 0),
-        stdout: Buffer.concat(stdoutChunks).toString("utf8"),
-        stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: stopRequested || Date.now() - started >= 30 * 60 * 1000 ? `Child terminated by ${signal ?? "timeout"}.` : ""
+        ...commandResult(hardTimedOut ? 1 : status ?? (signal ? 1 : 0), hardTimedOut
+          ? `Child terminated by ${signal ?? "timeout"} after hard timeout.`
+          : stopRequested
+          ? `Child terminated by ${signal ?? "SIGTERM"} after stop request.`
+          : "")
       });
     });
   });
@@ -3097,8 +4048,9 @@ function runStoredJobCommand(job) {
 
 async function runReservedJob(rawArgs) {
   let jobId;
+  let stateCwd;
   try {
-    jobId = parseJobIdArg(rawArgs);
+    ({ jobId, cwd: stateCwd } = parseReservedJobRunArgs(rawArgs));
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -3106,28 +4058,64 @@ async function runReservedJob(rawArgs) {
 
   let claim;
   try {
-    claim = claimReservedJob(process.cwd(), jobId, process.pid);
+    claim = await claimReservedJobWithRetry(stateCwd, jobId);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
   }
   if (claim.status !== "claimed") {
+    const retryable = claim.status === "workspace_locked" || claim.status === "locked";
     process.stdout.write(`${JSON.stringify({
       status: claim.status,
       jobId,
-      message: "Reserved job was not queued and was not executed."
+      retryable,
+      message: retryable
+        ? claim.reason ?? "Reserved job claim could not acquire required state locks; retry later."
+        : "Reserved job was not claimable and was not executed."
     }, null, 2)}\n`);
     process.exit(1);
   }
 
-  const result = await runStoredJobCommand(claim.job);
-  const finished = finishJob(process.cwd(), claim.job.id, result);
+  const result = await runStoredJobCommand(claim.job, { stateCwd });
+  const current = readJob(stateCwd, claim.job.id);
+  if (current?.status === "cancelled") {
+    process.stdout.write(`${JSON.stringify({
+      status: "cancelled",
+      jobId: claim.job.id,
+      exitStatus: 0
+    }, null, 2)}\n`);
+    process.exit(0);
+  }
+  const finished = finishJob(stateCwd, claim.job.id, result);
+  if (!finished || finished.status === "locked") {
+    process.stdout.write(`${JSON.stringify({
+      status: "finish_failed",
+      jobId: claim.job.id,
+      exitStatus: result.status ?? 1,
+      message: finished?.reason ?? "Reserved job finished but final state could not be persisted."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
   process.stdout.write(`${JSON.stringify({
     status: finished.status,
-    jobId: finished.id,
-    exitStatus: finished.exitStatus
+    jobId: finished.id ?? claim.job.id,
+    exitStatus: finished.status === "cancelled" ? 0 : finished.exitStatus ?? result.status ?? 1
   }, null, 2)}\n`);
-  process.exit(result.status ?? 1);
+  process.exit(finished.status === "cancelled" ? 0 : result.status ?? 1);
+}
+
+async function claimReservedJobWithRetry(stateCwd, jobId) {
+  let claim;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    claim = claimReservedJob(stateCwd, jobId, process.pid);
+    if (claim.status !== "workspace_locked" && claim.status !== "locked") {
+      return claim;
+    }
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  return claim;
 }
 
 const [command, ...rawArgs] = process.argv.slice(2);
@@ -3208,12 +4196,19 @@ switch (command) {
   case "leases":
     runLeasesCommand(rawArgs);
     break;
+  case "recommend-execution-mode":
+    runRecommendExecutionMode(rawArgs);
+    break;
   case "__run-job":
-    runJobWorker(rawArgs);
+    await runJobWorker(rawArgs);
     break;
   case "reserve-job":
     try {
-      process.stdout.write(`${JSON.stringify(handleReserveJob(rawArgs), null, 2)}\n`);
+      const payload = handleReserveJob(rawArgs);
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+      if (payload.status === "capacity_blocked" || payload.status === "workspace_locked") {
+        process.exit(2);
+      }
     } catch (error) {
       console.error(error.message || String(error));
       process.exit(2);

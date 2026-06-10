@@ -4,6 +4,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 import time
 
@@ -14,6 +15,86 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "claude-for-codex"
 NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/Codex.app/Contents/Resources/node"
 DEFAULT_MULTI_REVIEW_ROLES_FOR_TESTS = ["correctness", "security", "tests", "release", "adversarial"]
+MAX_WORKTREE_FINGERPRINT_FILE_BYTES = 1024 * 1024
+
+
+def process_is_running(pid):
+    result = subprocess.run(["ps", "-p", str(pid), "-o", "pid=", "-o", "stat="], capture_output=True, text=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    parts = result.stdout.strip().split(None, 1)
+    if not parts or parts[0] != str(pid):
+        return False
+    stat = parts[1] if len(parts) > 1 else ""
+    return not stat.startswith("Z")
+
+
+def companion_working_tree_fingerprint(repo):
+    def git_part(args):
+        result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+        return "\n".join([f"status={result.returncode}", result.stdout, result.stderr])
+
+    def safe_path(relative_path):
+        root = repo.resolve()
+        full_path = (root / relative_path).resolve()
+        if full_path == root or root in full_path.parents:
+            return full_path
+        return None
+
+    def file_fingerprint(file_path):
+        try:
+            stat = file_path.lstat()
+            if file_path.is_symlink():
+                return {"type": "symlink", "target": os.readlink(file_path)}
+            if not file_path.is_file():
+                return {"type": "other", "size": stat.st_size, "mtimeMs": stat.st_mtime_ns // 1_000_000}
+            if stat.st_size > MAX_WORKTREE_FINGERPRINT_FILE_BYTES:
+                return {"type": "file-large", "size": stat.st_size, "mtimeMs": stat.st_mtime_ns // 1_000_000}
+            return {
+                "type": "file",
+                "size": stat.st_size,
+                "sha256": hashlib.sha256(file_path.read_bytes()).hexdigest(),
+            }
+        except OSError as error:
+            return {"type": "error", "errorCode": getattr(error, "errno", None) or "UNKNOWN"}
+
+    untracked = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if untracked.returncode == 0:
+        untracked_items = []
+        for relative in sorted(item for item in untracked.stdout.split("\0") if item):
+            full_path = safe_path(relative)
+            untracked_items.append({
+                "path": relative,
+                "fingerprint": file_fingerprint(full_path) if full_path else {"type": "unsafe-path"},
+            })
+        untracked_part = json.dumps(untracked_items, separators=(",", ":"))
+    else:
+        untracked_part = f"status={untracked.returncode}\n{untracked.stderr}"
+
+    parts = [
+        git_part(["status", "--short", "--untracked-files=all"]),
+        git_part(["diff", "--cached"]),
+        git_part(["diff"]),
+        untracked_part,
+    ]
+    return hashlib.sha256("\n--- claude-for-codex ---\n".join(parts).encode()).hexdigest()
+
+
+def legacy_raw_hook_working_tree_fingerprint(repo):
+    parts = []
+    for args in (
+        ["status", "--short", "--untracked-files=all"],
+        ["diff", "--cached"],
+        ["diff"],
+    ):
+        result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
+        parts.append(result.stdout if result.returncode == 0 else "")
+    return hashlib.sha256("\n--- claude-for-codex ---\n".join(parts).encode()).hexdigest()
 
 
 def run_fake_claude_review(
@@ -86,6 +167,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -121,6 +203,2673 @@ def env_without(*names):
     for name in names:
         env.pop(name, None)
     return env
+
+
+def test_job_lifecycle_helpers_classify_liveness_and_parse_limits(tmp_path):
+    lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
+    script = f"""
+import {{
+  classifyJobLiveness,
+  deriveJobIdempotencyKey,
+  isTerminalJobStatus,
+  parsePositiveInteger,
+  reservationClaimMs,
+  DEFAULT_BACKGROUND_WAIT_MS,
+  HARD_JOB_TIMEOUT_MS,
+  JOB_RESERVATION_CLAIM_MS
+}} from {json.dumps(lifecycle.as_uri())};
+
+const now = Date.parse("2026-06-09T00:10:00.000Z");
+const payload = {{
+  fresh: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:09:50.000Z" }}, {{ now }}),
+  freshHeartbeatOldProgress: classifyJobLiveness({{ status: "running", lastProgressAt: "2026-06-09T00:00:00.000Z", lastHeartbeatAt: "2026-06-09T00:09:55.000Z" }}, {{ now }}),
+  suspect: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:05:00.000Z" }}, {{ now }}),
+  lost: classifyJobLiveness({{ status: "running", lastHeartbeatAt: "2026-06-09T00:00:00.000Z" }}, {{ now }}),
+  queued: classifyJobLiveness({{ status: "queued", createdAt: "2026-06-09T00:09:30.000Z" }}, {{ now }}),
+  reservationStillQueued: classifyJobLiveness({{ status: "queued", reservationMode: "host-forwarded", createdAt: "2026-06-09T00:09:00.000Z" }}, {{ now, queuedLostAfterMs: 100, reservationClaimMs: 120000 }}),
+  reservationExpired: classifyJobLiveness({{ status: "queued", reservationMode: "host-forwarded", createdAt: "2026-06-09T00:08:00.000Z" }}, {{ now, queuedLostAfterMs: 100, reservationClaimMs: 1000 }}),
+  terminal: isTerminalJobStatus("succeeded"),
+  nonterminal: isTerminalJobStatus("running"),
+  activeLimit: parsePositiveInteger("4", 3, {{ min: 1, max: 20 }}),
+  invalidLimit: parsePositiveInteger("bad", 3, {{ min: 1, max: 20 }}),
+  reservationLimit: reservationClaimMs({{ CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS: "5000" }}),
+  key1: deriveJobIdempotencyKey({{ command: "review", args: ["--base", "main"], cwd: "/workspace/demo" }}),
+  key2: deriveJobIdempotencyKey({{ command: "review", args: ["--base", "main"], cwd: "/workspace/demo" }}),
+  wait: DEFAULT_BACKGROUND_WAIT_MS,
+  hard: HARD_JOB_TIMEOUT_MS,
+  reservationDefault: JOB_RESERVATION_CLAIM_MS
+}};
+console.log(JSON.stringify(payload));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["fresh"]["state"] == "healthy"
+    assert payload["freshHeartbeatOldProgress"]["state"] == "healthy"
+    assert payload["suspect"]["state"] == "suspect"
+    assert payload["lost"]["state"] == "lost"
+    assert payload["queued"]["state"] == "queued"
+    assert payload["reservationStillQueued"]["state"] == "queued"
+    assert payload["reservationExpired"]["state"] == "lost"
+    assert payload["terminal"] is True
+    assert payload["nonterminal"] is False
+    assert payload["activeLimit"] == 4
+    assert payload["invalidLimit"] == 3
+    assert payload["reservationLimit"] == 5000
+    assert payload["key1"] == payload["key2"]
+    assert payload["key1"].startswith("sha256:")
+    assert payload["wait"] <= 60_000
+    assert payload["hard"] >= 30 * 60 * 1000
+    assert payload["reservationDefault"] == 10 * 60 * 1000
+
+
+def test_progress_events_parse_sanitize_and_count_malformed_lines(tmp_path):
+    progress = PLUGIN / "scripts" / "lib" / "progress.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    script = f"""
+import {{ formatProgressEvent, progressEventsFromLines }} from {json.dumps(progress.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const good = formatProgressEvent({{ phase: "reviewing", message: "path " + cwd + " api_key='sk-progresssecret1234567890'", role: "security" }}, {{ cwd }}).trimEnd();
+const parsed = progressEventsFromLines([good, "[claude-for-codex progress] {{bad-json", "[claude-for-codex progress typo"]);
+console.log(JSON.stringify({{ good, parsed }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["good"].startswith("[claude-for-codex progress] ")
+    assert str(repo) not in payload["good"]
+    assert "sk-progresssecret" not in payload["good"]
+    assert payload["parsed"]["events"][0]["phase"] == "reviewing"
+    assert payload["parsed"]["events"][0]["role"] == "security"
+    assert payload["parsed"]["malformedCount"] == 1
+    assert payload["parsed"]["malformedPrefixCount"] == 1
+
+
+def test_job_finish_sanitizes_output_and_progress_cannot_overwrite_terminal(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    secret = "api_key='sk-testsecretvalue1234567890'"
+    script = f"""
+import {{
+  createJob,
+  claimJobForRun,
+  recordJobHeartbeat,
+  recordJobProgress,
+  finishJob,
+  readJob,
+  updateJob,
+  updateJobUnlessTerminal
+}} from {json.dumps(jobs.as_uri())};
+
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["x"], cwd }}, env);
+const claim = claimJobForRun(cwd, job.id, process.pid, env);
+recordJobHeartbeat(cwd, job.id, {{ phase: "reviewing" }}, env);
+recordJobProgress(cwd, job.id, {{ phase: "sdk-result", message: "path " + cwd + " {secret}", role: "security " + cwd }}, env);
+const returnedUpdate = updateJob(cwd, job.id, {{
+  cancelIdentity: {{ pid: 123, command: "node " + cwd + "/scripts/claude-companion.mjs __run-job " + job.id }},
+  cancelChildIdentity: {{ pid: 124, command: "node " + cwd + "/scripts/claude-companion.mjs review" }},
+  cancelWorkerIdentity: {{ pid: 123, command: "node " + cwd + "/scripts/claude-companion.mjs __run-job " + job.id }}
+}}, env);
+updateJobUnlessTerminal(cwd, job.id, {{ cancelFailureReason: "cancel path " + cwd + " {secret}" }}, env);
+finishJob(cwd, job.id, {{
+  status: 0,
+  stdout: "ok " + cwd + " {secret}",
+  stderr: "stderr " + cwd,
+  error: "error {secret}"
+}}, env);
+const after = recordJobHeartbeat(cwd, job.id, {{ phase: "should-not-change" }}, env);
+console.log(JSON.stringify({{ claim, returnedUpdate, after, stored: readJob(cwd, job.id, env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    stored_text = json.dumps(payload["stored"])
+    assert payload["claim"]["status"] == "claimed"
+    assert str(repo) not in payload["returnedUpdate"]["cancelIdentity"]["command"]
+    assert str(repo) not in payload["returnedUpdate"]["cancelChildIdentity"]["command"]
+    assert str(repo) not in payload["returnedUpdate"]["cancelWorkerIdentity"]["command"]
+    assert payload["stored"]["status"] == "succeeded"
+    assert payload["stored"]["phase"] == "succeeded"
+    assert payload["stored"]["heartbeatSeq"] >= 1
+    assert payload["stored"]["lastProgressAt"]
+    assert "sk-testsecret" not in stored_text
+    assert str(repo) not in payload["stored"]["stdout"]
+    assert str(repo) not in payload["stored"].get("lastProgressMessage", "")
+    assert str(repo) not in payload["stored"].get("lastProgressRole", "")
+    assert str(repo) not in payload["stored"].get("cancelFailureReason", "")
+    assert payload["after"]["phase"] == "succeeded"
+
+
+def test_direct_and_reserved_claims_are_exclusive_and_share_submission_fields(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    companion = PLUGIN / "scripts" / "claude-companion.mjs"
+    script = f"""
+import {{ createJob, reserveJob, claimJobForRun, claimReservedJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const direct = createJob(cwd, {{ command: "review", args: ["same"], cwd, idempotencyKey: "sha256:direct" }}, env);
+const first = claimJobForRun(cwd, direct.id, 1111, env);
+const second = claimJobForRun(cwd, direct.id, 2222, env);
+const workerCommand = ["node", {json.dumps(str(companion))}, "run-reserved-job", "--job-id"];
+const reserved = reserveJob(cwd, {{ command: "review", args: ["reserved"], cwd, idempotencyKey: "sha256:reserved" }}, workerCommand, env);
+workerCommand.push(reserved.id);
+updateJob(cwd, reserved.id, {{ workerCommand }}, env);
+const reservedFirst = claimReservedJob(cwd, reserved.id, 3333, env);
+const reservedSecond = claimReservedJob(cwd, reserved.id, 4444, env);
+console.log(JSON.stringify({{
+  first, second, reservedFirst, reservedSecond,
+  directStored: readJob(cwd, direct.id, env),
+  reservedStored: readJob(cwd, reserved.id, env)
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["first"]["status"] == "claimed"
+    assert payload["second"]["status"] == "not_claimed"
+    assert payload["reservedFirst"]["status"] == "claimed"
+    assert payload["reservedSecond"]["status"] == "not_claimed"
+    for key in ["directStored", "reservedStored"]:
+        assert payload[key]["status"] == "running"
+        assert payload[key]["submissionState"] == "in-flight"
+        assert payload[key]["submittedAt"]
+        assert payload[key]["idempotencyKey"].startswith("sha256:")
+
+
+def test_reserved_claim_refuses_same_key_active_direct_job(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    companion = PLUGIN / "scripts" / "claude-companion.mjs"
+    script = f"""
+import {{ createJob, reserveJob, claimJobForRun, claimReservedJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const direct = createJob(cwd, {{ command: "review", args: ["same"], cwd, idempotencyKey: "sha256:same-key" }}, env);
+const directClaim = claimJobForRun(cwd, direct.id, 1111, env);
+const workerCommand = ["node", {json.dumps(str(companion))}, "run-reserved-job", "--job-id"];
+const reserved = reserveJob(cwd, {{ command: "review", args: ["same"], cwd, idempotencyKey: "sha256:same-key" }}, workerCommand, env);
+workerCommand.push(reserved.id);
+updateJob(cwd, reserved.id, {{ workerCommand }}, env);
+const reservedClaim = claimReservedJob(cwd, reserved.id, 2222, env);
+console.log(JSON.stringify({{
+  directClaim,
+  reservedClaim,
+  directStored: readJob(cwd, direct.id, env),
+  reservedStored: readJob(cwd, reserved.id, env)
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["directClaim"]["status"] == "claimed"
+    assert payload["reservedClaim"]["status"] == "not_claimed"
+    assert "active direct job" in payload["reservedClaim"]["reason"]
+    assert payload["directStored"]["status"] == "running"
+    assert payload["reservedStored"]["status"] == "queued"
+
+
+def test_claim_job_for_run_is_exclusive_across_processes(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    start = tmp_path / "start"
+    repo.mkdir()
+    data.mkdir()
+    create = f"""
+import {{ createJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+console.log(createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env).id);
+"""
+    job_id = subprocess.run([NODE, "--input-type=module", "--eval", create], capture_output=True, text=True, check=True).stdout.strip()
+    worker = f"""
+import fs from "node:fs";
+import {{ claimJobForRun }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+while (!fs.existsSync({json.dumps(str(start))})) {{
+  await new Promise((resolve) => setTimeout(resolve, 5));
+}}
+console.log(JSON.stringify(claimJobForRun(cwd, {json.dumps(job_id)}, process.pid, env)));
+"""
+    procs = [subprocess.Popen([NODE, "--input-type=module", "--eval", worker], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+    start.write_text("go", encoding="utf8")
+    outputs = [proc.communicate(timeout=10) + (proc.returncode,) for proc in procs]
+    assert all(row[2] == 0 for row in outputs), outputs
+    statuses = [json.loads(row[0])["status"] for row in outputs]
+    assert statuses.count("claimed") == 1
+    assert statuses.count("not_claimed") == 1
+
+
+def test_claim_job_lock_contention_returns_structured_busy_not_exception(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import fs from "node:fs";
+import path from "node:path";
+import {{ createJob, claimJobForRun, listJobs }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env);
+const state = listJobs(cwd, env);
+const lockFile = path.join(state.stateDir, "jobs", `${{job.id}}.json.lock`);
+const fd = fs.openSync(lockFile, "wx", 0o600);
+let claim;
+try {{
+  claim = claimJobForRun(cwd, job.id, process.pid, env);
+}} finally {{
+  fs.closeSync(fd);
+  fs.rmSync(lockFile, {{ force: true }});
+}}
+console.log(JSON.stringify(claim));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] in {"locked", "not_claimed"}
+
+
+def test_job_lock_does_not_remove_stale_lock_when_owner_is_alive(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import fs from "node:fs";
+import path from "node:path";
+import {{ createJob, claimJobForRun, listJobs }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env);
+const state = listJobs(cwd, env);
+const lockFile = path.join(state.stateDir, "jobs", `${{job.id}}.json.lock`);
+fs.writeFileSync(lockFile, JSON.stringify({{ pid: process.pid, createdAt: "2026-06-09T00:00:00.000Z" }}));
+const old = new Date(Date.now() - 120000);
+fs.utimesSync(lockFile, old, old);
+const claim = claimJobForRun(cwd, job.id, process.pid, env);
+const stillLocked = fs.existsSync(lockFile);
+fs.rmSync(lockFile, {{ force: true }});
+console.log(JSON.stringify({{ claim, stillLocked }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claim"]["status"] == "locked"
+    assert payload["stillLocked"] is True
+
+
+def test_workspace_lock_does_not_remove_live_owner_after_stale_mtime(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env_json = json.dumps({"CLAUDE_PLUGIN_DATA": str(data), "HOME": str(tmp_path / "home")})
+    holder_script = f"""
+import {{ withWorkspaceJobLock, listJobs }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {env_json};
+const state = listJobs(cwd, env);
+console.log(JSON.stringify({{ stateDir: state.stateDir }}));
+const block = new Int32Array(new SharedArrayBuffer(4));
+withWorkspaceJobLock(cwd, env, () => {{
+  console.log("LOCK_HELD");
+  Atomics.wait(block, 0, 0, 5000);
+  return {{ status: "released" }};
+}});
+"""
+    holder = subprocess.Popen(
+        [NODE, "--input-type=module", "--eval", holder_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        state_line = holder.stdout.readline().strip()
+        assert state_line, holder.stderr.read()
+        state_dir = pathlib.Path(json.loads(state_line)["stateDir"])
+        assert holder.stdout.readline().strip() == "LOCK_HELD"
+        lock_file = state_dir / "jobs" / ".workspace.lock.lock"
+        old = time.time() - 120
+        os.utime(lock_file, (old, old))
+
+        contender_script = f"""
+import {{ withWorkspaceJobLock }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {env_json};
+const result = withWorkspaceJobLock(cwd, env, () => ({{ status: "entered" }}));
+console.log(JSON.stringify(result));
+"""
+        contender = subprocess.run(
+            [NODE, "--input-type=module", "--eval", contender_script],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert contender.returncode == 0, contender.stderr
+        payload = json.loads(contender.stdout)
+        assert payload["status"] == "workspace_locked"
+        assert lock_file.exists()
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=5)
+
+
+def test_background_worker_heartbeats_during_no_output_child(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "time.sleep(2)\n"
+        "print('NO_OUTPUT_FINISHED')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS"] = "100"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "slow no output"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+    assert started.returncode == 0, started.stderr
+    job_id = json.loads(started.stdout)["job"]["id"]
+    observed = None
+    for _ in range(30):
+        listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+        observed = next(job for job in json.loads(listed.stdout)["jobs"] if job["id"] == job_id)
+        if observed.get("heartbeatSeq", 0) >= 2:
+            break
+        time.sleep(0.1)
+    assert observed["status"] in {"running", "succeeded"}
+    assert observed["heartbeatSeq"] >= 2
+    assert observed["lastHeartbeatAt"]
+
+
+def test_background_worker_line_buffers_split_progress_events(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "sys.stderr.write('[claude-for-codex progress] {\"phase\":\"review')\n"
+        "sys.stderr.flush()\n"
+        "time.sleep(0.1)\n"
+        "sys.stderr.write('ing\",\"message\":\"role started\"}\\n')\n"
+        "sys.stderr.flush()\n"
+        "print('PROGRESS_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "progress"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert started.returncode == 0, started.stderr
+    payload = json.loads(started.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert payload["job"]["lastProgressAt"]
+    assert payload["job"]["phase"] == "succeeded"
+    assert payload["job"]["lastProgressMessage"] == "role started"
+
+
+def test_background_worker_fast_child_exit_does_not_fail_identity_capture(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "print('FAST_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "3000", "fast-exit"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert "FAST_DONE" in payload["job"]["stdout"]
+    assert "identity could not be validated" not in payload["job"].get("error", "")
+
+
+def test_background_worker_hard_timeout_escalates_to_sigkill(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import signal, sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, lambda signum, frame: None)\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "1000"
+    env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "3000", "timeout"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "failed"
+    assert "timeout" in payload["job"].get("error", "").lower() or "SIGKILL" in payload["job"].get("error", "")
+
+
+def test_background_worker_hard_timeout_cannot_succeed_after_sigterm_zero_exit(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import signal, sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "1000"
+    env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "3000", "timeout-zero"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "failed"
+    assert payload["job"]["exitStatus"] != 0
+    assert "hard timeout" in payload["job"].get("error", "")
+
+
+def test_background_worker_hard_timeout_kills_surviving_process_group_member(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    child_pid_file = tmp_path / "survivor.pid"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"""#!/usr/bin/env python3
+import pathlib
+import signal
+import subprocess
+import sys
+import time
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+
+child = subprocess.Popen([
+    sys.executable,
+    "-c",
+    "import signal,time; signal.signal(signal.SIGTERM, lambda s,f: None); time.sleep(30)",
+])
+pathlib.Path({json.dumps(str(child_pid_file))}).write_text(str(child.pid))
+signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
+while True:
+    time.sleep(1)
+""",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "1000"
+    env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "200"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "4000", "timeout-survivor"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "failed"
+    survivor_pid = int(child_pid_file.read_text())
+    for _ in range(30):
+        if not process_is_running(survivor_pid):
+            break
+        time.sleep(0.1)
+    assert not process_is_running(survivor_pid)
+
+
+def test_background_worker_caps_noisy_output_before_finish(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "sys.stdout.write('x' * (1024 * 1024 + 4096))\n"
+        "sys.stderr.write('y' * (1024 * 1024 + 8192))\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    state_dir = pathlib.Path(json.loads(listed.stdout)["stateDir"])
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "noisy"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    job_id = payload["job"]["id"]
+    job_file = state_dir / "jobs" / f"{job_id}.json"
+    job = {}
+    for _ in range(50):
+        job = json.loads(job_file.read_text())
+        if job["status"] == "succeeded":
+            break
+        time.sleep(0.1)
+    assert job["status"] == "succeeded"
+    assert job["stdoutTruncated"] is True
+    assert job["stderrTruncated"] is True
+    assert job["stdoutBytes"] > job["stdoutStoredBytes"]
+    assert job["stderrBytes"] > job["stderrStoredBytes"]
+    assert job["stdoutStoredBytes"] <= 1024 * 1024
+    assert job["stderrStoredBytes"] <= 1024 * 1024
+
+
+def test_foreground_review_still_invokes_claude_after_async_background_refactor(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "foreground-called.txt"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, sys\nif sys.argv[1:] == ['--version']:\n    print('claude fake')\n    raise SystemExit(0)\npathlib.Path({json.dumps(str(marker))}).write_text('called')\nprint('FOREGROUND_OK')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, str(runtime), "review", "foreground check"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    assert marker.exists()
+    assert "FOREGROUND_OK" in result.stdout
+
+
+def test_background_wait_timeout_returns_running_job_without_killing_worker(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    marker = tmp_path / "finished.txt"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, sys, time\nif sys.argv[1:] == ['--version']:\n    print('claude fake')\n    raise SystemExit(0)\ntime.sleep(1)\npathlib.Path({json.dumps(str(marker))}).write_text('done')\nprint('LATE_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS"] = "100"
+    waited = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "100", "slow"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+    assert waited.returncode == 0, waited.stderr
+    payload = json.loads(waited.stdout)
+    assert payload["status"] == "running"
+    assert payload["waitTimedOut"] is True
+    assert payload["job"]["id"]
+    assert not marker.exists()
+    current = None
+    for _ in range(30):
+        result = subprocess.run([NODE, str(runtime), "result", payload["job"]["id"]], cwd=repo, env=env, capture_output=True, text=True)
+        current = json.loads(result.stdout)["job"]
+        if current["status"] == "succeeded":
+            break
+        time.sleep(0.1)
+    assert marker.exists()
+    assert current["stdout"].strip() == "LATE_DONE"
+
+
+def test_background_wait_reports_missing_or_corrupt_job_state_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text(
+        "#!/usr/bin/env sh\n"
+        "job_id=''\n"
+        "for arg in \"$@\"; do job_id=\"$arg\"; done\n"
+        "job_file=\"$TEST_STATE_DIR/jobs/$job_id.json\"\n"
+        "i=0\n"
+        "while [ \"$i\" -lt 50 ]; do\n"
+        "  grep -q '\"workerPid\"' \"$job_file\" 2>/dev/null && break\n"
+        "  i=$((i + 1))\n"
+        "  sleep 0.02\n"
+        "done\n"
+        "if [ \"$TEST_WORKER_MODE\" = delete ]; then\n"
+        "  rm -f \"$job_file\"\n"
+        "else\n"
+        "  printf '{bad json' > \"$job_file\"\n"
+        "fi\n"
+        "sleep 1\n",
+        encoding="utf8",
+    )
+    fake_worker.chmod(0o755)
+
+    base_env = {
+        **env,
+        "CLAUDE_FOR_CODEX_WORKER_NODE": str(fake_worker),
+        "TEST_STATE_DIR": str(state_dir),
+    }
+    for mode, expected_status in [("delete", "unknown"), ("corrupt", "corrupt")]:
+        result = subprocess.run(
+            [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "1500", f"{mode}-state"],
+            cwd=repo,
+            env={**base_env, "TEST_WORKER_MODE": mode},
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 1, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["status"] == expected_status
+        assert payload["waitTimedOut"] is True
+        assert payload["job"]["status"] == expected_status
+
+
+def test_background_wait_exits_nonzero_when_job_is_cancelled(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_worker = tmp_path / "fake-node"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    waited = subprocess.Popen(
+        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "5000", "cancel-wait"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        job_id = None
+        for _ in range(50):
+            listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+            jobs_payload = json.loads(listed.stdout)
+            if jobs_payload["jobs"]:
+                job_id = jobs_payload["jobs"][0]["id"]
+                break
+            time.sleep(0.1)
+        assert job_id
+        cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+        assert cancelled.returncode == 0, cancelled.stderr
+        stdout, stderr = waited.communicate(timeout=10)
+        assert waited.returncode == 1, stderr
+        payload = json.loads(stdout)
+        assert payload["status"] == "cancelled"
+        assert payload["waitTimedOut"] is False
+    finally:
+        if waited.poll() is None:
+            waited.terminate()
+            waited.wait(timeout=5)
+
+
+def test_wait_timeout_args_are_not_persisted_or_forwarded_to_child(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    args_file = tmp_path / "args.txt"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, sys\npathlib.Path({json.dumps(str(args_file))}).write_text(' '.join(sys.argv[1:]))\nprint('OK')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms=5000", "strip"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "--wait-timeout-ms" not in " ".join(payload["job"].get("args", []))
+    assert "--wait-timeout-ms" not in args_file.read_text(encoding="utf8")
+
+
+def test_wait_timeout_is_clamped_below_hard_timeout_in_source():
+    lifecycle = (PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs").read_text(encoding="utf8")
+    companion = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    assert "MAX_BACKGROUND_WAIT_MS" in lifecycle
+    assert "MAX_BACKGROUND_WAIT_MS" in companion
+    wait_block = companion[companion.index("async function waitForJob"):companion.index("async function maybeStartBackground")]
+    assert "max: MAX_BACKGROUND_WAIT_MS" in wait_block
+    assert "max: HARD_JOB_TIMEOUT_MS" not in wait_block
+
+
+def test_post_spawn_worker_stamp_is_terminal_safe_and_lock_tolerant_in_source():
+    companion = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    block = companion[companion.index("function startBackgroundJob"):companion.index("function reserveBackgroundJob")]
+    assert "updateJobUnlessTerminal(cwd, job.id" in block
+    assert 'stamped.status === "locked"' in block
+    assert "workerPidUpdatePending" in block
+    assert "return updateJob(cwd, job.id" not in block
+
+
+def test_recommend_execution_mode_routes_large_reviews_to_background(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("base\n" + "changed\n" * 60, encoding="utf8")
+    result = subprocess.run([NODE, str(runtime), "recommend-execution-mode", "--json"], cwd=repo, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["changedLineEstimate"] >= 50
+    assert payload["reviewable"] is True
+
+
+def test_recommend_execution_mode_routes_committed_base_diff_to_background(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "base.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "branch", "base-ref"], cwd=repo, check=True)
+    for index in range(3):
+        (repo / f"changed-{index}.txt").write_text(f"changed {index}\n", encoding="utf8")
+    subprocess.run(["git", "add", "."], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "feature"], cwd=repo, check=True, capture_output=True, text=True)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "recommend-execution-mode", "--json", "review", "--base", "base-ref"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["reviewable"] is True
+    assert payload["fileCountEstimate"] >= 3
+    assert payload["git"]["base"] == "base-ref"
+    assert payload["git"]["baseDiffAvailable"] is True
+
+
+def test_recommend_execution_mode_distinguishes_git_timeout_from_non_repo(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env sh\n"
+        "if [ \"$1\" = \"rev-parse\" ]; then echo true; exit 0; fi\n"
+        "sleep 2\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+    result = subprocess.run([NODE, str(runtime), "recommend-execution-mode", "--json"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["recommendation"] == "background"
+    assert payload["reviewable"] is False
+    assert payload["git"]["timedOut"] is True
+    assert "timed out" in payload["reason"]
+
+
+def test_jobs_and_result_include_lifecycle_elapsed_and_progress_preview(tmp_path):
+    import datetime
+
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    job_file = state_dir / "jobs" / "job-lifecycle.json"
+    job_file.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    created = (now - datetime.timedelta(seconds=10)).isoformat().replace("+00:00", "Z")
+    started = (now - datetime.timedelta(seconds=9)).isoformat().replace("+00:00", "Z")
+    updated = (now - datetime.timedelta(seconds=8)).isoformat().replace("+00:00", "Z")
+    job_file.write_text(json.dumps({
+        "id": "job-lifecycle",
+        "status": "running",
+        "command": "review",
+        "args": ["focus"],
+        "cwd": str(repo),
+        "createdAt": created,
+        "startedAt": started,
+        "updatedAt": updated,
+        "lastHeartbeatAt": updated,
+        "heartbeatSeq": 3,
+        "phase": "reviewing",
+        "lastProgressMessage": "security started"
+    }), encoding="utf8")
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+    job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == "job-lifecycle")
+    assert job["lifecycle"]["state"] in {"healthy", "suspect", "lost"}
+    assert job["phase"] == "reviewing"
+    assert job["heartbeatSeq"] == 3
+    assert job["progressPreview"] == ["security started"]
+    assert job["elapsedMs"] > 0
+    result = subprocess.run([NODE, str(runtime), "result", "job-lifecycle"], cwd=repo, env=env, capture_output=True, text=True)
+    result_job = json.loads(result.stdout)["job"]
+    assert result_job["lifecycle"]["state"] in {"healthy", "suspect", "lost"}
+    assert result_job["progressPreview"] == ["security started"]
+
+
+def test_background_start_respects_active_job_limit_without_spawning(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    spawn_marker = tmp_path / "spawn-count.txt"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\npath.write_text(path.read_text() + 'x' if path.exists() else 'x')\ntime.sleep(5)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS"] = "1"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "one"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "two"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 2
+    payload = json.loads(second.stdout)
+    assert payload["status"] == "capacity_blocked"
+    assert payload["activeCount"] == 1
+
+
+def test_duplicate_background_retry_reuses_existing_job_without_second_spawn(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    spawn_marker = tmp_path / "spawn-count.txt"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\nwith path.open('a', encoding='utf8') as handle:\n    handle.write('x')\ntime.sleep(5)\nprint('done')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    first_payload = json.loads(first.stdout)
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "100", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    second_payload = json.loads(second.stdout)
+    assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is True
+    for _ in range(20):
+        if spawn_marker.exists():
+            break
+        time.sleep(0.1)
+    assert spawn_marker.read_text(encoding="utf8") == "x"
+
+
+def test_background_idempotency_changes_when_worktree_changes(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    spawn_marker = tmp_path / "spawn-count.txt"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change one\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport pathlib, time\npath = pathlib.Path({json.dumps(str(spawn_marker))})\nwith path.open('a', encoding='utf8') as handle:\n    handle.write('x')\ntime.sleep(5)\nprint('done')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    first_payload = json.loads(first.stdout)
+    (repo / "changed.txt").write_text("change two\n", encoding="utf8")
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    second_payload = json.loads(second.stdout)
+    assert second_payload["job"]["id"] != first_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is not True
+    for _ in range(100):
+        if spawn_marker.exists() and len(spawn_marker.read_text(encoding="utf8")) >= 2:
+            break
+        time.sleep(0.1)
+    assert len(spawn_marker.read_text(encoding="utf8")) >= 2
+
+
+def test_background_idempotency_changes_when_execution_controls_change(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\nimport sys, time\nif sys.argv[1:] == ['--version']:\n    print('claude fake')\n    raise SystemExit(0)\ntime.sleep(5)\nprint('done')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first_env = {**env, "CLAUDE_FOR_CODEX_QUALITY": "standard"}
+    second_env = {**env, "CLAUDE_FOR_CODEX_QUALITY": "max"}
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=first_env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=second_env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert second_payload["job"]["id"] != first_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
+def test_background_idempotency_does_not_reuse_when_fingerprint_times_out(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    fake_git = bin_dir / "git"
+    fake_git.write_text("#!/usr/bin/env sh\nsleep 1\nexit 0\n", encoding="utf8")
+    fake_git.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["job"]["id"] != second_payload["job"]["id"]
+    assert first_payload["job"]["fingerprintTimedOut"] is True
+    assert second_payload["job"]["fingerprintTimedOut"] is True
+    assert first_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
+def test_worktree_fingerprint_marks_untracked_budget_exceeded_inconclusive(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "one.txt").write_text("12345\n", encoding="utf8")
+    module_uri = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").as_uri()
+    script = f"""
+import {{ workingTreeFingerprintDetails }} from {json.dumps(module_uri)};
+const details = workingTreeFingerprintDetails({json.dumps(str(repo))}, [], {{
+  env: {{ ...process.env, CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: "4" }}
+}});
+console.log(JSON.stringify(details));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    details = json.loads(result.stdout)
+    assert details["timedOut"] is False
+    assert details["untrusted"] is True
+    assert details["reuseDisabled"] is True
+    assert details["budgetExceeded"] is True
+    assert details["hash"]
+
+
+def test_worktree_fingerprint_marks_non_timeout_git_failures_untrusted(tmp_path):
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env sh\n"
+        "echo 'fatal: synthetic git failure' >&2\n"
+        "exit 2\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    module_uri = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").as_uri()
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    script = f"""
+import {{ workingTreeFingerprintDetails }} from {json.dumps(module_uri)};
+const details = workingTreeFingerprintDetails({json.dumps(str(repo))});
+console.log(JSON.stringify(details));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    details = json.loads(result.stdout)
+    assert details["timedOut"] is False
+    assert details["untrusted"] is True
+    assert details["reuseDisabled"] is True
+    assert details["failureKind"] == "inconclusive"
+    assert details["hash"]
+
+
+def test_background_idempotency_does_not_reuse_when_untracked_budget_exceeded(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "large-untracked.txt").write_text("12345\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] = "4"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["job"]["id"] != second_payload["job"]["id"]
+    assert first_payload["job"]["fingerprintTimedOut"] is False
+    assert second_payload["job"]["fingerprintTimedOut"] is False
+    assert first_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
+def test_duplicate_background_retry_reuses_existing_job_in_non_git_workspace(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "100", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is True
+    assert second_payload["job"]["fingerprintTimedOut"] is False
+    assert second_payload["job"].get("fingerprintReuseDisabled") in (False, None)
+
+
+def test_background_idempotency_does_not_reuse_when_git_returns_nonzero(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "tracked.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = bin_dir / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+if args[:1] == ["status"]:
+    print("fatal: synthetic status failure", file=sys.stderr)
+    raise SystemExit(128)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["job"]["id"] != second_payload["job"]["id"]
+    assert first_payload["job"]["fingerprintTimedOut"] is False
+    assert second_payload["job"]["fingerprintTimedOut"] is False
+    assert first_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
+def test_background_idempotency_changes_when_head_or_base_ref_changes(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("change one\n", encoding="utf8")
+    subprocess.run(["git", "commit", "-am", "change-one"], cwd=repo, check=True, capture_output=True, text=True)
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    first = subprocess.run([NODE, str(runtime), "review", "--background", "--base", "HEAD~1", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0, first.stderr
+    (repo / "file.txt").write_text("change two\n", encoding="utf8")
+    subprocess.run(["git", "commit", "-am", "change-two"], cwd=repo, check=True, capture_output=True, text=True)
+    second = subprocess.run([NODE, str(runtime), "review", "--background", "--base", "HEAD~1", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["job"]["id"] != second_payload["job"]["id"]
+    assert second_payload["job"].get("reusedExisting") is not True
+
+
+def test_background_worker_launch_failure_does_not_leave_active_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(tmp_path / "missing-node")
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "launch-fails"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode != 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "launch_failed"
+    assert payload["job"]["status"] == "failed"
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert "launch-fails" not in jobs.stdout or "failed" in jobs.stdout
+
+
+def test_background_jobs_fail_fast_when_posix_process_groups_are_unavailable(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_PROCESS_PLATFORM"] = "win32"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "unsupported"], cwd=repo, env=env, capture_output=True, text=True)
+    assert started.returncode == 2
+    payload = json.loads(started.stdout)
+    assert payload["status"] == "unsupported_platform"
+    assert payload["platform"] == "win32"
+    assert "POSIX process groups" in payload["message"]
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert json.loads(jobs.stdout)["jobs"] == []
+
+
+def test_reserve_job_fails_fast_when_posix_process_groups_are_unavailable(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_PROCESS_PLATFORM"] = "win32"
+    reserved = subprocess.run([NODE, str(runtime), "reserve-job", "review", "unsupported"], cwd=repo, env=env, capture_output=True, text=True)
+    assert reserved.returncode == 2
+    assert "POSIX process groups" in reserved.stderr
+
+
+def test_background_worker_bootstrap_exit_is_reaped_from_queued(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_worker = tmp_path / "fake-node"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker.write_text("#!/usr/bin/env sh\nexit 1\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "bootstrap-exits"], cwd=repo, env=env, capture_output=True, text=True)
+    assert started.returncode == 0, started.stderr
+    time.sleep(1.2)
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    job = next(item for item in json.loads(listed.stdout)["jobs"] if item["args"] == ["bootstrap-exits"])
+    assert job["status"] == "failed"
+    assert job["phase"] == "worker-launch-failed"
+
+
+def test_abandoned_host_forwarded_reservation_is_reaped_from_queued(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+    env["CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS"] = "1000"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "abandoned"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["job"]["id"]
+
+    time.sleep(1.5)
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == job_id)
+    assert job["status"] == "failed"
+    assert job["phase"] == "reservation-expired"
+    assert "reserved job was not claimed" in job["error"]
+
+
+def test_reaper_does_not_expire_reserved_job_claimed_after_snapshot(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+	import {{ claimReservedJob, reapLostJobs, readJob, reserveJob }} from {json.dumps(jobs.as_uri())};
+	const cwd = {json.dumps(str(repo))};
+	const env = {{
+	  CLAUDE_PLUGIN_DATA: {json.dumps(str(data))},
+	  HOME: {json.dumps(str(tmp_path / "home"))},
+	  CLAUDE_FOR_CODEX_ENABLE_TEST_SEAMS: "1"
+	}};
+reserveJob(cwd, {{
+  id: "job-race",
+  command: "review",
+  args: ["race"],
+  cwd,
+  createdAt: "2026-06-09T00:00:00.000Z",
+  updatedAt: "2026-06-09T00:00:00.000Z"
+}}, [{json.dumps(NODE)}, {json.dumps(str(runtime))}, "run-reserved-job", "--job-id", "job-race"], env);
+let callbackCount = 0;
+const updates = reapLostJobs(cwd, {{
+  now: Date.parse("2026-06-09T00:20:00.000Z"),
+  beforeLostJobUpdate: (job) => {{
+    if (job.id === "job-race") {{
+      callbackCount += 1;
+      claimReservedJob(cwd, job.id, process.pid, env);
+    }}
+  }}
+}}, env);
+console.log(JSON.stringify({{ callbackCount, updates, job: readJob(cwd, "job-race", env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["callbackCount"] == 1
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["phase"] == "starting"
+    assert payload["job"].get("error") is None
+    assert payload["job"].get("finishedAt") is None
+
+
+def test_reaper_prunes_old_terminal_jobs_from_snapshot(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import fs from "node:fs";
+import path from "node:path";
+import {{ createJob, listJobs, reapLostJobs, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{
+  CLAUDE_PLUGIN_DATA: {json.dumps(str(data))},
+  HOME: {json.dumps(str(tmp_path / "home"))},
+  CLAUDE_FOR_CODEX_TERMINAL_JOB_RETENTION_MS: "1"
+}};
+const state = listJobs(cwd, env);
+const oldDone = {{
+  id: "old-done",
+  status: "succeeded",
+  command: "review",
+  args: ["old"],
+  cwd,
+  createdAt: "2026-06-09T00:00:00.000Z",
+  updatedAt: "2026-06-09T00:00:00.000Z",
+  finishedAt: "2026-06-09T00:00:00.000Z",
+  resultViewedAt: "2026-06-09T00:00:01.000Z",
+  stdout: "old",
+  stderr: ""
+}};
+fs.writeFileSync(path.join(state.stateDir, "jobs", "old-done.json"), JSON.stringify(oldDone, null, 2));
+const unreadDone = {{
+  id: "unread-done",
+  status: "succeeded",
+  command: "review",
+  args: ["unread"],
+  cwd,
+  createdAt: "2026-06-09T00:00:00.000Z",
+  updatedAt: "2026-06-09T00:00:00.000Z",
+  finishedAt: "2026-06-09T00:00:00.000Z",
+  stdout: "unread",
+  stderr: ""
+}};
+fs.writeFileSync(path.join(state.stateDir, "jobs", "unread-done.json"), JSON.stringify(unreadDone, null, 2));
+const active = createJob(cwd, {{
+  id: "active-job",
+  command: "review",
+  args: ["active"],
+  cwd,
+  createdAt: "2026-06-10T00:00:00.000Z",
+  updatedAt: "2026-06-10T00:00:00.000Z"
+}}, env);
+const snapshot = listJobs(cwd, env).jobs;
+const updates = reapLostJobs(cwd, {{ jobs: snapshot, now: Date.parse("2026-06-10T00:00:00.010Z") }}, env);
+console.log(JSON.stringify({{
+  updates,
+  oldDone: readJob(cwd, oldDone.id, env),
+  unreadDone: readJob(cwd, unreadDone.id, env),
+  active: readJob(cwd, active.id, env),
+  remainingIds: listJobs(cwd, env).jobs.map((job) => job.id).sort()
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["oldDone"] is None
+    assert payload["unreadDone"]["status"] == "succeeded"
+    assert payload["active"]["status"] == "queued"
+    assert payload["remainingIds"] == ["active-job", "unread-done"]
+
+
+def test_claim_queued_job_without_idempotency_keeps_empty_key(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ claimJobForRun, createJob, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "legacy-no-key", command: "review", args: ["legacy"], cwd }}, env);
+const claimed = claimJobForRun(cwd, job.id, process.pid, env);
+console.log(JSON.stringify({{ claimed, stored: readJob(cwd, job.id, env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claimed"]["status"] == "claimed"
+    assert payload["stored"]["idempotencyKey"] == ""
+
+
+def test_background_wait_reaps_bootstrap_dead_worker(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_worker = tmp_path / "fake-node"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker.write_text("#!/usr/bin/env sh\nexit 1\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+    waited = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "3000", "bootstrap-exits"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert waited.returncode == 1
+    payload = json.loads(waited.stdout)
+    assert payload["status"] == "failed"
+    assert payload["waitTimedOut"] is False
+    assert payload["job"]["phase"] == "worker-launch-failed"
+
+
+def test_jobs_reports_queued_stale_when_direct_worker_is_alive(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    sleeper = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            "import time; time.sleep(30)",
+            "claude-companion.mjs",
+            "__run-job",
+            "job-slow-claim",
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        (state_dir / "jobs" / "job-slow-claim.json").write_text(json.dumps({
+            "id": "job-slow-claim",
+            "status": "queued",
+            "command": "review",
+            "args": ["slow"],
+            "cwd": str(repo),
+            "workerPid": sleeper.pid,
+            "submissionState": "starting",
+            "createdAt": "2026-06-09T00:00:00.000Z",
+            "updatedAt": "2026-06-09T00:00:00.000Z"
+        }))
+
+        listed = subprocess.run(
+            [NODE, str(runtime), "jobs"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert listed.returncode == 0, listed.stderr
+        job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == "job-slow-claim")
+        assert job["status"] == "queued"
+        assert job["lifecycle"]["state"] == "queued-stale"
+        assert job["lifecycle"]["workerAlive"] is True
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
+
+
+def test_lost_job_reaper_is_process_aware_and_terminal_safe(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, updateJob, finishJob, reapLostJobs, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const lost = createJob(cwd, {{ command: "review", args: ["lost"], cwd }}, env);
+updateJob(cwd, lost.id, {{
+  status: "running",
+  workerPid: 999999,
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const done = createJob(cwd, {{ command: "review", args: ["done"], cwd }}, env);
+finishJob(cwd, done.id, {{ status: 0, stdout: "done" }}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, lost: readJob(cwd, lost.id, env), done: readJob(cwd, done.id, env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["lost"]["status"] == "failed"
+    assert payload["lost"]["phase"] == "lost"
+    assert payload["done"]["status"] == "succeeded"
+
+
+def test_lost_job_reaper_preserves_live_child_without_saved_identity(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    sleeper = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        script = f"""
+import {{ activeJobs, createJob, reapLostJobs, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "unsafe-child", command: "review", args: ["unsafe"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "running",
+  workerPid: 999999,
+  childPid: {sleeper.pid},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds: activeJobs(cwd, env).map((item) => item.id) }}));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["job"]["status"] == "running"
+        assert payload["job"]["phase"] == "unsafe-child-identity"
+        assert payload["job"]["lifecycleState"] == "lost"
+        assert payload["job"]["workerPid"] is None
+        assert "manual inspection" in payload["job"]["lastProgressMessage"]
+        assert "unsafe-child" in payload["activeIds"]
+
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(data)
+        listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+        assert listed.returncode == 0, listed.stderr
+        listed_job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == "unsafe-child")
+        assert listed_job["phase"] == "unsafe-child-identity"
+        assert listed_job["lifecycle"]["state"] == "lost"
+        assert any("manual inspection" in line for line in listed_job["progressPreview"])
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
+
+
+def test_lost_job_reaper_preserves_leaderless_child_process_group(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    info_file = tmp_path / "leaderless.json"
+    repo.mkdir()
+    data.mkdir()
+    leader = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, time\n"
+                f"info = pathlib.Path({json.dumps(str(info_file))})\n"
+                "leader_pid = os.getpid()\n"
+                "pgid = os.getpgrp()\n"
+                "child_pid = os.fork()\n"
+                "if child_pid == 0:\n"
+                "    info.write_text(json.dumps({'leaderPid': leader_pid, 'childPid': os.getpid(), 'pgid': os.getpgrp()}))\n"
+                "    while True: time.sleep(1)\n"
+                "time.sleep(0.1)\n"
+            ),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(30):
+            if info_file.exists():
+                break
+            time.sleep(0.1)
+        assert info_file.exists()
+        info = json.loads(info_file.read_text(encoding="utf8"))
+        leader_pid = int(info["leaderPid"])
+        child_pid = int(info["childPid"])
+        pgid = int(info["pgid"])
+        assert pgid == leader_pid
+        for _ in range(30):
+            if leader.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert leader.poll() is not None
+        assert process_is_running(child_pid)
+        script = f"""
+import {{ activeJobs, createJob, reapLostJobs, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "leaderless", command: "review", args: ["leaderless"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "running",
+  workerPid: 999999,
+  childProcessGroupPid: {leader_pid},
+  childProcessGroupIdentity: {{ pid: {leader_pid}, pgid: {leader_pid}, command: "exited leader", commandHash: "exited leader" }},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds: activeJobs(cwd, env).map((item) => item.id) }}));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["job"]["status"] == "running"
+        assert payload["job"]["phase"] == "leaderless-orphaned"
+        assert payload["job"]["lifecycleState"] == "lost"
+        assert "leaderless" in payload["activeIds"]
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if leader.poll() is None:
+            leader.kill()
+
+
+def test_lost_job_reaper_surfaces_inconclusive_process_group_probe(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    fake_ps = bin_dir / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env sh\n"
+        "if [ \"$1\" = \"-eo\" ]; then\n"
+        "  echo 'synthetic ps group-scan failure' >&2\n"
+        "  exit 2\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    script = f"""
+import {{ activeJobs, createJob, reapLostJobs, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "inconclusive-ps", command: "review", args: ["inconclusive"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "running",
+  workerPid: 999999,
+  childProcessGroupPid: 424242,
+  childProcessGroupIdentity: {{ pid: 424242, pgid: 424242, command: "missing leader", commandHash: "missing leader" }},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds: activeJobs(cwd, env).map((item) => item.id) }}));
+"""
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["phase"] == "leaderless-liveness-inconclusive"
+    assert payload["job"]["lifecycleState"] == "lost"
+    assert "process-group liveness probing is inconclusive" in payload["job"]["lastProgressMessage"]
+    assert "inconclusive-ps" in payload["activeIds"]
+
+
+def test_finish_job_records_output_truncation_metadata(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, finishJob, readJob }} from {json.dumps(jobs.as_uri())};
+import {{ MAX_STORED_OUTPUT_BYTES }} from {json.dumps(lifecycle.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["long-output"], cwd }}, env);
+finishJob(cwd, job.id, {{
+  status: 0,
+  stdout: "x".repeat(MAX_STORED_OUTPUT_BYTES + 32),
+  stderr: "y".repeat(MAX_STORED_OUTPUT_BYTES + 64)
+}}, env);
+console.log(JSON.stringify(readJob(cwd, job.id, env)));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["stdoutTruncated"] is True
+    assert payload["stderrTruncated"] is True
+    assert payload["stdoutBytes"] > payload["stdoutStoredBytes"]
+    assert payload["stderrBytes"] > payload["stderrStoredBytes"]
+    assert payload["stdout"].endswith("...<truncated>")
+    assert payload["stderr"].endswith("...<truncated>")
+
+
+def test_sdk_progress_machine_line_uses_real_event_type_fields():
+    backend = PLUGIN / "scripts" / "lib" / "claude-backend.mjs"
+    text = backend.read_text(encoding="utf8")
+    assert "function maybeWriteSdkProgress(event, options)" in text
+    assert "formatProgressEvent" in text
+    assert "event.phase" not in text
+    assert "sdk-${eventType}" in text or "sdk-\" + eventType" in text
+
+
+def test_review_gate_never_starts_background_or_ultrareview():
+    companion = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    gate = (PLUGIN / "hooks" / "claude-review-gate.mjs").read_text(encoding="utf8")
+    skill = (PLUGIN / "skills" / "claude-review-gate" / "SKILL.md").read_text(encoding="utf8")
+    readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    assert "runReviewGate" in companion
+    assert "--background" not in gate
+    assert "startBackgroundJob(" not in gate
+    assert "reserveJob(" not in gate
+    assert "ultrareview" not in gate.lower()
+    assert "roleTimeoutMs" in companion or "REVIEW_GATE_TIMEOUT" in companion
+    assert "warnGate" in companion and "allowing stop" in companion
+    assert "review gate never starts background jobs" in skill.lower()
+    assert "Stop hook never starts background jobs" in readme
+
+
+def test_lifecycle_docs_preserve_no_resubmit_and_cancel_boundaries():
+    readme = (PLUGIN / "README.md").read_text(encoding="utf8")
+    result = (PLUGIN / "skills" / "claude-result" / "SKILL.md").read_text(encoding="utf8")
+    cancel = (PLUGIN / "skills" / "claude-cancel" / "SKILL.md").read_text(encoding="utf8")
+    assert "Do not rerun the same review just because `--wait` expired" in readme
+    assert "do not start a replacement review" in result
+    assert "stdoutTruncated" in readme and "stderrTruncated" in result
+    assert "Do not claim a running process was stopped unless the runtime reports `cancelled`" in cancel
+
+
+def test_cancel_escalates_to_sigkill_for_sigterm_ignoring_child(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    pid_file = tmp_path / "fake-claude.pid"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_claude = bin_dir / "claude"
+    fake_claude.write_text(
+        f"#!/usr/bin/env python3\nimport os, pathlib, signal, sys, time\npath = pathlib.Path({json.dumps(str(pid_file))})\npath.write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM, lambda signum, frame: None)\nwhile True:\n    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "cancel-me"], cwd=repo, env=env, capture_output=True, text=True)
+    assert started.returncode == 0, started.stderr
+    job_id = json.loads(started.stdout)["job"]["id"]
+    for _ in range(30):
+        if pid_file.exists():
+            break
+        time.sleep(0.1)
+    fake_pid = int(pid_file.read_text(encoding="utf8"))
+    cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    assert cancelled.returncode == 0, cancelled.stderr
+    for _ in range(30):
+        if not process_is_running(fake_pid):
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("fake Claude process survived cancel SIGKILL escalation")
+    payload = json.loads(cancelled.stdout)
+    assert payload["status"] == "cancelled"
+
+
+def test_cancel_orphaned_job_uses_validated_child_process_group(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    pid_file = tmp_path / "orphan.pid"
+    repo.mkdir()
+    data.mkdir()
+    child = subprocess.Popen(
+        ["python3", "-c", f"import os, pathlib, signal, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM, lambda signum, frame: None)\nwhile True: time.sleep(1)\n"],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(30):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        child_pid = int(pid_file.read_text(encoding="utf8"))
+        script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ command: "review", args: ["orphan"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "orphaned",
+  workerPid: 999999,
+  childPid: {child_pid},
+  childProcessGroupPid: {child_pid},
+  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  startedAt: new Date().toISOString(),
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+console.log(job.id);
+"""
+        job_id = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True, check=True).stdout.strip()
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(data)
+        env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
+        cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+        assert cancelled.returncode == 0, cancelled.stderr
+        payload = json.loads(cancelled.stdout)
+        assert payload["status"] == "cancelled"
+        assert payload["job"]["status"] == "cancelled"
+        for _ in range(30):
+            if child.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert child.poll() is not None
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+def test_cancel_preserves_terminal_result_written_during_signal(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    pid_file = tmp_path / "race.pid"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    jobs_dir = pathlib.Path(json.loads(listed.stdout)["stateDir"]) / "jobs"
+    job_file = jobs_dir / "cancel-race.json"
+    child = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, signal, sys, time\n"
+                f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
+                "job_file = pathlib.Path(os.environ['JOB_FILE'])\n"
+                "def handler(signum, frame):\n"
+                "    job = json.loads(job_file.read_text())\n"
+                "    job.update({'status': 'succeeded', 'phase': 'succeeded', 'finishedAt': '2026-06-09T00:01:00.000Z', 'exitStatus': 0})\n"
+                "    job_file.write_text(json.dumps(job))\n"
+                "    sys.exit(0)\n"
+                "signal.signal(signal.SIGTERM, handler)\n"
+                "while True: time.sleep(1)\n"
+            ),
+        ],
+        env={**os.environ, "JOB_FILE": str(job_file)},
+        start_new_session=True,
+    )
+    try:
+        for _ in range(30):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        child_pid = int(pid_file.read_text(encoding="utf8"))
+        script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "cancel-race", command: "review", args: ["race"], cwd }}, env);
+updateJob(cwd, "cancel-race", {{
+  status: "running",
+  phase: "running",
+  childPid: {child_pid},
+  childProcessGroupPid: {child_pid},
+  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+"""
+        created = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert created.returncode == 0, created.stderr
+        cancel = subprocess.run([NODE, str(runtime), "cancel", "cancel-race"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+        assert cancel.returncode == 1, cancel.stdout
+        payload = json.loads(cancel.stdout)
+        assert payload["status"] == "succeeded"
+        assert "terminal state" in payload["reason"]
+        assert json.loads(job_file.read_text())["status"] == "succeeded"
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+def test_cancel_validation_failure_preserves_running_job_status(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "cancel-validation", command: "review", args: ["unsafe"], cwd }}, env);
+updateJob(cwd, "cancel-validation", {{
+  status: "running",
+  phase: "running",
+  workerPid: {os.getpid()},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+"""
+    created = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert created.returncode == 0, created.stderr
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    cancelled = subprocess.run([NODE, str(runtime), "cancel", "cancel-validation"], cwd=repo, env=env, capture_output=True, text=True)
+    assert cancelled.returncode == 1
+    payload = json.loads(cancelled.stdout)
+    assert payload["status"] == "cancel_failed"
+    assert "requires process identity validation" in payload["reason"]
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["phase"] == "cancel_failed"
+    finished_script = f"""
+import {{ finishJob, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+finishJob(cwd, "cancel-validation", {{ status: 0, stdout: "done", stderr: "" }}, env);
+console.log(JSON.stringify(readJob(cwd, "cancel-validation", env)));
+"""
+    finished = subprocess.run([NODE, "--input-type=module", "--eval", finished_script], capture_output=True, text=True)
+    assert finished.returncode == 0, finished.stderr
+    finished_payload = json.loads(finished.stdout)
+    assert finished_payload["status"] == "succeeded"
+    assert finished_payload["phase"] == "succeeded"
+
+
+def test_finish_job_after_cancel_request_is_recorded_as_cancelled(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ createJob, finishJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "finish-after-cancel", command: "review", args: ["cancelled"], cwd }}, env);
+updateJob(cwd, "finish-after-cancel", {{
+  status: "running",
+  phase: "cancelling",
+  cancelRequestedAt: "2026-06-09T00:00:01.000Z",
+  startedAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+finishJob(cwd, "finish-after-cancel", {{ status: 1, stdout: "", stderr: "interrupted" }}, env);
+console.log(JSON.stringify(readJob(cwd, "finish-after-cancel", env)));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "cancelled"
+    assert payload["phase"] == "cancelled"
+
+
+def test_process_group_cancel_fails_when_group_survives_sigkill(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    pid_file = tmp_path / "group.pid"
+    child = subprocess.Popen(
+        ["python3", "-c", f"import os, pathlib, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nwhile True: time.sleep(1)\n"],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(30):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        child_pid = int(pid_file.read_text(encoding="utf8"))
+        script = f"""
+import {{ captureProcessIdentity, terminateValidatedProcessGroup }} from {json.dumps(process_lib.as_uri())};
+const pid = {child_pid};
+const identity = captureProcessIdentity(pid);
+const originalKill = process.kill;
+process.kill = () => true;
+try {{
+  const result = terminateValidatedProcessGroup(pid, identity, {{ killGraceMs: 10 }});
+  console.log(JSON.stringify(result));
+}} finally {{
+  process.kill = originalKill;
+}}
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["delivered"] is True
+        assert "still alive after SIGKILL" in payload["reason"]
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+def test_process_group_cancel_reports_inconclusive_after_sigkill(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    fake_bin = tmp_path / "bin"
+    state_file = tmp_path / "ps-state.txt"
+    fake_bin.mkdir()
+    state_file.write_text("initial", encoding="utf8")
+    fake_ps = fake_bin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys\n"
+        "state = pathlib.Path(os.environ['FAKE_PS_STATE']).read_text().strip()\n"
+        "if '-p' in sys.argv:\n"
+        "    if state == 'initial':\n"
+        "        print('123456 1 123456 S fake-command')\n"
+        "        raise SystemExit(0)\n"
+        "    raise SystemExit(1)\n"
+        "if '-eo' in sys.argv:\n"
+        "    if state == 'sigterm':\n"
+        "        print('999 123456 S')\n"
+        "        raise SystemExit(0)\n"
+        "    if state == 'sigkill':\n"
+        "        print('synthetic post-sigkill group scan failure', file=sys.stderr)\n"
+        "        raise SystemExit(2)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["FAKE_PS_STATE"] = str(state_file)
+    script = f"""
+import fs from "node:fs";
+import {{ captureProcessIdentity, psProbeDiagnostics, resetPsProbeDiagnostics, terminateValidatedProcessGroup }} from {json.dumps(process_lib.as_uri())};
+const stateFile = {json.dumps(str(state_file))};
+resetPsProbeDiagnostics();
+const identity = captureProcessIdentity(123456);
+const originalKill = process.kill;
+process.kill = (_pid, signal) => {{
+  if (signal === "SIGTERM") {{
+    fs.writeFileSync(stateFile, "sigterm");
+  }}
+  if (signal === "SIGKILL") {{
+    fs.writeFileSync(stateFile, "sigkill");
+  }}
+  return true;
+}};
+try {{
+  const result = terminateValidatedProcessGroup(123456, identity, {{ killGraceMs: 10 }});
+  console.log(JSON.stringify({{ result, diagnostics: psProbeDiagnostics() }}));
+}} finally {{
+  process.kill = originalKill;
+}}
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["ok"] is False
+    assert payload["result"]["delivered"] is True
+    assert payload["result"]["escalated"] is True
+    assert "liveness probe inconclusive after SIGKILL" in payload["result"]["reason"]
+    assert payload["diagnostics"]["groupScanFailures"] >= 1
+    assert payload["diagnostics"]["lastGroupScanFailure"]["reason"].startswith("ps probe")
+
+
+def test_process_group_scan_is_bounded_and_fail_closed_on_ps_timeout(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ps = fake_bin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "time.sleep(1)\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_PS_TIMEOUT_MS"] = "25"
+    script = f"""
+	import {{ captureProcessIdentity, processGroupHasLiveMembers, psProbeDiagnostics, resetPsProbeDiagnostics }} from {json.dumps(process_lib.as_uri())};
+	resetPsProbeDiagnostics();
+	const start = Date.now();
+	console.log(JSON.stringify({{
+	  identity: captureProcessIdentity(123456),
+	  groupLive: processGroupHasLiveMembers(123456),
+	  elapsedMs: Date.now() - start,
+	  diagnostics: psProbeDiagnostics()
+	}}));
+	"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["identity"] is None
+    assert payload["groupLive"] is True
+    assert payload["elapsedMs"] < 1000
+    assert payload["diagnostics"]["groupScanFailures"] == 1
+    assert payload["diagnostics"]["lastGroupScanFailure"]["timeoutMs"] == 25
+    assert payload["diagnostics"]["lastGroupScanFailure"]["reason"] == "ps probe failed"
+
+
+def test_process_group_scan_fail_closed_on_ps_max_buffer(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_ps = fake_bin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if '-eo' in sys.argv:\n"
+        "    print('1 1 S')\n"
+        "    print('x' * 20000)\n"
+        "else:\n"
+        "    print('123456 1 123456 S fake-command')\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["CLAUDE_FOR_CODEX_PS_MAX_BUFFER_BYTES"] = "1024"
+    script = f"""
+	import {{ captureProcessIdentity, processGroupHasLiveMembers, psProbeDiagnostics, resetPsProbeDiagnostics }} from {json.dumps(process_lib.as_uri())};
+	resetPsProbeDiagnostics();
+	console.log(JSON.stringify({{
+	  identity: captureProcessIdentity(123456),
+	  groupLive: processGroupHasLiveMembers(123456),
+	  diagnostics: psProbeDiagnostics()
+	}}));
+	"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["identity"]["pid"] == 123456
+    assert payload["groupLive"] is True
+    assert payload["diagnostics"]["groupScanFailures"] == 1
+    assert payload["diagnostics"]["lastGroupScanFailure"]["maxBufferBytes"] == 1024
+    assert payload["diagnostics"]["lastGroupScanFailure"]["reason"] == "ps probe failed"
+
+
+def test_process_group_cancel_refuses_unvalidated_leaderless_group(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    info_file = tmp_path / "leaderless-cancel.json"
+    leader = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, time\n"
+                f"info = pathlib.Path({json.dumps(str(info_file))})\n"
+                "leader_pid = os.getpid()\n"
+                "child_pid = os.fork()\n"
+                "if child_pid == 0:\n"
+                "    info.write_text(json.dumps({'leaderPid': leader_pid, 'childPid': os.getpid(), 'pgid': os.getpgrp()}))\n"
+                "    while True: time.sleep(1)\n"
+                "time.sleep(0.1)\n"
+            ),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(30):
+            if info_file.exists():
+                break
+            time.sleep(0.1)
+        assert info_file.exists()
+        info = json.loads(info_file.read_text(encoding="utf8"))
+        leader_pid = int(info["leaderPid"])
+        child_pid = int(info["childPid"])
+        assert int(info["pgid"]) == leader_pid
+        for _ in range(30):
+            if leader.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert leader.poll() is not None
+        assert process_is_running(child_pid)
+
+        script = f"""
+import {{ terminateValidatedProcessGroup }} from {json.dumps(process_lib.as_uri())};
+const result = terminateValidatedProcessGroup({leader_pid}, {{
+  pid: {leader_pid},
+  pgid: {leader_pid},
+  command: "exited leader",
+  commandHash: "exited leader"
+}}, {{ killGraceMs: 10 }});
+console.log(JSON.stringify(result));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True, timeout=5)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["delivered"] is False
+        assert "leaderless process group" in payload["reason"]
+        assert process_is_running(child_pid)
+    finally:
+        try:
+            os.killpg(leader.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        if leader.poll() is None:
+            leader.kill()
+
+
+def test_cancel_refuses_worker_signal_when_child_group_validation_fails(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    info_file = tmp_path / "leaderless-worker-cancel.json"
+    worker_script = tmp_path / "claude-companion.mjs"
+    repo.mkdir()
+    data.mkdir()
+    worker_script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import time\n"
+        "while True:\n"
+        "    time.sleep(1)\n",
+        encoding="utf8",
+    )
+    worker_script.chmod(0o755)
+    leader = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            (
+                "import json, os, pathlib, time\n"
+                f"info = pathlib.Path({json.dumps(str(info_file))})\n"
+                "leader_pid = os.getpid()\n"
+                "child_pid = os.fork()\n"
+                "if child_pid == 0:\n"
+                "    info.write_text(json.dumps({'leaderPid': leader_pid, 'childPid': os.getpid(), 'pgid': os.getpgrp()}))\n"
+                "    while True: time.sleep(1)\n"
+                "time.sleep(0.1)\n"
+            ),
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    worker = subprocess.Popen(
+        ["python3", str(worker_script), "__run-job", "job-leaderless-worker"],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        for _ in range(30):
+            if info_file.exists():
+                break
+            time.sleep(0.1)
+        assert info_file.exists()
+        info = json.loads(info_file.read_text(encoding="utf8"))
+        leader_pid = int(info["leaderPid"])
+        child_pid = int(info["childPid"])
+        assert int(info["pgid"]) == leader_pid
+        for _ in range(30):
+            if leader.poll() is not None:
+                break
+            time.sleep(0.1)
+        assert leader.poll() is not None
+        assert process_is_running(child_pid)
+        assert process_is_running(worker.pid)
+
+        script = f"""
+import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+createJob(cwd, {{ id: "job-leaderless-worker", command: "review", args: ["leaderless"], cwd }}, env);
+updateJob(cwd, "job-leaderless-worker", {{
+  status: "running",
+  phase: "running",
+  workerPid: {worker.pid},
+  childProcessGroupPid: {leader_pid},
+  childProcessGroupIdentity: {{ pid: {leader_pid}, pgid: {leader_pid}, command: "exited leader", commandHash: "exited leader" }},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+"""
+        created = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert created.returncode == 0, created.stderr
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(data)
+        cancelled = subprocess.run([NODE, str(runtime), "cancel", "job-leaderless-worker"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
+        assert cancelled.returncode == 1
+        payload = json.loads(cancelled.stdout)
+        assert payload["status"] == "cancel_failed"
+        assert "before signaling the worker" in payload["reason"]
+        assert process_is_running(worker.pid)
+        assert process_is_running(child_pid)
+    finally:
+        for pgid in [worker.pid, leader.pid]:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if worker.poll() is None:
+            worker.kill()
+        if leader.poll() is None:
+            leader.kill()
+
+
+def test_process_identity_hash_takes_precedence_over_redacted_fallback(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    pid_file = tmp_path / "identity.pid"
+    child = subprocess.Popen(
+        ["python3", "-c", f"import os, pathlib, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nwhile True: time.sleep(1)\n"],
+        start_new_session=True,
+    )
+    try:
+        for _ in range(30):
+            if pid_file.exists():
+                break
+            time.sleep(0.1)
+        child_pid = int(pid_file.read_text(encoding="utf8"))
+        script = f"""
+import {{ captureProcessIdentity, validateProcessGroupLeader }} from {json.dumps(process_lib.as_uri())};
+const identity = captureProcessIdentity({child_pid});
+const suffix = identity.command.slice(-20);
+const redactedWouldMatch = {{
+  ...identity,
+  command: `<redacted-home>${{suffix}}`
+}};
+const mismatchedHash = {{
+  ...redactedWouldMatch,
+  commandHash: "0".repeat(64)
+}};
+console.log(JSON.stringify({{
+  fallback: validateProcessGroupLeader({child_pid}, redactedWouldMatch),
+  strictHash: validateProcessGroupLeader({child_pid}, mismatchedHash)
+}}));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["fallback"]["ok"] is True
+        assert payload["strictHash"]["ok"] is False
+        assert "process identity changed" in payload["strictHash"]["reason"]
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+def test_release_check_knows_long_running_lifecycle_guards():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run([NODE, str(runtime), "release-check", "--ci-simulate"], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    for name in [
+        "job-lifecycle-helper",
+        "atomic-job-claim-lock",
+        "async-background-worker",
+        "background-output-capped-in-memory",
+        "short-wait-window",
+        "wait-window-ceiling",
+        "wait-cancelled-nonzero",
+        "wait-timeout-stripped",
+        "job-idempotency-reuse",
+        "reserve-job-cap-idempotency",
+        "job-idempotency-fingerprint-controls",
+        "job-idempotency-timeout-no-reuse",
+        "review-gate-baseline-shared-fingerprint",
+        "review-gate-fingerprint-timeout-fail-open",
+        "review-gate-reviewable-git-timeout",
+        "job-result-sanitized",
+        "job-output-truncation-metadata",
+        "job-output-worker-byte-metadata",
+        "result-lock-contention-non-ok",
+        "job-write-returns-sanitized",
+        "queued-worker-bootstrap-reaper",
+        "queued-reservation-expiry",
+        "wait-reaps-lost-jobs",
+        "progress-event-parser",
+        "stderr-line-buffering",
+        "sdk-progress-hook-point",
+        "signal-child-group-cleanup",
+        "worker-signal-handler-before-child-spawn",
+        "child-process-identity-required",
+        "unvalidated-child-no-negative-pgid",
+        "process-identity-no-prefix-match",
+        "cancel-child-and-worker",
+        "cancel-queued-lock-reread",
+        "cancel-queued-worker-terminated",
+        "cancel-requires-delivered-signal",
+        "cancel-persistence-required",
+        "cancel-preserves-terminal-race",
+        "cancel-request-finish-semantics",
+        "leaderless-child-group-cleanup",
+        "process-ps-probe-bounds",
+        "hard-timeout-sigkill",
+        "hard-timeout-nonzero-status",
+        "cancel-sigkill-escalation",
+        "cancel-final-liveness-check",
+        "owner-aware-file-locks",
+        "zombie-process-not-alive",
+        "process-aware-reaper",
+        "execution-mode-recommendation",
+        "git-timeout-not-nonrepo",
+        "background-concurrency-cap",
+        "background-posix-platform-guard",
+        "review-gate-no-background",
+        "review-gate-no-reserve-job",
+        "review-gate-bounded-fail-open",
+    ]:
+        assert checks[name]["ok"] is True
 
 
 def run_fake_claude_plan(tmp_path, args, extra_env=None):
@@ -299,6 +3048,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -386,6 +3136,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -1082,7 +3833,9 @@ def prepare_gate_repo(tmp_path, *, with_change=True):
 import json
 import os
 import pathlib
+import signal
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -1096,6 +3849,11 @@ call_index = len(list(capture.glob("argv-*.json")))
 prompt = sys.argv[-1]
 (capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
 (capture / f"prompt-{call_index}.txt").write_text(prompt)
+if os.environ.get("IGNORE_TERM") == "1":
+    signal.signal(signal.SIGTERM, lambda signum, frame: None)
+sleep_ms = int(os.environ.get("SLEEP_MS", "0") or "0")
+if sleep_ms > 0:
+    time.sleep(sleep_ms / 1000)
 fail_roles = [role for role in os.environ.get("FAIL_ROLES", "").split(",") if role]
 invalid_roles = [role for role in os.environ.get("INVALID_ROLES", "").split(",") if role]
 block_roles = [role for role in os.environ.get("BLOCK_ROLES", "").split(",") if role]
@@ -1228,7 +3986,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.15.0"
+    assert data["version"] == "0.16.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -1241,14 +3999,14 @@ def test_plugin_manifest_is_valid():
     assert all(path.startswith("./assets/") for path in asset_paths)
 
 
-def test_claude_manifest_version_is_0150():
+def test_claude_manifest_version_is_0160():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.15.0"
+    assert manifest["version"] == "0.16.0"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.15.0"
+    assert manifest["version"] == "0.16.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -1522,13 +4280,14 @@ def test_no_public_review_size_command_ships_without_consumer():
 def test_runtime_applies_pathspec_to_git_context_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
+    assert "const runGit = options.gitRunner ?? git;" in text
     command_patterns = {
-        "status": r'git\(\[\s*"status",\s*"--short",\s*"--untracked-files=all",\s*\.\.\.pathArgs\s*\]\)',
-        "staged stat": r'git\(\[\s*"diff",\s*"--cached",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
-        "unstaged stat": r'git\(\[\s*"diff",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
-        "branch stat": r'git\(\[\s*"diff",\s*"--stat",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
-        "branch names": r'git\(\[\s*"diff",\s*"--name-only",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
-        "head names": r'git\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)',
+        "status": r'runGit\(\[\s*"status",\s*"--short",\s*"--untracked-files=all",\s*\.\.\.pathArgs\s*\]\)',
+        "staged stat": r'runGit\(\[\s*"diff",\s*"--cached",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
+        "unstaged stat": r'runGit\(\[\s*"diff",\s*"--stat",\s*\.\.\.pathArgs\s*\]\)',
+        "branch stat": r'runGit\(\[\s*"diff",\s*"--stat",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
+        "branch names": r'runGit\(\[\s*"diff",\s*"--name-only",\s*`\$\{base\}\.\.\.HEAD`,\s*\.\.\.pathArgs\s*\]\)',
+        "head names": r'runGit\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)',
     }
     for label, pattern in command_patterns.items():
         assert re.search(pattern, text), label
@@ -1745,10 +4504,10 @@ def test_runtime_avoids_head_name_only_diff_without_head():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
     assert re.search(
-        r'git\(\[\s*"rev-parse",\s*"--verify",\s*"HEAD"\s*\]\)',
+        r'runGit\(\[\s*"rev-parse",\s*"--verify",\s*"HEAD"\s*\]\)',
         text,
     )
-    assert re.search(r'git\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)', text)
+    assert re.search(r'runGit\(\[\s*"diff",\s*"--name-only",\s*"HEAD",\s*\.\.\.pathArgs\s*\]\)', text)
     assert re.search(r'includeHeadNameOnly\s*&&\s*status\s*\?\s*changedFilesFromStatus\(status\)', text)
     assert "function changedFilesFromStatus" in text
     assert "changed files from git status fallback" in text
@@ -3969,6 +6728,7 @@ def test_sdk_stream_progress_is_sanitized_and_does_not_print_raw_chunks(tmp_path
     assert result.returncode == 0, result.stderr
     assert "[claude-for-codex sdk progress] assistant" in result.stderr
     assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
+    assert "[claude-for-codex progress]" in result.stderr
     assert secret_chunk not in result.stderr
     assert secret_session not in result.stderr
     assert secret_chunk not in result.stdout
@@ -4034,6 +6794,7 @@ def test_sdk_review_stream_progress_is_sanitized_and_report_omits_raw_chunks(tmp
     assert result.returncode == 0, result.stderr
     assert "[claude-for-codex sdk progress] assistant" in result.stderr
     assert "[claude-for-codex sdk progress] result cost_usd=0.01" in result.stderr
+    assert "[claude-for-codex progress]" in result.stderr
     assert "SDK_REVIEW_OK" in result.stdout
     assert secret_chunk not in result.stderr
     assert secret_session not in result.stderr
@@ -4053,6 +6814,62 @@ def test_sdk_review_stream_progress_is_sanitized_and_report_omits_raw_chunks(tmp
     serialized = json.dumps(json.loads(latest.stdout)["report"])
     assert secret_chunk not in serialized
     assert secret_session not in serialized
+
+
+def test_sdk_background_review_auto_streams_progress_to_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n")
+    sdk_module, capture = write_fake_claude_sdk(
+        tmp_path,
+        stdout="SDK_BACKGROUND_OK",
+        extra_js="""
+  yield {
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'background progress chunk' }] },
+    session_id: 'sdk-session-secret'
+  };
+""",
+    )
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "review",
+            "--backend",
+            "sdk",
+            "--background",
+            "--wait",
+            "--wait-timeout-ms",
+            "10000",
+            "--scope",
+            "working-tree",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "succeeded"
+    assert payload["job"]["lastProgressAt"]
+    assert payload["job"]["lastProgressMessage"] == "result event received"
+    assert payload["job"]["progressPreview"] == ["result event received"]
+    assert "SDK_BACKGROUND_OK" in payload["job"]["stdout"]
+    query = json.loads((capture / "query.json").read_text(encoding="utf8"))
+    assert query["includePartialMessages"] is True
+    assert query["options"]["includePartialMessages"] is True
 
 
 def test_sdk_subagent_mode_parses_nested_role_results_and_failed_status(tmp_path):
@@ -4561,7 +7378,7 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
-def test_release_check_knows_claude_0150_native_assets():
+def test_release_check_knows_claude_0160_native_assets():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run(
         [NODE, str(runtime), "release-check"],
@@ -4574,7 +7391,7 @@ def test_release_check_knows_claude_0150_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.15.0"
+    assert checks["manifest-version"]["detail"] == "version=0.16.0"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -4774,7 +7591,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.15.0"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.16.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -4783,11 +7600,11 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.15.0"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.16.0"] in calls
     assert ["plugin", "list", "--json"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.15.0"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.16.0"
     assert checks["remote-install-plugin-list-schema"]["ok"] is True
     assert checks["remote-install-plugin-list-schema"]["detail"] == f"installed root={installed_plugin}"
 
@@ -4831,7 +7648,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.15.0"],
+        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.16.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -4867,7 +7684,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "codex plugin list --json" in text
     assert "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" in text
@@ -5118,7 +7935,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.15.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.16.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -5206,7 +8023,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.15.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.16.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -5306,7 +8123,7 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-model-env-forwarded"]["ok"] is True
     assert checks["github-actions-effort-env-forwarded"]["ok"] is True
     assert checks["github-actions-model-effort-quoted"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.15.0"
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.16.0"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
@@ -5351,7 +8168,9 @@ def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path)
     assert json.loads(cancel.stdout)["status"] == "not_found"
 
 
-def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
+def test_result_marks_terminal_viewed_but_preserves_unread_running_jobs(tmp_path):
+    import datetime
+
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
@@ -5370,16 +8189,16 @@ def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
     assert jobs.returncode == 0, jobs.stderr
     state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
     jobs_dir = state_dir / "jobs"
-    job_file = jobs_dir / "job-1.json"
-    job_file.write_text(json.dumps({
-        "id": "job-1",
-        "status": "queued",
+    terminal_job_file = jobs_dir / "job-terminal.json"
+    terminal_job_file.write_text(json.dumps({
+        "id": "job-terminal",
+        "status": "succeeded",
         "createdAt": "2026-05-30T00:00:00.000Z",
         "result": "ready"
     }))
 
     result = subprocess.run(
-        [NODE, str(runtime), "result", "job-1"],
+        [NODE, str(runtime), "result", "job-terminal"],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -5389,10 +8208,146 @@ def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
     result_payload = json.loads(result.stdout)
     assert result_payload["status"] == "ok"
     assert result_payload["job"]["resultViewedAt"]
-    assert json.loads(job_file.read_text())["resultViewedAt"]
+    assert json.loads(terminal_job_file.read_text())["resultViewedAt"]
+
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    running_job_file = jobs_dir / "job-running.json"
+    running_job_file.write_text(json.dumps({
+        "id": "job-running",
+        "status": "running",
+        "createdAt": now,
+        "startedAt": now,
+        "lastHeartbeatAt": now
+    }))
+
+    running_result = subprocess.run(
+        [NODE, str(runtime), "result", "job-running"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert running_result.returncode == 0, running_result.stderr
+    running_payload = json.loads(running_result.stdout)
+    assert running_payload["status"] == "ok"
+    assert "resultViewedAt" not in running_payload["job"]
+    assert "resultViewedAt" not in json.loads(running_job_file.read_text())
+
+    finished_running_job = json.loads(running_job_file.read_text())
+    finished_running_job.update({
+        "status": "succeeded",
+        "finishedAt": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+        "stdout": "done"
+    })
+    running_job_file.write_text(json.dumps(finished_running_job))
+    prompt_hook = PLUGIN / "hooks" / "unread-result.mjs"
+    prompted = subprocess.run(
+        [NODE, str(prompt_hook)],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "UserPromptSubmit", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+    assert prompted.returncode == 0
+    assert "job-running (succeeded)" in prompted.stderr
+
+
+def test_result_and_cancel_accept_job_id_option_form(tmp_path):
+    import datetime
+
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    jobs_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"]) / "jobs"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    job_file = jobs_dir / "job-option.json"
+    job_file.write_text(json.dumps({
+        "id": "job-option",
+        "status": "queued",
+        "createdAt": now,
+        "lastHeartbeatAt": now
+    }))
+
+    result = subprocess.run(
+        [NODE, str(runtime), "result", "--json", "--job-id", "job-option"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["job"]["id"] == "job-option"
 
     cancel = subprocess.run(
-        [NODE, str(runtime), "cancel", "job-1"],
+        [NODE, str(runtime), "cancel", "--json", "--job-id", "job-option"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert cancel.returncode == 0, cancel.stderr
+    assert json.loads(cancel.stdout)["status"] == "cancelled"
+
+
+def test_cancel_persists_queued_job_state_after_result_peek(tmp_path):
+    import datetime
+
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    jobs_dir = state_dir / "jobs"
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+    job_file = jobs_dir / "job-queued.json"
+    job_file.write_text(json.dumps({
+        "id": "job-queued",
+        "status": "queued",
+        "createdAt": now,
+        "lastHeartbeatAt": now
+    }))
+
+    result = subprocess.run(
+        [NODE, str(runtime), "result", "job-queued"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    result_payload = json.loads(result.stdout)
+    assert result_payload["status"] == "ok"
+    assert "resultViewedAt" not in result_payload["job"]
+    assert "resultViewedAt" not in json.loads(job_file.read_text())
+
+    cancel = subprocess.run(
+        [NODE, str(runtime), "cancel", "job-queued"],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -5404,6 +8359,85 @@ def test_result_marks_viewed_and_cancel_persists_queued_job_state(tmp_path):
     persisted = json.loads(job_file.read_text())
     assert persisted["status"] == "cancelled"
     assert persisted["cancelledAt"]
+
+
+def test_cancel_queued_job_with_unvalidated_worker_pid_fails(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    jobs_dir = state_dir / "jobs"
+    job_file = jobs_dir / "job-queued-worker.json"
+    job_file.write_text(json.dumps({
+        "id": "job-queued-worker",
+        "status": "queued",
+        "command": "review",
+        "args": ["queued"],
+        "cwd": str(repo),
+        "createdAt": "2026-05-30T00:00:00.000Z",
+        "workerPid": os.getpid(),
+    }))
+
+    cancel = subprocess.run(
+        [NODE, str(runtime), "cancel", "job-queued-worker"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert cancel.returncode == 1
+    payload = json.loads(cancel.stdout)
+    assert payload["status"] == "cancel_failed"
+    assert "Queued worker cancellation failed" in payload["reason"]
+    persisted = json.loads(job_file.read_text())
+    assert persisted["status"] == "cancel_failed"
+    assert "Queued worker cancellation requires process identity validation" in persisted["cancelFailureReason"]
+
+
+def test_result_reports_locked_when_view_marker_cannot_be_persisted(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    jobs_dir = state_dir / "jobs"
+    job_file = jobs_dir / "job-locked.json"
+    job_file.write_text(json.dumps({
+        "id": "job-locked",
+        "status": "succeeded",
+        "createdAt": "2026-05-30T00:00:00.000Z",
+        "stdout": "ready"
+    }))
+    (jobs_dir / "job-locked.json.lock").write_text(json.dumps({
+        "pid": os.getpid(),
+        "createdAt": "2026-05-30T00:00:00.000Z"
+    }))
+
+    result = subprocess.run([NODE, str(runtime), "result", "job-locked"], cwd=repo, env=env, capture_output=True, text=True)
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "locked"
+    assert "busy" in payload["reason"]
+    assert "resultViewedAt" not in json.loads(job_file.read_text())
 
 
 def test_background_review_wait_records_succeeded_job_result(tmp_path):
@@ -5459,6 +8493,65 @@ print("BACKGROUND_REVIEW_OK")
     result_payload = json.loads(result.stdout)
     assert result_payload["job"]["resultViewedAt"]
     assert result_payload["job"]["stdout"].strip() == "BACKGROUND_REVIEW_OK"
+
+
+def test_background_progress_buffer_preserves_split_utf8_chunks(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+line = "[claude-for-codex progress] " + json.dumps({
+    "phase": "reviewing",
+    "message": "进度测试",
+    "role": "审阅"
+}, ensure_ascii=False) + "\\n"
+raw = line.encode("utf8")
+split = raw.index("测".encode("utf8")) + 1
+os.write(sys.stderr.fileno(), raw[:split])
+sys.stderr.flush()
+time.sleep(0.05)
+os.write(sys.stderr.fileno(), raw[split:])
+sys.stderr.flush()
+print("UTF8_PROGRESS_OK")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "--wait", "split utf8 progress"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "succeeded"
+    assert payload["job"]["stdout"].strip() == "UTF8_PROGRESS_OK"
+    assert payload["job"]["lastProgressMessage"] == "进度测试"
+    assert payload["job"]["lastProgressRole"] == "审阅"
 
 
 def test_background_multi_review_failure_is_recorded_as_failed_job(tmp_path):
@@ -5531,10 +8624,371 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert payload["status"] == "reserved"
     assert payload["job"]["status"] == "queued"
     assert payload["job"]["command"] == "review"
-    assert payload["workerCommand"][0] == NODE
-    assert str(runtime) in payload["workerCommand"]
-    assert "run-reserved-job" in payload["workerCommand"]
+    assert payload["cwd"] == str(repo)
+    assert payload["workerCommand"][0] == node_exec_path()
+    assert payload["workerCommand"][1] == str(runtime.resolve())
+    assert payload["workerCommand"][2:4] == ["run-reserved-job", "--job-id"]
+    assert payload["workerCommand"][4] == payload["job"]["id"]
+    assert payload["workerCommand"][5:] == ["--cwd", str(repo)]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
+    assert "workerCommand once as argv" in payload["forwardingInstructions"]
+    assert "returned cwd" in payload["forwardingInstructions"]
+
+
+def test_reserve_job_reuses_existing_reserved_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    first = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert second_payload["reusedExisting"] is True
+    assert second_payload["job"]["id"] == first_payload["job"]["id"]
+    assert second_payload["cwd"] == str(repo)
+    assert second_payload["workerCommand"] == first_payload["workerCommand"]
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert len(json.loads(jobs.stdout)["jobs"]) == 1
+
+
+def test_reserved_worker_command_uses_embedded_cwd_when_launched_elsewhere(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "print('RESERVED_CWD_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "embedded-cwd"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert reserved.returncode == 0, reserved.stderr
+    payload = json.loads(reserved.stdout)
+    worker = subprocess.run(
+        payload["workerCommand"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert worker.returncode == 0, worker.stderr
+    assert json.loads(worker.stdout)["status"] == "succeeded"
+    result = subprocess.run(
+        [NODE, str(runtime), "result", payload["job"]["id"]],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    result_payload = json.loads(result.stdout)
+    assert "RESERVED_CWD_DONE" in result_payload["job"]["stdout"]
+
+
+def test_reserved_worker_retries_transient_workspace_lock_contention(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    state = PLUGIN / "scripts" / "lib" / "state.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "print('LOCK_RETRY_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "lock-contention"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert reserved.returncode == 0, reserved.stderr
+    payload = json.loads(reserved.stdout)
+    holder_script = f"""
+import {{ withWorkspaceJobLock }} from {json.dumps(jobs.as_uri())};
+import {{ stateDirForCwd }} from {json.dumps(state.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+console.log(JSON.stringify({{ stateDir: stateDirForCwd(cwd, env) }}));
+withWorkspaceJobLock(cwd, env, () => {{
+  console.log("LOCK_HELD");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2300);
+  return {{ status: "released" }};
+}});
+"""
+    holder = subprocess.Popen(
+        [NODE, "--input-type=module", "--eval", holder_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip()
+        assert holder.stdout.readline().strip() == "LOCK_HELD"
+        worker = subprocess.run(
+            payload["workerCommand"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=5)
+
+    assert worker.returncode == 0, worker.stderr
+    assert json.loads(worker.stdout)["status"] == "succeeded"
+    result = subprocess.run(
+        [NODE, str(runtime), "result", payload["job"]["id"]],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "LOCK_RETRY_DONE" in json.loads(result.stdout)["job"]["stdout"]
+
+
+def test_direct_background_does_not_reuse_queued_host_forwarded_reservation(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    direct = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "same-request"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert reserved.returncode == 0, reserved.stderr
+    assert direct.returncode == 0, direct.stderr
+    reserved_payload = json.loads(reserved.stdout)
+    direct_payload = json.loads(direct.stdout)
+    assert reserved_payload["status"] == "reserved"
+    assert direct_payload["status"] == "queued"
+    assert direct_payload["job"]["id"] != reserved_payload["job"]["id"]
+    assert direct_payload["job"].get("reusedExisting") is not True
+    jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    assert len(json.loads(jobs.stdout)["jobs"]) == 2
+
+
+def test_reserve_job_reuses_running_reserved_job_without_worker_command(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "time.sleep(1)\n"
+        "print('RESERVED_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    first = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "same-running-reservation"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert first.returncode == 0, first.stderr
+    first_payload = json.loads(first.stdout)
+    worker = subprocess.Popen(
+        first_payload["workerCommand"],
+        cwd=repo,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        job_id = first_payload["job"]["id"]
+        running = None
+        for _ in range(50):
+            jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+            running = next(job for job in json.loads(jobs.stdout)["jobs"] if job["id"] == job_id)
+            if running["status"] == "running":
+                break
+            time.sleep(0.05)
+        assert running["status"] == "running"
+
+        second = subprocess.run(
+            [NODE, str(runtime), "reserve-job", "review", "same-running-reservation"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert second.returncode == 0, second.stderr
+        second_payload = json.loads(second.stdout)
+        assert second_payload["status"] == "running"
+        assert second_payload["reusedExisting"] is True
+        assert second_payload["job"]["id"] == job_id
+        assert "workerCommand" not in second_payload
+        assert "do not dispatch" in second_payload["message"]
+
+        stdout, stderr = worker.communicate(timeout=5)
+        assert worker.returncode == 0, stderr
+        assert json.loads(stdout)["status"] == "succeeded"
+        result = subprocess.run([NODE, str(runtime), "result", job_id], cwd=repo, env=env, capture_output=True, text=True, check=True)
+        result_payload = json.loads(result.stdout)
+        assert "RESERVED_DONE" in result_payload["job"]["stdout"]
+    finally:
+        if worker.poll() is None:
+            worker.terminate()
+            worker.wait(timeout=5)
+
+
+def test_reserve_job_respects_background_capacity_cap(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS"] = "1"
+
+    first = subprocess.run([NODE, str(runtime), "reserve-job", "review", "one"], cwd=repo, env=env, capture_output=True, text=True)
+    second = subprocess.run([NODE, str(runtime), "reserve-job", "review", "two"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 2
+    payload = json.loads(second.stdout)
+    assert payload["status"] == "capacity_blocked"
+    assert payload["activeCount"] == 1
+    assert payload["limit"] == 1
+
+
+def test_reserve_job_does_not_return_worker_command_for_direct_active_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    fake_worker = bin_dir / "fake-node"
+    fake_worker.write_text("#!/usr/bin/env sh\nsleep 5\n", encoding="utf8")
+    fake_worker.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_WORKER_NODE"] = str(fake_worker)
+
+    started = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+    reserved = subprocess.run([NODE, str(runtime), "reserve-job", "review", "same-request"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert started.returncode == 0, started.stderr
+    assert reserved.returncode == 0, reserved.stderr
+    started_payload = json.loads(started.stdout)
+    reserved_payload = json.loads(reserved.stdout)
+    assert reserved_payload["status"] == "running"
+    assert reserved_payload["reusedExisting"] is True
+    assert reserved_payload["job"]["id"] == started_payload["job"]["id"]
+    assert "workerCommand" not in reserved_payload
+    assert "do not dispatch" in reserved_payload["message"]
 
 
 def node_exec_path():
@@ -5818,6 +9272,36 @@ def test_subagent_command_rejects_sdk_subagents_without_sdk_backend(tmp_path):
 
     assert result.returncode == 2
     assert "--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk." in result.stderr
+
+
+def test_reserve_job_rejects_sdk_subagents_without_sdk_backend(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = env_without("CLAUDE_FOR_CODEX_BACKEND")
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+
+    result = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "multi-review", "--agent-team", "sdk-subagents"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk." in result.stderr
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    assert json.loads(jobs.stdout)["jobs"] == []
 
 
 def test_subagent_command_allows_sdk_subagents_with_explicit_sdk_backend(tmp_path):
@@ -6114,7 +9598,72 @@ def test_internal_job_worker_rejects_unsupported_job_command(tmp_path):
     assert "Unsupported background job command" in payload["stderr"]
 
 
-def test_running_cancel_refuses_unvalidated_pid_and_corrupt_result_is_reported(tmp_path):
+def test_internal_job_worker_reports_finish_failure_when_job_file_disappears(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    job_file = state_dir / "jobs" / "job-finish-missing.json"
+    job_file.write_text(json.dumps({
+        "id": "job-finish-missing",
+        "status": "queued",
+        "command": "review",
+        "args": ["finish missing"],
+        "cwd": str(repo)
+    }))
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+pathlib.Path(os.environ["JOB_FILE_TO_DELETE"]).unlink()
+print("CLAUDE FINISHED")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env["JOB_FILE_TO_DELETE"] = str(job_file)
+
+    worker = subprocess.run(
+        [NODE, str(runtime), "__run-job", "job-finish-missing"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert worker.returncode == 1
+    payload = json.loads(worker.stdout)
+    assert payload["status"] == "finish_failed"
+    assert payload["jobId"] == "job-finish-missing"
+    assert "final state could not be persisted" in payload["message"]
+    assert not job_file.exists()
+
+
+def test_running_cancel_treats_absent_worker_as_cancel_failed_and_corrupt_result_is_reported(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
@@ -6151,7 +9700,7 @@ def test_running_cancel_refuses_unvalidated_pid_and_corrupt_result_is_reported(t
     assert cancel.returncode == 1
     cancel_payload = json.loads(cancel.stdout)
     assert cancel_payload["status"] == "cancel_failed"
-    assert "identity validation" in cancel_payload["reason"]
+    assert "did not deliver a signal" in cancel_payload["reason"]
 
     result = subprocess.run(
         [NODE, str(runtime), "result", "job-corrupt"],
@@ -6254,11 +9803,12 @@ print("SHOULD_NOT_FINISH")
         )
         payload = json.loads(jobs.stdout)
         job = next(item for item in payload["jobs"] if item["id"] == job_id)
-        if job["status"] == "running":
+        if job["status"] == "running" and job.get("childProcessGroupPid"):
             break
         time.sleep(0.1)
     assert job["status"] == "running"
     assert job["pidIdentity"]["command"]
+    assert job["childProcessGroupIdentity"]["command"]
 
     cancel = subprocess.run(
         [NODE, str(runtime), "cancel", job_id],
@@ -6270,7 +9820,8 @@ print("SHOULD_NOT_FINISH")
     assert cancel.returncode == 0, cancel.stderr
     cancel_payload = json.loads(cancel.stdout)
     assert cancel_payload["status"] == "cancelled"
-    assert cancel_payload["job"]["cancelIdentity"]["pid"] == job["workerPid"]
+    assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == job["workerPid"]
+    assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
 
 
 def test_cancel_running_host_forwarded_reserved_job_validates_and_terminates_worker(tmp_path):
@@ -6336,11 +9887,12 @@ print("SHOULD_NOT_FINISH")
             )
             payload = json.loads(jobs.stdout)
             job = next(item for item in payload["jobs"] if item["id"] == job_id)
-            if job["status"] == "running":
+            if job["status"] == "running" and job.get("childProcessGroupPid"):
                 break
             time.sleep(0.1)
         assert job["status"] == "running"
         assert "run-reserved-job" in job["pidIdentity"]["command"]
+        assert job["childProcessGroupIdentity"]["command"]
 
         cancel = subprocess.run(
             [NODE, str(runtime), "cancel", job_id],
@@ -6352,9 +9904,14 @@ print("SHOULD_NOT_FINISH")
         assert cancel.returncode == 0, cancel.stderr
         cancel_payload = json.loads(cancel.stdout)
         assert cancel_payload["status"] == "cancelled"
-        assert cancel_payload["job"]["cancelIdentity"]["pid"] == worker.pid
-        assert "run-reserved-job" in cancel_payload["job"]["cancelIdentity"]["command"]
-        worker.wait(timeout=5)
+        assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == worker.pid
+        assert "run-reserved-job" in cancel_payload["job"]["cancelWorkerIdentity"]["command"]
+        assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
+        worker_stdout, worker_stderr = worker.communicate(timeout=5)
+        assert worker.returncode == 0, worker_stderr
+        worker_payload = json.loads(worker_stdout)
+        assert worker_payload["status"] == "cancelled"
+        assert worker_payload["exitStatus"] == 0
         time.sleep(2.5)
         assert not completion_marker.exists()
     finally:
@@ -6991,6 +10548,36 @@ raise SystemExit(2)
     assert payload["claudeCommand"] == str(fake_claude)
 
 
+def test_hook_fingerprint_options_clamp_work_under_prompt_hook_timeout():
+    module_uri = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").as_uri()
+    script = f"""
+import {{ hookFingerprintOptions }} from {json.dumps(module_uri)};
+const options = hookFingerprintOptions({{
+  CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: "50",
+  CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES: "9999999",
+  CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES: "999"
+}});
+console.log(JSON.stringify(options.env));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    env = json.loads(result.stdout)
+    assert env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] == "500"
+    assert env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] == str(512 * 1024)
+    assert env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES"] == "128"
+
+
+def test_prompt_and_stop_hooks_share_bounded_fingerprint_options():
+    runtime = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    unread = (PLUGIN / "hooks" / "unread-result.mjs").read_text(encoding="utf8")
+    hooks = json.loads((PLUGIN / "hooks" / "hooks.json").read_text(encoding="utf8"))
+    prompt_commands = hooks["hooks"]["UserPromptSubmit"][0]["hooks"]
+    assert any(command.get("timeout") == 5 for command in prompt_commands)
+    assert "workingTreeFingerprint(cwd, [], hookFingerprintOptions())" in unread
+    assert "const hookOptions = hookFingerprintOptions()" in runtime
+    assert "workingTreeFingerprintDetails(cwd, [], hookOptions)" in runtime
+
+
 def test_setup_can_enable_and_disable_review_gate(tmp_path):
     runtime, repo, _capture_dir, env = prepare_gate_repo(tmp_path)
 
@@ -7072,13 +10659,9 @@ def test_review_gate_skips_when_turn_baseline_matches_current_diff(tmp_path):
     assert setup.returncode == 0, setup.stderr
     state_file = pathlib.Path(json.loads(setup.stdout)["reviewGate"]["stateFile"])
     state_dir = state_file.parent
-    status = subprocess.run(["git", "status", "--short", "--untracked-files=all"], cwd=repo, check=True, capture_output=True, text=True).stdout
-    staged = subprocess.run(["git", "diff", "--cached"], cwd=repo, check=True, capture_output=True, text=True).stdout
-    unstaged = subprocess.run(["git", "diff"], cwd=repo, check=True, capture_output=True, text=True).stdout
-    diff_hash = hashlib.sha256("\n--- claude-for-codex ---\n".join([status, staged, unstaged]).encode()).hexdigest()
     (state_dir / "turn-baseline.json").write_text(json.dumps({
         "sessionId": "s1",
-        "workingTreeFingerprint": diff_hash
+        "workingTreeFingerprint": companion_working_tree_fingerprint(repo)
     }))
 
     result = subprocess.run(
@@ -7096,6 +10679,294 @@ def test_review_gate_skips_when_turn_baseline_matches_current_diff(tmp_path):
     assert list(capture_dir.glob("prompt-*.txt")) == []
 
 
+def test_review_gate_skips_when_legacy_raw_turn_baseline_matches_current_diff(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    state_file = pathlib.Path(json.loads(setup.stdout)["reviewGate"]["stateFile"])
+    state_dir = state_file.parent
+    (state_dir / "turn-baseline.json").write_text(json.dumps({
+        "sessionId": "s1",
+        "workingTreeFingerprint": legacy_raw_hook_working_tree_fingerprint(repo)
+    }))
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_fingerprint_timeout_fails_open_without_claude(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args == ["rev-parse", "HEAD"]:
+    print("abc123")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    print(" M file.txt")
+    raise SystemExit(0)
+if args[:1] == ["diff"]:
+    time.sleep(1)
+    raise SystemExit(0)
+if args[:1] == ["ls-files"]:
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "fingerprint timed out; allowing stop" in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_inconclusive_fingerprint_failure_does_not_claim_timeout(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args == ["rev-parse", "HEAD"]:
+    print("abc123")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    print(" M file.txt")
+    raise SystemExit(0)
+if args[:1] == ["diff"]:
+    print("fatal: synthetic diff failure", file=sys.stderr)
+    raise SystemExit(2)
+if args[:1] == ["ls-files"]:
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "fingerprint inconclusive; allowing stop" in result.stderr
+    assert "fingerprint timed out" not in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_reviewable_git_timeout_fails_open_without_claude(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    time.sleep(1)
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "git status timed out; allowing stop" in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_reviewable_git_uses_hook_safe_timeout_cap(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+import time
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    time.sleep(1)
+    print(" M file.txt")
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env["CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "60000"
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "git status timed out; allowing stop" in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
+def test_review_gate_untracked_budget_exceeded_still_runs_review_without_cache(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    (repo / "large-untracked.txt").write_text("12345\n", encoding="utf8")
+    env["CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] = "4"
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+
+    first = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == ""
+    assert second.stdout == ""
+    assert "fingerprint budget exceeded; running review without cached gate decision" in first.stderr
+    assert "fingerprint budget exceeded; running review without cached gate decision" in second.stderr
+    assert len(list(capture_dir.glob("prompt-*.txt"))) == 10
+
+
 def test_review_gate_all_allow_exits_without_block(tmp_path):
     result, prompts, _capture_dir = run_fake_review_gate(tmp_path)
 
@@ -7106,6 +10977,81 @@ def test_review_gate_all_allow_exits_without_block(tmp_path):
     for role in ["correctness", "security", "tests", "release", "adversarial"]:
         assert f"<role_name>{role}</role_name>" in "\n".join(prompts)
         assert "Your first line must be exactly one of:" in "\n".join(prompts)
+
+
+def test_review_gate_aggregate_timeout_stops_later_roles(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={
+            "CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS": "1000",
+            "SLEEP_MS": "1200",
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert len(prompts) == 1
+    assert "role correctness timed out; allowing stop" in result.stderr
+    assert "review gate aggregate timeout reached; allowing stop" in result.stderr
+
+
+def test_review_gate_aggregate_timeout_does_not_cache_allow(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+    first_env = env.copy()
+    first_env["CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "1000"
+    first_env["SLEEP_MS"] = "1200"
+
+    first = subprocess.run(
+        [NODE, str(runtime), "review-gate"],
+        cwd=repo,
+        env=first_env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        [NODE, str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert first.stdout == ""
+    assert second.stdout == ""
+    assert "review gate aggregate timeout reached; allowing stop" in first.stderr
+    assert second.stderr == ""
+    assert len(list(capture_dir.glob("prompt-*.txt"))) == 6
+
+
+def test_review_gate_timeout_kills_child_that_ignores_sigterm(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={
+            "CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS": "1000",
+            "CLAUDE_FOR_CODEX_CLAUDE_KILL_GRACE_MS": "100",
+            "IGNORE_TERM": "1",
+            "SLEEP_MS": "30000",
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert len(prompts) == 1
+    assert "role correctness timed out; allowing stop" in result.stderr
+    assert "review gate aggregate timeout reached; allowing stop" in result.stderr
 
 
 def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):
@@ -7143,6 +11089,49 @@ def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):
     assert len(prompts) == 5
     assert second.stdout == ""
     assert second.stderr == ""
+
+
+def test_review_gate_allow_cache_is_role_pack_aware(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+
+    first = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        ["node", str(runtime), "review-gate", "--role-pack", "minimal"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == ""
+    assert second.stdout == ""
+    prompts = [
+        path.read_text()
+        for path in sorted(capture_dir.glob("prompt-*.txt"), key=lambda p: int(p.stem.split("-")[1]))
+    ]
+    assert len(prompts) == 6
+    assert sum("<role_name>correctness</role_name>" in prompt for prompt in prompts) == 2
+    assert sum("<role_name>security</role_name>" in prompt for prompt in prompts) == 1
+    assert prompts[-1].count("<role_name>correctness</role_name>") == 1
 
 
 def test_review_gate_block_outputs_stop_decision_json(tmp_path):

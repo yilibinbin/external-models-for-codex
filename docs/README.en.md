@@ -15,7 +15,7 @@ Natural-language Claude routing rule: users should ask for Claude normally, for 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
@@ -156,7 +156,9 @@ For `--json` modes, exit status reports command/parsing success. Inspect `verdic
 
 ## Host-forwarded background jobs
 
-`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
+`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. The returned command carries an explicit `--cwd` so it can claim the correct workspace state even if the forwarding shell starts elsewhere. Existing detached runtime background jobs remain as a compatibility fallback.
+
+Unclaimed host-forwarded reservations use a separate claim deadline from direct worker bootstrap cleanup: the default is ten minutes and can be adjusted with `CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS=<milliseconds>`. Waiting reservations count toward the active job cap, so high-fanout operators can also tune `CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS`. If `jobs` shows phase `unsafe-child-identity`, the plugin found a live child PID without saved identity and preserves capacity until you inspect/cancel it. If `jobs` shows `leaderless-liveness-inconclusive`, the bounded `ps` probe could not prove whether a process group still has live members; loaded CI runners can tune `CLAUDE_FOR_CODEX_PS_TIMEOUT_MS=<milliseconds>`. SDK-backed background and reserved jobs automatically enable sanitized stream progress for tracked job previews.
 
 ## MCP-backed read-only Git review
 

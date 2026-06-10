@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.15.0`
+- Current version: `0.16.0`
 
 Published capabilities:
 
@@ -106,7 +106,7 @@ Expected output includes:
 ```json
 {
   "claudeAvailable": true,
-  "claudeCommand": "/Users/you/.local/bin/claude",
+  "claudeCommand": "<resolved claude command path>",
   "gitAvailable": true,
   "reviewGate": {
     "enabled": false,
@@ -137,7 +137,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -188,6 +188,7 @@ Run from the repository root:
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --json --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --backend sdk --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs recommend-execution-mode --json
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
@@ -225,9 +226,21 @@ For `--json` modes, exit status reports whether the Claude invocation and JSON p
 
 `jobs`, `result`, and `cancel` are the stable lifecycle surface for tracked Claude work. The existing `status` command remains a diagnostic command that calls `claude agents --json --cwd`; it is intentionally not repurposed for job listing. Use `--background` on `review`, `adversarial-review`, `multi-review`, or `rescue` to start a tracked job. Add `--wait` when a script should block until that job reaches a terminal state.
 
+`--wait` is a short observation window, not the hard Claude timeout. It defaults to 45 seconds and can be adjusted with `--wait-timeout-ms <ms>`. If the window expires while the worker is still healthy, the command exits 0 with `{"status":"running","waitTimedOut":true,"job":...}`; use `jobs` or `result <job-id>` later. Do not rerun the same review just because `--wait` expired.
+
+Stored job `stdout` and `stderr` are sanitized and capped to keep plugin state bounded. `result <job-id>` includes `stdoutBytes`, `stderrBytes`, `stdoutStoredBytes`, `stderrStoredBytes`, `stdoutTruncated`, and `stderrTruncated` so Codex can report when long model output was shortened instead of silently treating the stored text as complete.
+
+`recommend-execution-mode --json` inspects bounded local git signals and recommends `foreground` only for tiny one-to-two-file work. It recommends `background` for untracked directories, more than two files, more than roughly fifty changed lines, multi-role/adversarial/rescue work, unclear scope, or git signal timeouts. A timeout means the git signal collection was inconclusive; it is not evidence that an existing Claude job failed.
+
+Claude for Codex starts at most three active tracked background jobs per workspace by default. Set `CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS=<n>` to adjust the cap. When the cap is reached, the plugin refuses to start another expensive Claude request and asks you to inspect or cancel an existing job. Stale-heartbeat cleanup is process-aware: it does not free capacity or resubmit while a validated worker or child process still exists. If `jobs` shows phase `unsafe-child-identity`, the plugin found a live child PID without saved identity and deliberately preserves capacity instead of risking PID-reuse signaling; inspect the process and use `cancel <job-id>` or manual cleanup before resubmitting. If `jobs` shows `leaderless-liveness-inconclusive`, the bounded `ps` probe could not prove whether a process group still has live members, so capacity is preserved until probing recovers or you inspect the process. Loaded CI runners can adjust the probe window with `CLAUDE_FOR_CODEX_PS_TIMEOUT_MS=<milliseconds>`.
+
+If the same background command, arguments, and workspace are submitted again while the original job is queued or running, Claude for Codex returns the existing job id with `reusedExisting: true` and does not spawn another Claude process. This is the runtime enforcement behind the no-resubmit rule.
+
+Stop hook never starts background jobs, never calls `reserve-job`, and never invokes ultrareview. If review-gate work exceeds its bounded role timeout or Claude is unavailable, it fails open and tells you to run an explicit tracked review.
+
 `capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
 
-`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies configured write-tool candidates such as `Edit`, `Write`, `MultiEdit`, and `Bash` when the installed Claude runtime recognizes them, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
+`--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies configured write-tool candidates such as `Edit`, `Write`, `MultiEdit`, and `Bash` when the installed Claude runtime recognizes them, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. SDK-backed background and reserved jobs automatically enable sanitized stream progress so `jobs` and `result` can show progress previews without raw model chunks. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
 
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is never used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because the command may use remote/cloud execution and usage-credit billing.
 
@@ -237,13 +250,17 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.15.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.15.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.15.0` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.16.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.16.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 
-`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. Existing detached runtime background jobs remain as a compatibility fallback.
+`--background` supports a Codex host-forwarded path. Skills first reserve a job with `reserve-job`, then Codex dispatches exactly one forwarding subagent to run the returned `workerCommand`. The child worker only executes `run-reserved-job`; it does not inspect or reinterpret repository state. The returned command carries an explicit `--cwd` so it can claim the correct workspace state even if the forwarding shell starts elsewhere. Existing detached runtime background jobs remain as a compatibility fallback.
+
+Unclaimed host-forwarded reservations use a separate claim deadline from direct worker bootstrap cleanup: the default is ten minutes and can be adjusted with `CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS=<milliseconds>`. After that deadline, ordinary `jobs`/`result` polling may reap the reservation as `reservation-expired` to release capacity. Unclaimed reservations count toward the active job cap while they are waiting; high-fanout operators can tune both `CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS` and `CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS`.
+
+If a host-forwarded reservation is still unclaimed and the same request is started directly with `--background`, the direct path starts its own tracked worker instead of waiting on the reservation. That avoids a silent no-op on abandoned reservations, but it can temporarily consume two active slots if the forwarding subagent later claims the original reservation.
 
 ## Codex subagent delegation
 
