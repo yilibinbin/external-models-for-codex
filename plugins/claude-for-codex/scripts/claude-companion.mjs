@@ -3854,6 +3854,9 @@ function runStoredJobCommand(job, options = {}) {
       childExitedBeforeIdentity = true;
     });
 
+    // This bounded synchronous probe runs only at child startup. It prevents
+    // PID-reuse-unsafe process-group signaling; signals delivered during the
+    // short probe are handled immediately after it returns.
     childProcessGroupIdentity = child.pid ? captureProcessGroupIdentity(child.pid) : null;
     if (child.pid && !childProcessGroupIdentity) {
       const fastExited = childExitedBeforeIdentity || child.exitCode !== null || child.signalCode !== null || !isProcessAlive(child.pid);
