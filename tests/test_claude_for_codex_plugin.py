@@ -2464,6 +2464,70 @@ try {{
             child.kill()
 
 
+def test_process_group_cancel_reports_inconclusive_after_sigkill(tmp_path):
+    process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
+    fake_bin = tmp_path / "bin"
+    state_file = tmp_path / "ps-state.txt"
+    fake_bin.mkdir()
+    state_file.write_text("initial", encoding="utf8")
+    fake_ps = fake_bin / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys\n"
+        "state = pathlib.Path(os.environ['FAKE_PS_STATE']).read_text().strip()\n"
+        "if '-p' in sys.argv:\n"
+        "    if state == 'initial':\n"
+        "        print('123456 1 123456 S fake-command')\n"
+        "        raise SystemExit(0)\n"
+        "    raise SystemExit(1)\n"
+        "if '-eo' in sys.argv:\n"
+        "    if state == 'sigterm':\n"
+        "        print('999 123456 S')\n"
+        "        raise SystemExit(0)\n"
+        "    if state == 'sigkill':\n"
+        "        print('synthetic post-sigkill group scan failure', file=sys.stderr)\n"
+        "        raise SystemExit(2)\n"
+        "raise SystemExit(1)\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    env = os.environ.copy()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    env["FAKE_PS_STATE"] = str(state_file)
+    script = f"""
+import fs from "node:fs";
+import {{ captureProcessIdentity, psProbeDiagnostics, resetPsProbeDiagnostics, terminateValidatedProcessGroup }} from {json.dumps(process_lib.as_uri())};
+const stateFile = {json.dumps(str(state_file))};
+resetPsProbeDiagnostics();
+const identity = captureProcessIdentity(123456);
+const originalKill = process.kill;
+process.kill = (_pid, signal) => {{
+  if (signal === "SIGTERM") {{
+    fs.writeFileSync(stateFile, "sigterm");
+  }}
+  if (signal === "SIGKILL") {{
+    fs.writeFileSync(stateFile, "sigkill");
+  }}
+  return true;
+}};
+try {{
+  const result = terminateValidatedProcessGroup(123456, identity, {{ killGraceMs: 10 }});
+  console.log(JSON.stringify({{ result, diagnostics: psProbeDiagnostics() }}));
+}} finally {{
+  process.kill = originalKill;
+}}
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["result"]["ok"] is False
+    assert payload["result"]["delivered"] is True
+    assert payload["result"]["escalated"] is True
+    assert "liveness probe inconclusive after SIGKILL" in payload["result"]["reason"]
+    assert payload["diagnostics"]["groupScanFailures"] >= 1
+    assert payload["diagnostics"]["lastGroupScanFailure"]["reason"].startswith("ps probe")
+
+
 def test_process_group_scan_is_bounded_and_fail_closed_on_ps_timeout(tmp_path):
     process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
     fake_bin = tmp_path / "bin"
