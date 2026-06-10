@@ -489,7 +489,24 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(companion.includes("function isExpectedActiveWaitStatus") && companion.includes('status === "queued" || status === "running"') && companion.includes('process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1)'), "wait-cancelled-nonzero", "--wait treats terminal non-success jobs as nonzero and reports only queued/running timeouts as healthy"),
     result(companion.includes("--wait-timeout-ms") && companion.includes("stripBackgroundArgs"), "wait-timeout-stripped", "wait timeout flags are stripped"),
     result(jobs.includes("findActiveJobByIdempotencyKey") && companion.includes("deriveJobIdempotencyKey") && companion.includes("reusedExisting"), "job-idempotency-reuse", "duplicate active background submissions reuse the existing job"),
-    result(companion.includes("function reserveBackgroundJob") && companion.includes("reserveJob(cwd") && companion.includes("randomUUID") && companion.includes('"--job-id"') && companion.includes("findActiveJobByIdempotencyKey") && companion.includes('existing.status !== "queued"') && companion.includes("canStartBackgroundJob") && companion.includes("capacity_blocked") && companion.includes("alreadyRunning") && companion.includes("do not dispatch a forwarding subagent"), "reserve-job-cap-idempotency", "host-forwarded reserved jobs use the workspace cap and idempotency path without returning invalid worker commands for active running jobs"),
+    result(
+      companion.includes("function reserveBackgroundJob") &&
+        companion.includes("reserveJob(cwd") &&
+        companion.includes("randomUUID") &&
+        companion.includes('"--job-id"') &&
+        companion.includes('"--cwd"') &&
+        companion.includes("parseReservedJobRunArgs") &&
+        companion.includes("claimReservedJob(stateCwd") &&
+        companion.includes("finishJob(stateCwd") &&
+        companion.includes("findActiveJobByIdempotencyKey") &&
+        companion.includes('existing.status !== "queued"') &&
+        companion.includes("canStartBackgroundJob") &&
+        companion.includes("capacity_blocked") &&
+        companion.includes("alreadyRunning") &&
+        companion.includes("do not dispatch a forwarding subagent"),
+      "reserve-job-cap-idempotency",
+      "host-forwarded reserved jobs use the workspace cap, idempotency path, and explicit state cwd without returning invalid worker commands for active running jobs"
+    ),
     result(lifecycle.includes("workspaceFingerprint") && lifecycle.includes("executionControls") && companion.includes("workingTreeFingerprintDetails(cwd, foregroundArgs)") && companion.includes("backgroundExecutionControls(process.env)") && fingerprint.includes("untrackedFilesFingerprintPart") && fingerprint.includes('"rev-parse", "HEAD"') && fingerprint.includes('"rev-parse", baseRef'), "job-idempotency-fingerprint-controls", "background idempotency includes worktree, HEAD/base refs, and execution controls"),
     result(companion.includes("workingTreeFingerprintDetails") && companion.includes("fingerprint.timedOut") && companion.includes("fingerprintTimedOut") && fingerprint.includes("INCONCLUSIVE") && fingerprint.includes("NON_GIT_REPOSITORY") && fingerprint.includes("UNTRACKED_FINGERPRINT_BUDGET_EXCEEDED") && fingerprint.includes("CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES") && fingerprint.includes("CLAUDE_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES"), "job-idempotency-timeout-no-reuse", "background idempotency is disabled when worktree fingerprint collection times out or fails, while non-git workspaces still get a stable fingerprint"),
     result(companion.includes("workingTreeFingerprintMatches") && companion.includes("const hookOptions = hookFingerprintOptions()") && companion.includes("workingTreeFingerprintDetails(cwd, [], hookOptions)") && unread.includes("hookFingerprintOptions") && unread.includes("workingTreeFingerprint(cwd, [], hookFingerprintOptions())") && fingerprint.includes("legacyHashes") && fingerprint.includes("hashStdoutParts") && fingerprint.includes("HOOK_GIT_SIGNAL_TIMEOUT_MS") && fingerprint.includes("HOOK_MAX_UNTRACKED_FINGERPRINT_BYTES"), "review-gate-baseline-shared-fingerprint", "review-gate and UserPromptSubmit hook share bounded fingerprint logic with legacy baseline compatibility"),

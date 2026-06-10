@@ -1264,6 +1264,34 @@ function parseJobIdArg(rawArgs) {
   return positional;
 }
 
+function parseReservedJobRunArgs(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  let cwd = process.cwd();
+  const jobTokens = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--cwd") {
+      const value = tokens[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("Missing --cwd value.");
+      }
+      cwd = path.resolve(value);
+      index += 1;
+      continue;
+    }
+    if (token.startsWith("--cwd=")) {
+      const value = token.slice("--cwd=".length);
+      if (!value) {
+        throw new Error("Missing --cwd value.");
+      }
+      cwd = path.resolve(value);
+      continue;
+    }
+    jobTokens.push(token);
+  }
+  return { jobId: parseJobIdArg(jobTokens), cwd };
+}
+
 function shortstatFileCount(text) {
   const match = String(text ?? "").match(/(\d+)\s+files?\s+changed/);
   return match ? Number(match[1]) : 0;
@@ -1799,14 +1827,17 @@ function handleReserveJob(rawArgs) {
   validateBackendArgs(parsed);
   validateBackendCompatibleOptions(parsed);
   validateSdkSubagentsBackend(parsed);
+  const jobId = `job-${randomUUID()}`;
   const workerCommand = [
     process.execPath,
     path.resolve(process.argv[1]),
     "run-reserved-job",
     "--job-id",
-    `job-${randomUUID()}`
+    jobId,
+    "--cwd",
+    process.cwd()
   ];
-  const reserved = reserveBackgroundJob(command, commandArgs, workerCommand, workerCommand.at(-1));
+  const reserved = reserveBackgroundJob(command, commandArgs, workerCommand, jobId);
   if (reserved?.status === "workspace_locked") {
     return {
       status: "workspace_locked",
@@ -3896,8 +3927,9 @@ function runStoredJobCommand(job, options = {}) {
 
 async function runReservedJob(rawArgs) {
   let jobId;
+  let stateCwd;
   try {
-    jobId = parseJobIdArg(rawArgs);
+    ({ jobId, cwd: stateCwd } = parseReservedJobRunArgs(rawArgs));
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -3905,7 +3937,7 @@ async function runReservedJob(rawArgs) {
 
   let claim;
   try {
-    claim = claimReservedJob(process.cwd(), jobId, process.pid);
+    claim = claimReservedJob(stateCwd, jobId, process.pid);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
@@ -3919,12 +3951,21 @@ async function runReservedJob(rawArgs) {
     process.exit(1);
   }
 
-  const result = await runStoredJobCommand(claim.job, { stateCwd: process.cwd() });
-  const finished = finishJob(process.cwd(), claim.job.id, result);
+  const result = await runStoredJobCommand(claim.job, { stateCwd });
+  const finished = finishJob(stateCwd, claim.job.id, result);
+  if (!finished || finished.status === "locked") {
+    process.stdout.write(`${JSON.stringify({
+      status: "finish_failed",
+      jobId: claim.job.id,
+      exitStatus: result.status ?? 1,
+      message: finished?.reason ?? "Reserved job finished but final state could not be persisted."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
   process.stdout.write(`${JSON.stringify({
     status: finished.status,
-    jobId: finished.id,
-    exitStatus: finished.exitStatus
+    jobId: finished.id ?? claim.job.id,
+    exitStatus: finished.exitStatus ?? result.status ?? 1
   }, null, 2)}\n`);
   process.exit(result.status ?? 1);
 }

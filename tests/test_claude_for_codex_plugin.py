@@ -8004,6 +8004,7 @@ def test_reserve_job_prints_forwarding_worker_command(tmp_path):
     assert payload["workerCommand"][1] == str(runtime.resolve())
     assert payload["workerCommand"][2:4] == ["run-reserved-job", "--job-id"]
     assert payload["workerCommand"][4] == payload["job"]["id"]
+    assert payload["workerCommand"][5:] == ["--cwd", str(repo)]
     assert payload["forwardingInstructions"].startswith("Dispatch exactly one forwarding subagent")
     assert "workerCommand once as argv" in payload["forwardingInstructions"]
     assert "returned cwd" in payload["forwardingInstructions"]
@@ -8045,6 +8046,64 @@ def test_reserve_job_reuses_existing_reserved_job(tmp_path):
     assert second_payload["workerCommand"] == first_payload["workerCommand"]
     jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
     assert len(json.loads(jobs.stdout)["jobs"]) == 1
+
+
+def test_reserved_worker_command_uses_embedded_cwd_when_launched_elsewhere(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "print('RESERVED_CWD_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "embedded-cwd"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert reserved.returncode == 0, reserved.stderr
+    payload = json.loads(reserved.stdout)
+    worker = subprocess.run(
+        payload["workerCommand"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert worker.returncode == 0, worker.stderr
+    assert json.loads(worker.stdout)["status"] == "succeeded"
+    result = subprocess.run(
+        [NODE, str(runtime), "result", payload["job"]["id"]],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    result_payload = json.loads(result.stdout)
+    assert "RESERVED_CWD_DONE" in result_payload["job"]["stdout"]
 
 
 def test_direct_background_does_not_reuse_queued_host_forwarded_reservation(tmp_path):
