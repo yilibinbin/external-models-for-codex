@@ -15,6 +15,7 @@ import {
   classifyJobLiveness,
   deriveJobIdempotencyKey,
   isTerminalJobStatus,
+  parsePositiveInteger,
   queuedLostAfterMs
 } from "./job-lifecycle.mjs";
 import { sanitizeSummary } from "./sanitize.mjs";
@@ -52,16 +53,6 @@ function jobFile(cwd, jobId, env = process.env) {
   return path.join(ensureJobsDir(cwd, env), `${jobId}.json`);
 }
 
-function parsePositiveInteger(value, fallback, options = {}) {
-  const parsed = Number.parseInt(String(value ?? ""), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    return fallback;
-  }
-  const min = Number.isFinite(options.min) ? options.min : 1;
-  const max = Number.isFinite(options.max) ? options.max : Number.MAX_SAFE_INTEGER;
-  return Math.min(Math.max(parsed, min), max);
-}
-
 function terminalJobRetentionMs(env = process.env) {
   return parsePositiveInteger(
     env.CLAUDE_FOR_CODEX_TERMINAL_JOB_RETENTION_MS,
@@ -92,7 +83,11 @@ function pruneTerminalJobsFromSnapshot(cwd, jobs, env, now) {
   const retentionMs = terminalJobRetentionMs(env);
   const maxFiles = terminalJobMaxFiles(env);
   const terminal = jobs
-    .filter((job) => isTerminalJobStatus(job.status) && JOB_ID_PATTERN.test(String(job.id ?? "")))
+    .filter((job) => (
+      isTerminalJobStatus(job.status) &&
+      job.resultViewedAt &&
+      JOB_ID_PATTERN.test(String(job.id ?? ""))
+    ))
     .sort((left, right) => jobTimestampMs(right) - jobTimestampMs(left));
   const deleteIds = new Set();
   terminal.forEach((job, index) => {

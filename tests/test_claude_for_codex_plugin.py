@@ -1702,10 +1702,24 @@ const oldDone = {{
   createdAt: "2026-06-09T00:00:00.000Z",
   updatedAt: "2026-06-09T00:00:00.000Z",
   finishedAt: "2026-06-09T00:00:00.000Z",
+  resultViewedAt: "2026-06-09T00:00:01.000Z",
   stdout: "old",
   stderr: ""
 }};
 fs.writeFileSync(path.join(state.stateDir, "jobs", "old-done.json"), JSON.stringify(oldDone, null, 2));
+const unreadDone = {{
+  id: "unread-done",
+  status: "succeeded",
+  command: "review",
+  args: ["unread"],
+  cwd,
+  createdAt: "2026-06-09T00:00:00.000Z",
+  updatedAt: "2026-06-09T00:00:00.000Z",
+  finishedAt: "2026-06-09T00:00:00.000Z",
+  stdout: "unread",
+  stderr: ""
+}};
+fs.writeFileSync(path.join(state.stateDir, "jobs", "unread-done.json"), JSON.stringify(unreadDone, null, 2));
 const active = createJob(cwd, {{
   id: "active-job",
   command: "review",
@@ -1719,6 +1733,7 @@ const updates = reapLostJobs(cwd, {{ jobs: snapshot, now: Date.parse("2026-06-10
 console.log(JSON.stringify({{
   updates,
   oldDone: readJob(cwd, oldDone.id, env),
+  unreadDone: readJob(cwd, unreadDone.id, env),
   active: readJob(cwd, active.id, env),
   remainingIds: listJobs(cwd, env).jobs.map((job) => job.id).sort()
 }}));
@@ -1727,8 +1742,9 @@ console.log(JSON.stringify({{
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["oldDone"] is None
+    assert payload["unreadDone"]["status"] == "succeeded"
     assert payload["active"]["status"] == "queued"
-    assert payload["remainingIds"] == ["active-job"]
+    assert payload["remainingIds"] == ["active-job", "unread-done"]
 
 
 def test_claim_queued_job_without_idempotency_keeps_empty_key(tmp_path):
@@ -1780,6 +1796,72 @@ def test_background_wait_reaps_bootstrap_dead_worker(tmp_path):
     assert payload["status"] == "failed"
     assert payload["waitTimedOut"] is False
     assert payload["job"]["phase"] == "worker-launch-failed"
+
+
+def test_jobs_reports_queued_stale_when_direct_worker_is_alive(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS"] = "100"
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    sleeper = subprocess.Popen(
+        [
+            "python3",
+            "-c",
+            "import time; time.sleep(30)",
+            "claude-companion.mjs",
+            "__run-job",
+            "job-slow-claim",
+        ],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        (state_dir / "jobs" / "job-slow-claim.json").write_text(json.dumps({
+            "id": "job-slow-claim",
+            "status": "queued",
+            "command": "review",
+            "args": ["slow"],
+            "cwd": str(repo),
+            "workerPid": sleeper.pid,
+            "submissionState": "starting",
+            "createdAt": "2026-06-09T00:00:00.000Z",
+            "updatedAt": "2026-06-09T00:00:00.000Z"
+        }))
+
+        listed = subprocess.run(
+            [NODE, str(runtime), "jobs"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        assert listed.returncode == 0, listed.stderr
+        job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == "job-slow-claim")
+        assert job["status"] == "queued"
+        assert job["lifecycle"]["state"] == "queued-stale"
+        assert job["lifecycle"]["workerAlive"] is True
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
 
 
 def test_lost_job_reaper_is_process_aware_and_terminal_safe(tmp_path):

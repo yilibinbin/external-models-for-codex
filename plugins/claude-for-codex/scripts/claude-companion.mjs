@@ -127,6 +127,7 @@ import {
   isProcessAlive,
   processGroupHasLiveMembers,
   supportsPosixProcessGroups,
+  validateJobWorkerProcess,
   validateProcessGroupLeader
 } from "./lib/process.mjs";
 import {
@@ -1760,7 +1761,20 @@ function progressPreview(job) {
 }
 
 function enrichCompanionJob(job) {
-  return { ...enrichJobLifecycle(job), elapsedMs: elapsedMs(job), progressPreview: progressPreview(job) };
+  const enriched = enrichJobLifecycle(job);
+  if (
+    enriched.lifecycle?.state === "lost" &&
+    job.status === "queued" &&
+    Number.isInteger(job.workerPid) &&
+    validateJobWorkerProcess(job.workerPid, job.id).ok
+  ) {
+    enriched.lifecycle = {
+      ...enriched.lifecycle,
+      state: "queued-stale",
+      workerAlive: true
+    };
+  }
+  return { ...enriched, elapsedMs: elapsedMs(job), progressPreview: progressPreview(job) };
 }
 
 function isExpectedActiveWaitStatus(status) {
