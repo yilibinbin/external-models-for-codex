@@ -106,7 +106,7 @@ Expected output includes:
 ```json
 {
   "claudeAvailable": true,
-  "claudeCommand": "/Users/you/.local/bin/claude",
+  "claudeCommand": "<resolved claude command path>",
   "gitAvailable": true,
   "reviewGate": {
     "enabled": false,
