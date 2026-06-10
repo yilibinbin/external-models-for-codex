@@ -71,7 +71,7 @@ function isNotGitRepository(result) {
 function workingTreeFingerprintPart(cwd, args, options = {}) {
   const result = runGit(cwd, args, options);
   if (gitCommandTimedOut(result)) {
-    return { text: `ETIMEDOUT ${args.join(" ")}`, timedOut: true };
+    return { text: `ETIMEDOUT ${args.join(" ")}`, timedOut: true, failureKind: "timeout" };
   }
   if (isNotGitRepository(result)) {
     return {
@@ -97,6 +97,7 @@ function workingTreeFingerprintPart(cwd, args, options = {}) {
     };
   }
   if (result.errorCode || result.status !== 0) {
+    const failedByTimeout = gitCommandTimedOut(result);
     return {
       text: [
         `INCONCLUSIVE ${args.join(" ")}`,
@@ -107,7 +108,8 @@ function workingTreeFingerprintPart(cwd, args, options = {}) {
         result.stderr
       ].join("\n"),
       stdout: result.stdout,
-      timedOut: true
+      timedOut: true,
+      failureKind: failedByTimeout ? "timeout" : "inconclusive"
     };
   }
   return {
@@ -189,7 +191,12 @@ function fileFingerprint(filePath, budget) {
 function untrackedFilesFingerprintPart(cwd, options = {}) {
   const result = runGit(cwd, ["ls-files", "--others", "--exclude-standard", "-z"], options);
   if (gitCommandTimedOut(result)) {
-    return { text: "ETIMEDOUT ls-files --others --exclude-standard -z", stdout: "", timedOut: true };
+    return {
+      text: "ETIMEDOUT ls-files --others --exclude-standard -z",
+      stdout: "",
+      timedOut: true,
+      failureKind: "timeout"
+    };
   }
   if (isNotGitRepository(result)) {
     return {
@@ -212,7 +219,8 @@ function untrackedFilesFingerprintPart(cwd, options = {}) {
         result.stderr
       ].join("\n"),
       stdout: "",
-      timedOut: true
+      timedOut: true,
+      failureKind: "inconclusive"
     };
   }
   const files = result.stdout.split("\0").filter(Boolean).sort();
@@ -292,6 +300,7 @@ export function workingTreeFingerprintDetails(cwd = process.cwd(), args = [], op
       hashStdoutParts([statusPart, stagedDiffPart, unstagedDiffPart])
     ],
     timedOut: parts.some((part) => part.timedOut),
+    failureKind: parts.find((part) => part.failureKind)?.failureKind ?? "",
     budgetExceeded: parts.some((part) => part.budgetExceeded)
   };
 }

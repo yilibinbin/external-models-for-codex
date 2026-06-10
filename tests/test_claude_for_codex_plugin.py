@@ -9333,7 +9333,11 @@ print("SHOULD_NOT_FINISH")
         assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == worker.pid
         assert "run-reserved-job" in cancel_payload["job"]["cancelWorkerIdentity"]["command"]
         assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
-        worker.wait(timeout=5)
+        worker_stdout, worker_stderr = worker.communicate(timeout=5)
+        assert worker.returncode == 0, worker_stderr
+        worker_payload = json.loads(worker_stdout)
+        assert worker_payload["status"] == "cancelled"
+        assert worker_payload["exitStatus"] == 0
         time.sleep(2.5)
         assert not completion_marker.exists()
     finally:
@@ -10191,6 +10195,63 @@ os.execv({json.dumps(real_git)}, ["git", *args])
     assert list(capture_dir.glob("prompt-*.txt")) == []
 
 
+def test_review_gate_inconclusive_fingerprint_failure_does_not_claim_timeout(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = pathlib.Path(env["PATH"].split(os.pathsep)[0]) / "git"
+    fake_git.write_text(
+        f"""#!/usr/bin/env python3
+import os
+import sys
+
+args = sys.argv[1:]
+if args == ["rev-parse", "--is-inside-work-tree"]:
+    print("true")
+    raise SystemExit(0)
+if args == ["rev-parse", "HEAD"]:
+    print("abc123")
+    raise SystemExit(0)
+if args[:1] == ["status"]:
+    print(" M file.txt")
+    raise SystemExit(0)
+if args[:1] == ["diff"]:
+    print("fatal: synthetic diff failure", file=sys.stderr)
+    raise SystemExit(2)
+if args[:1] == ["ls-files"]:
+    raise SystemExit(0)
+os.execv({json.dumps(real_git)}, ["git", *args])
+""",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+
+    result = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=json.dumps({"hook_event_name": "Stop", "cwd": str(repo)}),
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "fingerprint inconclusive; allowing stop" in result.stderr
+    assert "fingerprint timed out" not in result.stderr
+    assert list(capture_dir.glob("prompt-*.txt")) == []
+
+
 def test_review_gate_reviewable_git_timeout_fails_open_without_claude(tmp_path):
     runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
     setup = subprocess.run(
@@ -10454,6 +10515,49 @@ def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):
     assert len(prompts) == 5
     assert second.stdout == ""
     assert second.stderr == ""
+
+
+def test_review_gate_allow_cache_is_role_pack_aware(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+
+    first = subprocess.run(
+        ["node", str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        ["node", str(runtime), "review-gate", "--role-pack", "minimal"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert first.stdout == ""
+    assert second.stdout == ""
+    prompts = [
+        path.read_text()
+        for path in sorted(capture_dir.glob("prompt-*.txt"), key=lambda p: int(p.stem.split("-")[1]))
+    ]
+    assert len(prompts) == 6
+    assert sum("<role_name>correctness</role_name>" in prompt for prompt in prompts) == 2
+    assert sum("<role_name>security</role_name>" in prompt for prompt in prompts) == 1
+    assert prompts[-1].count("<role_name>correctness</role_name>") == 1
 
 
 def test_review_gate_block_outputs_stop_decision_json(tmp_path):

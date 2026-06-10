@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -2838,7 +2838,10 @@ async function runReviewGate(rawArgs) {
   const diffHash = diffFingerprint.hash;
   const diffFingerprintUsable = !diffFingerprint.timedOut;
   if (diffFingerprint.timedOut && !diffFingerprint.budgetExceeded) {
-    warnGate("working-tree fingerprint timed out; allowing stop and skipping cached gate decision");
+    const reason = diffFingerprint.failureKind === "timeout"
+      ? "working-tree fingerprint timed out"
+      : "working-tree fingerprint inconclusive";
+    warnGate(`${reason}; allowing stop and skipping cached gate decision`);
     return;
   }
   if (diffFingerprint.budgetExceeded) {
@@ -2847,9 +2850,6 @@ async function runReviewGate(rawArgs) {
   if (diffFingerprintUsable) {
     const baseline = readJson(turnBaselineFileForCwd(cwd), null);
     if (workingTreeFingerprintMatches(baseline?.workingTreeFingerprint, diffFingerprint)) {
-      return;
-    }
-    if (config.lastAllowedReviewGateDiffHash === diffHash) {
       return;
     }
   }
@@ -2886,6 +2886,10 @@ async function runReviewGate(rawArgs) {
     applyCommandQualityPolicy("review-gate", args);
   } catch (error) {
     warnGate(`quality policy failed; allowing stop: ${error.message || String(error)}`);
+    return;
+  }
+  const gateCacheKey = diffFingerprintUsable ? reviewGateCacheKey(diffHash, args, roles) : "";
+  if (diffFingerprintUsable && config.lastAllowedReviewGateDiffHash === gateCacheKey) {
     return;
   }
   try {
@@ -2978,8 +2982,16 @@ async function runReviewGate(rawArgs) {
     errorCode: ""
   }, startedAt);
   if (diffFingerprintUsable && gateReviewComplete && allowCount > 0) {
-    setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
+    setConfig(cwd, "lastAllowedReviewGateDiffHash", gateCacheKey);
   }
+}
+
+function reviewGateCacheKey(diffHash, args, roles) {
+  return createHash("sha256").update(JSON.stringify({
+    diffHash,
+    quality: args.quality ?? "",
+    roles: roles.map((role) => role.name)
+  })).digest("hex");
 }
 
 function parseStructuredReviewResult(stdout, options = {}) {
@@ -4013,6 +4025,15 @@ async function runReservedJob(rawArgs) {
   }
 
   const result = await runStoredJobCommand(claim.job, { stateCwd });
+  const current = readJob(stateCwd, claim.job.id);
+  if (current?.status === "cancelled") {
+    process.stdout.write(`${JSON.stringify({
+      status: "cancelled",
+      jobId: claim.job.id,
+      exitStatus: 0
+    }, null, 2)}\n`);
+    process.exit(0);
+  }
   const finished = finishJob(stateCwd, claim.job.id, result);
   if (!finished || finished.status === "locked") {
     process.stdout.write(`${JSON.stringify({
@@ -4026,9 +4047,9 @@ async function runReservedJob(rawArgs) {
   process.stdout.write(`${JSON.stringify({
     status: finished.status,
     jobId: finished.id ?? claim.job.id,
-    exitStatus: finished.exitStatus ?? result.status ?? 1
+    exitStatus: finished.status === "cancelled" ? 0 : finished.exitStatus ?? result.status ?? 1
   }, null, 2)}\n`);
-  process.exit(result.status ?? 1);
+  process.exit(finished.status === "cancelled" ? 0 : result.status ?? 1);
 }
 
 async function claimReservedJobWithRetry(stateCwd, jobId) {
