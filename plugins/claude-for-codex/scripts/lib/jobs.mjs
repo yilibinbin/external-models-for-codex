@@ -22,6 +22,8 @@ import { sanitizeSummary } from "./sanitize.mjs";
 const JOB_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 const LOCK_STALE_AFTER_MS = 30_000;
 const LOCK_RETRY_UNTIL_MS = 2_000;
+const DEFAULT_TERMINAL_JOB_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_TERMINAL_JOB_MAX_FILES = 1000;
 const SANITIZED_JOB_STRING_FIELDS = Object.freeze({
   stdout: MAX_STORED_OUTPUT_BYTES,
   stderr: MAX_STORED_OUTPUT_BYTES,
@@ -48,6 +50,65 @@ function jobFile(cwd, jobId, env = process.env) {
     throw new Error(`Invalid job id "${jobId}".`);
   }
   return path.join(ensureJobsDir(cwd, env), `${jobId}.json`);
+}
+
+function parsePositiveInteger(value, fallback, options = {}) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return fallback;
+  }
+  const min = Number.isFinite(options.min) ? options.min : 1;
+  const max = Number.isFinite(options.max) ? options.max : Number.MAX_SAFE_INTEGER;
+  return Math.min(Math.max(parsed, min), max);
+}
+
+function terminalJobRetentionMs(env = process.env) {
+  return parsePositiveInteger(
+    env.CLAUDE_FOR_CODEX_TERMINAL_JOB_RETENTION_MS,
+    DEFAULT_TERMINAL_JOB_RETENTION_MS,
+    { min: 1, max: 365 * 24 * 60 * 60 * 1000 }
+  );
+}
+
+function terminalJobMaxFiles(env = process.env) {
+  return parsePositiveInteger(
+    env.CLAUDE_FOR_CODEX_TERMINAL_JOB_MAX_FILES,
+    DEFAULT_TERMINAL_JOB_MAX_FILES,
+    { min: 1, max: 100_000 }
+  );
+}
+
+function jobTimestampMs(job) {
+  for (const field of ["updatedAt", "finishedAt", "cancelledAt", "createdAt"]) {
+    const parsed = Date.parse(job?.[field] ?? "");
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return 0;
+}
+
+function pruneTerminalJobsFromSnapshot(cwd, jobs, env, now) {
+  const retentionMs = terminalJobRetentionMs(env);
+  const maxFiles = terminalJobMaxFiles(env);
+  const terminal = jobs
+    .filter((job) => isTerminalJobStatus(job.status) && JOB_ID_PATTERN.test(String(job.id ?? "")))
+    .sort((left, right) => jobTimestampMs(right) - jobTimestampMs(left));
+  const deleteIds = new Set();
+  terminal.forEach((job, index) => {
+    const ageMs = now - jobTimestampMs(job);
+    if (index >= maxFiles || ageMs > retentionMs) {
+      deleteIds.add(job.id);
+    }
+  });
+  for (const jobId of deleteIds) {
+    try {
+      fs.rmSync(jobFile(cwd, jobId, env), { force: true });
+    } catch {
+      // Best-effort retention cleanup must not block job submission or status.
+    }
+  }
+  return deleteIds;
 }
 
 function sleepSync(ms) {
@@ -309,7 +370,7 @@ function claimQueuedJob(cwd, jobId, workerPid, env, validate = () => true) {
       heartbeatSeq: Number(job.heartbeatSeq ?? 0),
       submissionState: "in-flight",
       submittedAt: now,
-      idempotencyKey: job.idempotencyKey ?? deriveJobIdempotencyKey(job)
+      idempotencyKey: job.idempotencyKey ?? ""
     }, cwd);
     return { status: "claimed", job: running };
   });
@@ -488,19 +549,30 @@ export function readJob(cwd, jobId, env = process.env) {
 }
 
 export function activeJobs(cwd = process.cwd(), env = process.env) {
-  return listJobs(cwd, env).jobs.filter((job) => job.status === "queued" || job.status === "running");
+  return activeJobsFromList(listJobs(cwd, env).jobs);
+}
+
+export function activeJobsFromList(jobs = []) {
+  return jobs.filter((job) => job.status === "queued" || job.status === "running");
 }
 
 export function canStartBackgroundJob(cwd = process.cwd(), env = process.env, limit = DEFAULT_MAX_ACTIVE_JOBS) {
-  const active = activeJobs(cwd, env);
+  return canStartBackgroundJobFromActive(activeJobs(cwd, env), limit);
+}
+
+export function canStartBackgroundJobFromActive(active = [], limit = DEFAULT_MAX_ACTIVE_JOBS) {
   return { ok: active.length < limit, activeCount: active.length, limit, active };
 }
 
 export function findActiveJobByIdempotencyKey(cwd = process.cwd(), idempotencyKey, env = process.env) {
+  return findActiveJobByIdempotencyKeyFromActive(activeJobs(cwd, env), idempotencyKey);
+}
+
+export function findActiveJobByIdempotencyKeyFromActive(active = [], idempotencyKey) {
   if (!idempotencyKey) {
     return null;
   }
-  return activeJobs(cwd, env).find((job) => job.idempotencyKey === idempotencyKey) ?? null;
+  return active.find((job) => job.idempotencyKey === idempotencyKey) ?? null;
 }
 
 export function enrichJobLifecycle(job, options = {}) {
@@ -516,7 +588,12 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
     ? options.beforeLostJobUpdate
     : undefined;
   const updates = [];
-  for (const job of listJobs(cwd, env).jobs) {
+  const jobs = Array.isArray(options.jobs) ? options.jobs : listJobs(cwd, env).jobs;
+  const prunedTerminalJobIds = pruneTerminalJobsFromSnapshot(cwd, jobs, env, now);
+  for (const job of jobs) {
+    if (prunedTerminalJobIds.has(job.id)) {
+      continue;
+    }
     const lifecycle = classifyJobLiveness(job, { now, env, queuedLostAfterMs: queuedLostAfterMs(env) });
     if (lifecycle.state !== "lost") {
       continue;

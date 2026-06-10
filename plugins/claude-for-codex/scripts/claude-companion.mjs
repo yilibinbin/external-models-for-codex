@@ -9,12 +9,13 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import {
   cancelJob,
-  canStartBackgroundJob,
+  activeJobsFromList,
+  canStartBackgroundJobFromActive,
   claimJobForRun,
   claimReservedJob,
   createJob,
   enrichJobLifecycle,
-  findActiveJobByIdempotencyKey,
+  findActiveJobByIdempotencyKeyFromActive,
   finishJob,
   listJobs,
   recordJobHeartbeat,
@@ -1583,6 +1584,16 @@ function makeCappedOutputAccumulator(maxBytes = MAX_STORED_OUTPUT_BYTES) {
   };
 }
 
+function jobSnapshotAfterReap(cwd) {
+  const jobs = listJobs(cwd).jobs;
+  const updates = reapLostJobs(cwd, { jobs });
+  if (!updates.length) {
+    return jobs;
+  }
+  const byId = new Map(updates.map((job) => [job.id, job]));
+  return jobs.map((job) => byId.get(job.id) ?? job);
+}
+
 function startBackgroundJob(command, rawArgs) {
   if (!BACKGROUND_CAPABLE_COMMANDS.has(command)) {
     console.error(`${command} does not support --background.`);
@@ -1598,7 +1609,8 @@ function startBackgroundJob(command, rawArgs) {
   const fingerprint = workingTreeFingerprintDetails(cwd, foregroundArgs);
   const executionControls = backgroundExecutionControls(process.env);
   return withWorkspaceJobLock(cwd, process.env, () => {
-    reapLostJobs(cwd);
+    const jobs = jobSnapshotAfterReap(cwd);
+    const active = activeJobsFromList(jobs);
     const idempotencyKey = fingerprint.timedOut
       ? ""
       : deriveJobIdempotencyKey({
@@ -1608,7 +1620,7 @@ function startBackgroundJob(command, rawArgs) {
         workspaceFingerprint: fingerprint.hash,
         executionControls
       });
-    const existing = idempotencyKey ? findActiveJobByIdempotencyKey(cwd, idempotencyKey) : null;
+    const existing = findActiveJobByIdempotencyKeyFromActive(active, idempotencyKey);
     if (existing) {
       const existingIsQueuedHostForwardedReservation = existing.reservationMode === "host-forwarded"
         && Array.isArray(existing.workerCommand)
@@ -1619,7 +1631,7 @@ function startBackgroundJob(command, rawArgs) {
         return { ...existing, reusedExisting: true };
       }
     }
-    const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
+    const capacity = canStartBackgroundJobFromActive(active, maxActiveJobs());
     if (!capacity.ok) {
       return { capacityBlocked: true, capacity };
     }
@@ -1689,7 +1701,8 @@ function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
   const fingerprint = workingTreeFingerprintDetails(cwd, commandArgs);
   const executionControls = backgroundExecutionControls(process.env);
   return withWorkspaceJobLock(cwd, process.env, () => {
-    reapLostJobs(cwd);
+    const jobs = jobSnapshotAfterReap(cwd);
+    const active = activeJobsFromList(jobs);
     const idempotencyKey = fingerprint.timedOut
       ? ""
       : deriveJobIdempotencyKey({
@@ -1699,7 +1712,7 @@ function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
         workspaceFingerprint: fingerprint.hash,
         executionControls
       });
-    const existing = idempotencyKey ? findActiveJobByIdempotencyKey(cwd, idempotencyKey) : null;
+    const existing = findActiveJobByIdempotencyKeyFromActive(active, idempotencyKey);
     if (existing) {
       if (existing.reservationMode !== "host-forwarded" || !Array.isArray(existing.workerCommand)) {
         return { alreadyRunning: true, job: existing };
@@ -1709,7 +1722,7 @@ function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
       }
       return { reusedExisting: true, job: existing };
     }
-    const capacity = canStartBackgroundJob(cwd, process.env, maxActiveJobs());
+    const capacity = canStartBackgroundJobFromActive(active, maxActiveJobs());
     if (!capacity.ok) {
       return { capacityBlocked: true, capacity };
     }
@@ -3698,8 +3711,17 @@ async function runJobWorker(rawArgs) {
   if (current?.status === "cancelled") {
     process.exit(0);
   }
-  finishJob(process.cwd(), jobId, result);
-  process.exit(result.status ?? 1);
+  const finished = finishJob(process.cwd(), jobId, result);
+  if (!finished || finished.status === "locked") {
+    process.stdout.write(`${JSON.stringify({
+      status: "finish_failed",
+      jobId,
+      exitStatus: result.status ?? 1,
+      message: finished?.reason ?? "Background job finished but final state could not be persisted."
+    }, null, 2)}\n`);
+    process.exit(1);
+  }
+  process.exit(finished.status === "cancelled" ? 0 : result.status ?? 1);
 }
 
 function runStoredJobCommand(job, options = {}) {

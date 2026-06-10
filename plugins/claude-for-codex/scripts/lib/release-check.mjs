@@ -476,6 +476,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(fs.existsSync(lifecyclePath), "job-lifecycle-helper", "scripts/lib/job-lifecycle.mjs exists"),
     result(jobs.includes("withJobLock") && jobs.includes("claimQueuedJob") && jobs.includes("claimReservedJob"), "atomic-job-claim-lock", "direct and reserved claims share locked path"),
     result(/async function runJobWorker/.test(companion) && !/runJobWorker[\s\S]{0,900}spawnSync/.test(companion), "async-background-worker", "__run-job uses async supervision"),
+    result(companion.includes("async function runJobWorker") && companion.includes('status: "finish_failed"') && companion.includes("Background job finished but final state could not be persisted."), "direct-worker-finish-failed", "direct async workers surface finishJob lock/null failures instead of silently losing computed results"),
     result(
       companion.includes("makeCappedOutputAccumulator") &&
         /function runStoredJobCommand[\s\S]*stdoutOutput\.push/.test(companion) &&
@@ -489,6 +490,9 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(companion.includes("function isExpectedActiveWaitStatus") && companion.includes('status === "queued" || status === "running"') && companion.includes('process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1)'), "wait-cancelled-nonzero", "--wait treats terminal non-success jobs as nonzero and reports only queued/running timeouts as healthy"),
     result(companion.includes("--wait-timeout-ms") && companion.includes("stripBackgroundArgs"), "wait-timeout-stripped", "wait timeout flags are stripped"),
     result(jobs.includes("findActiveJobByIdempotencyKey") && companion.includes("deriveJobIdempotencyKey") && companion.includes("reusedExisting"), "job-idempotency-reuse", "duplicate active background submissions reuse the existing job"),
+    result(companion.includes("function jobSnapshotAfterReap") && companion.includes("reapLostJobs(cwd, { jobs })") && companion.includes("activeJobsFromList(jobs)") && companion.includes("findActiveJobByIdempotencyKeyFromActive(active") && companion.includes("canStartBackgroundJobFromActive(active"), "job-submission-single-snapshot", "background and reserved submission paths reuse one job snapshot for reaping, idempotency, and capacity checks"),
+    result(jobs.includes("DEFAULT_TERMINAL_JOB_RETENTION_MS") && jobs.includes("DEFAULT_TERMINAL_JOB_MAX_FILES") && jobs.includes("CLAUDE_FOR_CODEX_TERMINAL_JOB_RETENTION_MS") && jobs.includes("CLAUDE_FOR_CODEX_TERMINAL_JOB_MAX_FILES") && jobs.includes("pruneTerminalJobsFromSnapshot"), "terminal-job-retention-bound", "terminal job files have a bounded retention cleanup path during reaper scans"),
+    result(jobs.includes('idempotencyKey: job.idempotencyKey ?? ""') && !jobs.includes("idempotencyKey: job.idempotencyKey ?? deriveJobIdempotencyKey(job)"), "legacy-claim-no-fake-idempotency", "legacy queued jobs without stored idempotency keys are not stamped with a non-matching recomputed key"),
     result(jobs.includes("hasActiveDirectJobWithIdempotencyKey") && jobs.includes("withWorkspaceJobLock(cwd, env") && jobs.includes("Another active direct job already owns this idempotency key."), "reserved-claim-direct-duplicate-guard", "host-forwarded reservations cannot start after a same-key direct job is active under the workspace lock"),
     result(
       companion.includes("function reserveBackgroundJob") &&

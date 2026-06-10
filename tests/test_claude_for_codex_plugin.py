@@ -358,11 +358,11 @@ def test_direct_and_reserved_claims_are_exclusive_and_share_submission_fields(tm
 import {{ createJob, reserveJob, claimJobForRun, claimReservedJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
 const cwd = {json.dumps(str(repo))};
 const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
-const direct = createJob(cwd, {{ command: "review", args: ["same"], cwd }}, env);
+const direct = createJob(cwd, {{ command: "review", args: ["same"], cwd, idempotencyKey: "sha256:direct" }}, env);
 const first = claimJobForRun(cwd, direct.id, 1111, env);
 const second = claimJobForRun(cwd, direct.id, 2222, env);
 const workerCommand = ["node", {json.dumps(str(companion))}, "run-reserved-job", "--job-id"];
-const reserved = reserveJob(cwd, {{ command: "review", args: ["reserved"], cwd }}, workerCommand, env);
+const reserved = reserveJob(cwd, {{ command: "review", args: ["reserved"], cwd, idempotencyKey: "sha256:reserved" }}, workerCommand, env);
 workerCommand.push(reserved.id);
 updateJob(cwd, reserved.id, {{ workerCommand }}, env);
 const reservedFirst = claimReservedJob(cwd, reserved.id, 3333, env);
@@ -1674,6 +1674,82 @@ console.log(JSON.stringify({{ callbackCount, updates, job: readJob(cwd, "job-rac
     assert payload["job"]["phase"] == "starting"
     assert payload["job"].get("error") is None
     assert payload["job"].get("finishedAt") is None
+
+
+def test_reaper_prunes_old_terminal_jobs_from_snapshot(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import fs from "node:fs";
+import path from "node:path";
+import {{ createJob, listJobs, reapLostJobs, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{
+  CLAUDE_PLUGIN_DATA: {json.dumps(str(data))},
+  HOME: {json.dumps(str(tmp_path / "home"))},
+  CLAUDE_FOR_CODEX_TERMINAL_JOB_RETENTION_MS: "1"
+}};
+const state = listJobs(cwd, env);
+const oldDone = {{
+  id: "old-done",
+  status: "succeeded",
+  command: "review",
+  args: ["old"],
+  cwd,
+  createdAt: "2026-06-09T00:00:00.000Z",
+  updatedAt: "2026-06-09T00:00:00.000Z",
+  finishedAt: "2026-06-09T00:00:00.000Z",
+  stdout: "old",
+  stderr: ""
+}};
+fs.writeFileSync(path.join(state.stateDir, "jobs", "old-done.json"), JSON.stringify(oldDone, null, 2));
+const active = createJob(cwd, {{
+  id: "active-job",
+  command: "review",
+  args: ["active"],
+  cwd,
+  createdAt: "2026-06-10T00:00:00.000Z",
+  updatedAt: "2026-06-10T00:00:00.000Z"
+}}, env);
+const snapshot = listJobs(cwd, env).jobs;
+const updates = reapLostJobs(cwd, {{ jobs: snapshot, now: Date.parse("2026-06-10T00:00:00.010Z") }}, env);
+console.log(JSON.stringify({{
+  updates,
+  oldDone: readJob(cwd, oldDone.id, env),
+  active: readJob(cwd, active.id, env),
+  remainingIds: listJobs(cwd, env).jobs.map((job) => job.id).sort()
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["oldDone"] is None
+    assert payload["active"]["status"] == "queued"
+    assert payload["remainingIds"] == ["active-job"]
+
+
+def test_claim_queued_job_without_idempotency_keeps_empty_key(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    script = f"""
+import {{ claimJobForRun, createJob, readJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "legacy-no-key", command: "review", args: ["legacy"], cwd }}, env);
+const claimed = claimJobForRun(cwd, job.id, process.pid, env);
+console.log(JSON.stringify({{ claimed, stored: readJob(cwd, job.id, env) }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["claimed"]["status"] == "claimed"
+    assert payload["stored"]["idempotencyKey"] == ""
 
 
 def test_background_wait_reaps_bootstrap_dead_worker(tmp_path):
@@ -9087,6 +9163,71 @@ def test_internal_job_worker_rejects_unsupported_job_command(tmp_path):
     payload = json.loads(job_file.read_text())
     assert payload["status"] == "failed"
     assert "Unsupported background job command" in payload["stderr"]
+
+
+def test_internal_job_worker_reports_finish_failure_when_job_file_disappears(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    jobs = subprocess.run(
+        [NODE, str(runtime), "jobs"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert jobs.returncode == 0, jobs.stderr
+    state_dir = pathlib.Path(json.loads(jobs.stdout)["stateDir"])
+    job_file = state_dir / "jobs" / "job-finish-missing.json"
+    job_file.write_text(json.dumps({
+        "id": "job-finish-missing",
+        "status": "queued",
+        "command": "review",
+        "args": ["finish missing"],
+        "cwd": str(repo)
+    }))
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import os
+import pathlib
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+pathlib.Path(os.environ["JOB_FILE_TO_DELETE"]).unlink()
+print("CLAUDE FINISHED")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env["JOB_FILE_TO_DELETE"] = str(job_file)
+
+    worker = subprocess.run(
+        [NODE, str(runtime), "__run-job", "job-finish-missing"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert worker.returncode == 1
+    payload = json.loads(worker.stdout)
+    assert payload["status"] == "finish_failed"
+    assert payload["jobId"] == "job-finish-missing"
+    assert "final state could not be persisted" in payload["message"]
+    assert not job_file.exists()
 
 
 def test_running_cancel_treats_absent_worker_as_cancel_failed_and_corrupt_result_is_reported(tmp_path):
