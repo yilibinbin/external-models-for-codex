@@ -34,6 +34,7 @@ import {
   MAX_BACKGROUND_WAIT_MS,
   MAX_STORED_OUTPUT_BYTES,
   deriveJobIdempotencyKey,
+  gitSignalTimeoutMs,
   isTerminalJobStatus,
   parsePositiveInteger
 } from "./lib/job-lifecycle.mjs";
@@ -1316,13 +1317,6 @@ function shortstatChangedLines(text) {
   const insertions = String(text ?? "").match(/(\d+)\s+insertions?/);
   const deletions = String(text ?? "").match(/(\d+)\s+deletions?/);
   return (insertions ? Number(insertions[1]) : 0) + (deletions ? Number(deletions[1]) : 0);
-}
-
-function gitSignalTimeoutMs(env = process.env) {
-  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS, 10_000, {
-    min: 100,
-    max: 60_000
-  });
 }
 
 function gitShort(args, cwd = process.cwd(), options = {}) {

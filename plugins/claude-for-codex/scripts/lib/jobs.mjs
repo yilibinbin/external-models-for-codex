@@ -331,15 +331,17 @@ function hasActiveDirectJobWithIdempotencyKey(cwd, currentJobId, idempotencyKey,
 }
 
 export function claimReservedJob(cwd, jobId, workerPid = process.pid, env = process.env) {
-  return claimQueuedJob(cwd, jobId, workerPid, env, (job) => {
-    if (!isValidReservedWorkerCommand(job, jobId)) {
-      return { reason: "Job is not a valid host-forwarded reservation." };
-    }
-    if (hasActiveDirectJobWithIdempotencyKey(cwd, jobId, job.idempotencyKey, env)) {
-      return { reason: "Another active direct job already owns this idempotency key." };
-    }
-    return true;
-  });
+  return withWorkspaceJobLock(cwd, env, () => (
+    claimQueuedJob(cwd, jobId, workerPid, env, (job) => {
+      if (!isValidReservedWorkerCommand(job, jobId)) {
+        return { reason: "Job is not a valid host-forwarded reservation." };
+      }
+      if (hasActiveDirectJobWithIdempotencyKey(cwd, jobId, job.idempotencyKey, env)) {
+        return { reason: "Another active direct job already owns this idempotency key." };
+      }
+      return true;
+    })
+  ));
 }
 
 function mutateJobUnderLock(cwd, jobId, env, mutator) {
@@ -508,8 +510,11 @@ export function enrichJobLifecycle(job, options = {}) {
 export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.env) {
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   // Test-only race seam: lets regression tests mutate a job after the unlocked
-  // list snapshot and before the locked revalidation write.
-  const beforeLostJobUpdate = options.beforeLostJobUpdate;
+  // list snapshot and before the locked revalidation write. It is disabled
+  // unless tests opt in explicitly.
+  const beforeLostJobUpdate = env.CLAUDE_FOR_CODEX_ENABLE_TEST_SEAMS === "1"
+    ? options.beforeLostJobUpdate
+    : undefined;
   const updates = [];
   for (const job of listJobs(cwd, env).jobs) {
     const lifecycle = classifyJobLiveness(job, { now, env, queuedLostAfterMs: queuedLostAfterMs(env) });

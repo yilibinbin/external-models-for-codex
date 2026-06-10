@@ -1639,9 +1639,13 @@ def test_reaper_does_not_expire_reserved_job_claimed_after_snapshot(tmp_path):
     repo.mkdir()
     data.mkdir()
     script = f"""
-import {{ claimReservedJob, reapLostJobs, readJob, reserveJob }} from {json.dumps(jobs.as_uri())};
-const cwd = {json.dumps(str(repo))};
-const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+	import {{ claimReservedJob, reapLostJobs, readJob, reserveJob }} from {json.dumps(jobs.as_uri())};
+	const cwd = {json.dumps(str(repo))};
+	const env = {{
+	  CLAUDE_PLUGIN_DATA: {json.dumps(str(data))},
+	  HOME: {json.dumps(str(tmp_path / "home"))},
+	  CLAUDE_FOR_CODEX_ENABLE_TEST_SEAMS: "1"
+	}};
 reserveJob(cwd, {{
   id: "job-race",
   command: "review",

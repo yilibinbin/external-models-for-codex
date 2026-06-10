@@ -30,6 +30,13 @@ export function parsePositiveInteger(value, fallback, { min = 1, max = Number.MA
   return Math.min(Math.trunc(parsed), max);
 }
 
+export function gitSignalTimeoutMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS, 10_000, {
+    min: 100,
+    max: 60_000
+  });
+}
+
 export function queuedLostAfterMs(env = process.env) {
   return parsePositiveInteger(env.CLAUDE_FOR_CODEX_QUEUED_LOST_AFTER_MS, JOB_QUEUED_LOST_AFTER_MS, {
     min: 100,

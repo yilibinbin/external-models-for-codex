@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { gitCommandTimedOut } from "./git-timeout.mjs";
+import { gitSignalTimeoutMs, parsePositiveInteger } from "./job-lifecycle.mjs";
 
 const MAX_WORKTREE_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_UNTRACKED_FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -12,21 +13,6 @@ const HOOK_GIT_SIGNAL_TIMEOUT_MS = 500;
 const HOOK_MAX_UNTRACKED_FINGERPRINT_BYTES = 512 * 1024;
 const HOOK_MAX_UNTRACKED_FINGERPRINT_FILES = 128;
 const FINGERPRINT_SEPARATOR = "\n--- claude-for-codex ---\n";
-
-function parsePositiveInteger(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < min) {
-    return fallback;
-  }
-  return Math.min(Math.trunc(parsed), max);
-}
-
-function gitSignalTimeoutMs(env = process.env) {
-  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS, 10_000, {
-    min: 100,
-    max: 60_000
-  });
-}
 
 export function hookFingerprintOptions(env = process.env) {
   return {
