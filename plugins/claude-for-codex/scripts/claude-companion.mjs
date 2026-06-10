@@ -1617,7 +1617,7 @@ function startBackgroundJob(command, rawArgs) {
   return withWorkspaceJobLock(cwd, process.env, () => {
     const jobs = jobSnapshotAfterReap(cwd);
     const active = activeJobsFromList(jobs);
-    const idempotencyKey = fingerprint.timedOut
+    const idempotencyKey = fingerprint.reuseDisabled
       ? ""
       : deriveJobIdempotencyKey({
         command,
@@ -1648,7 +1648,8 @@ function startBackgroundJob(command, rawArgs) {
       sessionId: session?.sessionId || "",
       submissionState: "starting",
       idempotencyKey,
-      fingerprintTimedOut: fingerprint.timedOut
+      fingerprintTimedOut: fingerprint.timedOut,
+      fingerprintReuseDisabled: fingerprint.reuseDisabled
     });
     const workerNode = workerNodeBinary(process.env);
     if (!fs.existsSync(workerNode)) {
@@ -1718,7 +1719,7 @@ function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
   return withWorkspaceJobLock(cwd, process.env, () => {
     const jobs = jobSnapshotAfterReap(cwd);
     const active = activeJobsFromList(jobs);
-    const idempotencyKey = fingerprint.timedOut
+    const idempotencyKey = fingerprint.reuseDisabled
       ? ""
       : deriveJobIdempotencyKey({
         command,
@@ -1750,7 +1751,8 @@ function reserveBackgroundJob(command, commandArgs, workerCommand, jobId) {
       sessionId: session?.sessionId || "",
       submissionState: "starting",
       idempotencyKey,
-      fingerprintTimedOut: fingerprint.timedOut
+      fingerprintTimedOut: fingerprint.timedOut,
+      fingerprintReuseDisabled: fingerprint.reuseDisabled
     }, workerCommand);
     return { job };
   });
@@ -2877,8 +2879,8 @@ async function runReviewGate(rawArgs) {
   }
   const diffFingerprint = workingTreeFingerprintDetails(cwd, [], hookOptions);
   const diffHash = diffFingerprint.hash;
-  const diffFingerprintUsable = !diffFingerprint.timedOut;
-  if (diffFingerprint.timedOut && !diffFingerprint.budgetExceeded) {
+  const diffFingerprintUsable = !diffFingerprint.reuseDisabled;
+  if (diffFingerprint.reuseDisabled && !diffFingerprint.budgetExceeded) {
     const reason = diffFingerprint.failureKind === "timeout"
       ? "working-tree fingerprint timed out"
       : "working-tree fingerprint inconclusive";

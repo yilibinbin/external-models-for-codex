@@ -158,7 +158,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --
 
 `--background` 支持 Codex host-forwarded 路径：skill 先通过 `reserve-job` 预留任务，然后 Codex 只派发一个转发子代理执行返回的 `workerCommand`。子代理只运行 `run-reserved-job`，不重新审阅、不解释仓库、不改写上下文。返回的命令会携带显式 `--cwd`，因此即使转发 shell 从其他目录启动，也会 claim 正确 workspace 的任务状态。旧的 runtime detached 后台任务保留为兼容 fallback。
 
-未被 claim 的 host-forwarded reservation 使用独立于直接 worker 启动清理的 claim deadline：默认 10 分钟，可用 `CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS=<毫秒>` 调整。等待中的 reservation 会占用 active job cap；高并发派发场景也可以调节 `CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS`。如果 `jobs` 显示 phase 为 `unsafe-child-identity`，表示插件发现一个没有保存身份信息的 live child PID，会保留容量直到你 inspect/cancel，避免误杀 PID 复用进程。SDK 后端的后台和 reserved 任务会默认启用已脱敏的 stream progress，用于 `jobs`/`result` 的进度预览。
+未被 claim 的 host-forwarded reservation 使用独立于直接 worker 启动清理的 claim deadline：默认 10 分钟，可用 `CLAUDE_FOR_CODEX_RESERVATION_CLAIM_MS=<毫秒>` 调整。等待中的 reservation 会占用 active job cap；高并发派发场景也可以调节 `CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS`。如果 `jobs` 显示 phase 为 `unsafe-child-identity`，表示插件发现一个没有保存身份信息的 live child PID，会保留容量直到你 inspect/cancel，避免误杀 PID 复用进程。如果 `jobs` 显示 `leaderless-liveness-inconclusive`，表示有界 `ps` 探测无法确认进程组是否还有 live member；负载较高的 CI runner 可用 `CLAUDE_FOR_CODEX_PS_TIMEOUT_MS=<毫秒>` 调整探测窗口。SDK 后端的后台和 reserved 任务会默认启用已脱敏的 stream progress，用于 `jobs`/`result` 的进度预览。
 
 ## MCP 支撑的只读 Git 审阅
 

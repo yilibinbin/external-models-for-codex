@@ -1370,6 +1370,8 @@ def test_background_idempotency_does_not_reuse_when_fingerprint_times_out(tmp_pa
     assert first_payload["job"]["id"] != second_payload["job"]["id"]
     assert first_payload["job"]["fingerprintTimedOut"] is True
     assert second_payload["job"]["fingerprintTimedOut"] is True
+    assert first_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"]["fingerprintReuseDisabled"] is True
     assert second_payload["job"].get("reusedExisting") is not True
 
 
@@ -1389,8 +1391,41 @@ console.log(JSON.stringify(details));
     result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     details = json.loads(result.stdout)
-    assert details["timedOut"] is True
+    assert details["timedOut"] is False
+    assert details["untrusted"] is True
+    assert details["reuseDisabled"] is True
     assert details["budgetExceeded"] is True
+    assert details["hash"]
+
+
+def test_worktree_fingerprint_marks_non_timeout_git_failures_untrusted(tmp_path):
+    repo = tmp_path / "repo"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    bin_dir.mkdir()
+    fake_git = bin_dir / "git"
+    fake_git.write_text(
+        "#!/usr/bin/env sh\n"
+        "echo 'fatal: synthetic git failure' >&2\n"
+        "exit 2\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    module_uri = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").as_uri()
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    script = f"""
+import {{ workingTreeFingerprintDetails }} from {json.dumps(module_uri)};
+const details = workingTreeFingerprintDetails({json.dumps(str(repo))});
+console.log(JSON.stringify(details));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    details = json.loads(result.stdout)
+    assert details["timedOut"] is False
+    assert details["untrusted"] is True
+    assert details["reuseDisabled"] is True
+    assert details["failureKind"] == "inconclusive"
     assert details["hash"]
 
 
@@ -1418,8 +1453,10 @@ def test_background_idempotency_does_not_reuse_when_untracked_budget_exceeded(tm
     first_payload = json.loads(first.stdout)
     second_payload = json.loads(second.stdout)
     assert first_payload["job"]["id"] != second_payload["job"]["id"]
-    assert first_payload["job"]["fingerprintTimedOut"] is True
-    assert second_payload["job"]["fingerprintTimedOut"] is True
+    assert first_payload["job"]["fingerprintTimedOut"] is False
+    assert second_payload["job"]["fingerprintTimedOut"] is False
+    assert first_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"]["fingerprintReuseDisabled"] is True
     assert second_payload["job"].get("reusedExisting") is not True
 
 
@@ -1447,6 +1484,7 @@ def test_duplicate_background_retry_reuses_existing_job_in_non_git_workspace(tmp
     assert second_payload["job"]["id"] == first_payload["job"]["id"]
     assert second_payload["job"].get("reusedExisting") is True
     assert second_payload["job"]["fingerprintTimedOut"] is False
+    assert second_payload["job"].get("fingerprintReuseDisabled") in (False, None)
 
 
 def test_background_idempotency_does_not_reuse_when_git_returns_nonzero(tmp_path):
@@ -1495,8 +1533,10 @@ os.execv({json.dumps(real_git)}, ["git", *args])
     first_payload = json.loads(first.stdout)
     second_payload = json.loads(second.stdout)
     assert first_payload["job"]["id"] != second_payload["job"]["id"]
-    assert first_payload["job"]["fingerprintTimedOut"] is True
-    assert second_payload["job"]["fingerprintTimedOut"] is True
+    assert first_payload["job"]["fingerprintTimedOut"] is False
+    assert second_payload["job"]["fingerprintTimedOut"] is False
+    assert first_payload["job"]["fingerprintReuseDisabled"] is True
+    assert second_payload["job"]["fingerprintReuseDisabled"] is True
     assert second_payload["job"].get("reusedExisting") is not True
 
 
@@ -2035,6 +2075,54 @@ console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds
             leader.kill()
 
 
+def test_lost_job_reaper_surfaces_inconclusive_process_group_probe(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    bin_dir = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    bin_dir.mkdir()
+    fake_ps = bin_dir / "ps"
+    fake_ps.write_text(
+        "#!/usr/bin/env sh\n"
+        "if [ \"$1\" = \"-eo\" ]; then\n"
+        "  echo 'synthetic ps group-scan failure' >&2\n"
+        "  exit 2\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf8",
+    )
+    fake_ps.chmod(0o755)
+    script = f"""
+import {{ activeJobs, createJob, reapLostJobs, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "inconclusive-ps", command: "review", args: ["inconclusive"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "running",
+  workerPid: 999999,
+  childProcessGroupPid: 424242,
+  childProcessGroupIdentity: {{ pid: 424242, pgid: 424242, command: "missing leader", commandHash: "missing leader" }},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds: activeJobs(cwd, env).map((item) => item.id) }}));
+"""
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["job"]["status"] == "running"
+    assert payload["job"]["phase"] == "leaderless-liveness-inconclusive"
+    assert payload["job"]["lifecycleState"] == "lost"
+    assert "process-group liveness probing is inconclusive" in payload["job"]["lastProgressMessage"]
+    assert "inconclusive-ps" in payload["activeIds"]
+
+
 def test_finish_job_records_output_truncation_metadata(tmp_path):
     jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
     lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
@@ -2392,20 +2480,25 @@ def test_process_group_scan_is_bounded_and_fail_closed_on_ps_timeout(tmp_path):
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     env["CLAUDE_FOR_CODEX_PS_TIMEOUT_MS"] = "25"
     script = f"""
-import {{ captureProcessIdentity, processGroupHasLiveMembers }} from {json.dumps(process_lib.as_uri())};
-const start = Date.now();
-console.log(JSON.stringify({{
-  identity: captureProcessIdentity(123456),
-  groupLive: processGroupHasLiveMembers(123456),
-  elapsedMs: Date.now() - start
-}}));
-"""
+	import {{ captureProcessIdentity, processGroupHasLiveMembers, psProbeDiagnostics, resetPsProbeDiagnostics }} from {json.dumps(process_lib.as_uri())};
+	resetPsProbeDiagnostics();
+	const start = Date.now();
+	console.log(JSON.stringify({{
+	  identity: captureProcessIdentity(123456),
+	  groupLive: processGroupHasLiveMembers(123456),
+	  elapsedMs: Date.now() - start,
+	  diagnostics: psProbeDiagnostics()
+	}}));
+	"""
     result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["identity"] is None
     assert payload["groupLive"] is True
     assert payload["elapsedMs"] < 1000
+    assert payload["diagnostics"]["groupScanFailures"] == 1
+    assert payload["diagnostics"]["lastGroupScanFailure"]["timeoutMs"] == 25
+    assert payload["diagnostics"]["lastGroupScanFailure"]["reason"] == "ps probe failed"
 
 
 def test_process_group_scan_fail_closed_on_ps_max_buffer(tmp_path):
@@ -2428,17 +2521,22 @@ def test_process_group_scan_fail_closed_on_ps_max_buffer(tmp_path):
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     env["CLAUDE_FOR_CODEX_PS_MAX_BUFFER_BYTES"] = "1024"
     script = f"""
-import {{ captureProcessIdentity, processGroupHasLiveMembers }} from {json.dumps(process_lib.as_uri())};
-console.log(JSON.stringify({{
-  identity: captureProcessIdentity(123456),
-  groupLive: processGroupHasLiveMembers(123456)
-}}));
-"""
+	import {{ captureProcessIdentity, processGroupHasLiveMembers, psProbeDiagnostics, resetPsProbeDiagnostics }} from {json.dumps(process_lib.as_uri())};
+	resetPsProbeDiagnostics();
+	console.log(JSON.stringify({{
+	  identity: captureProcessIdentity(123456),
+	  groupLive: processGroupHasLiveMembers(123456),
+	  diagnostics: psProbeDiagnostics()
+	}}));
+	"""
     result = subprocess.run([NODE, "--input-type=module", "--eval", script], env=env, capture_output=True, text=True, timeout=5)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert payload["identity"]["pid"] == 123456
     assert payload["groupLive"] is True
+    assert payload["diagnostics"]["groupScanFailures"] == 1
+    assert payload["diagnostics"]["lastGroupScanFailure"]["maxBufferBytes"] == 1024
+    assert payload["diagnostics"]["lastGroupScanFailure"]["reason"] == "ps probe failed"
 
 
 def test_process_group_cancel_refuses_unvalidated_leaderless_group(tmp_path):

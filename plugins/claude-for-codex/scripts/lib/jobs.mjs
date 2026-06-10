@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   captureProcessIdentity,
-  processGroupHasLiveMembers,
+  processGroupLiveness,
   terminateValidatedJobWorker,
   terminateValidatedProcessGroup,
   validateJobWorkerProcess,
@@ -644,24 +644,35 @@ export function reapLostJobs(cwd = process.cwd(), options = {}, env = process.en
     const childGroupValidation = Number.isInteger(childGroupPid) && job.childProcessGroupIdentity
       ? validateProcessGroupLeader(childGroupPid, job.childProcessGroupIdentity)
       : { ok: false };
-    if (childGroupValidation.ok || (Number.isInteger(childGroupPid) && job.childProcessGroupIdentity && processGroupHasLiveMembers(childGroupPid))) {
+    const childGroupLiveness = Number.isInteger(childGroupPid) && job.childProcessGroupIdentity
+      ? processGroupLiveness(childGroupPid)
+      : { live: false, inconclusive: false };
+    if (childGroupValidation.ok || childGroupLiveness.live) {
       beforeLostJobUpdate?.(job, lifecycle);
       updates.push(mutateLostJobUnderLock(cwd, job, { now }, env, (current) => {
         const currentChildGroupPid = Number.isInteger(current.childProcessGroupPid) ? current.childProcessGroupPid : current.childPid;
         const currentChildGroupValidation = Number.isInteger(currentChildGroupPid) && current.childProcessGroupIdentity
           ? validateProcessGroupLeader(currentChildGroupPid, current.childProcessGroupIdentity)
           : { ok: false };
-        const currentLeaderlessGroupLive = Number.isInteger(currentChildGroupPid)
+        const currentChildGroupLiveness = Number.isInteger(currentChildGroupPid)
           && current.childProcessGroupIdentity
-          && processGroupHasLiveMembers(currentChildGroupPid);
-        if (!currentChildGroupValidation.ok && !currentLeaderlessGroupLive) {
+          ? processGroupLiveness(currentChildGroupPid)
+          : { live: false, inconclusive: false };
+        if (!currentChildGroupValidation.ok && !currentChildGroupLiveness.live) {
           return null;
         }
+        const inconclusiveLiveness = !currentChildGroupValidation.ok && currentChildGroupLiveness.inconclusive;
         return {
           ...current,
-          phase: currentChildGroupValidation.ok ? "orphaned" : "leaderless-orphaned",
+          phase: currentChildGroupValidation.ok
+            ? "orphaned"
+            : inconclusiveLiveness
+            ? "leaderless-liveness-inconclusive"
+            : "leaderless-orphaned",
           lastProgressMessage: currentChildGroupValidation.ok
             ? "Worker heartbeat is lost but the supervised process-group leader still exists; not freeing capacity or resubmitting."
+            : inconclusiveLiveness
+            ? "Worker heartbeat is lost and process-group liveness probing is inconclusive; preserving capacity until ps probing recovers or the job is manually inspected."
             : "Worker heartbeat is lost but live members remain in the supervised process group; not freeing capacity or resubmitting.",
           lifecycleState: "lost",
           workerPid: null

@@ -71,7 +71,7 @@ function isNotGitRepository(result) {
 function workingTreeFingerprintPart(cwd, args, options = {}) {
   const result = runGit(cwd, args, options);
   if (gitCommandTimedOut(result)) {
-    return { text: `ETIMEDOUT ${args.join(" ")}`, timedOut: true, failureKind: "timeout" };
+    return { text: `ETIMEDOUT ${args.join(" ")}`, timedOut: true, untrusted: true, failureKind: "timeout" };
   }
   if (isNotGitRepository(result)) {
     return {
@@ -97,7 +97,6 @@ function workingTreeFingerprintPart(cwd, args, options = {}) {
     };
   }
   if (result.errorCode || result.status !== 0) {
-    const failedByTimeout = gitCommandTimedOut(result);
     return {
       text: [
         `INCONCLUSIVE ${args.join(" ")}`,
@@ -108,8 +107,9 @@ function workingTreeFingerprintPart(cwd, args, options = {}) {
         result.stderr
       ].join("\n"),
       stdout: result.stdout,
-      timedOut: true,
-      failureKind: failedByTimeout ? "timeout" : "inconclusive"
+      timedOut: false,
+      untrusted: true,
+      failureKind: "inconclusive"
     };
   }
   return {
@@ -151,7 +151,8 @@ function budgetExceededPart(reason) {
       reason
     ].join("\n"),
     stdout: "",
-    timedOut: true,
+    timedOut: false,
+    untrusted: true,
     budgetExceeded: true
   };
 }
@@ -195,6 +196,7 @@ function untrackedFilesFingerprintPart(cwd, options = {}) {
       text: "ETIMEDOUT ls-files --others --exclude-standard -z",
       stdout: "",
       timedOut: true,
+      untrusted: true,
       failureKind: "timeout"
     };
   }
@@ -219,7 +221,8 @@ function untrackedFilesFingerprintPart(cwd, options = {}) {
         result.stderr
       ].join("\n"),
       stdout: "",
-      timedOut: true,
+      timedOut: false,
+      untrusted: true,
       failureKind: "inconclusive"
     };
   }
@@ -300,6 +303,8 @@ export function workingTreeFingerprintDetails(cwd = process.cwd(), args = [], op
       hashStdoutParts([statusPart, stagedDiffPart, unstagedDiffPart])
     ],
     timedOut: parts.some((part) => part.timedOut),
+    untrusted: parts.some((part) => part.untrusted),
+    reuseDisabled: parts.some((part) => part.untrusted),
     failureKind: parts.find((part) => part.failureKind)?.failureKind ?? "",
     budgetExceeded: parts.some((part) => part.budgetExceeded)
   };

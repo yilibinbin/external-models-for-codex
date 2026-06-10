@@ -4,6 +4,10 @@ import process from "node:process";
 
 const DEFAULT_PS_TIMEOUT_MS = 2_000;
 const DEFAULT_PS_MAX_BUFFER_BYTES = 20 * 1024 * 1024;
+const psProbeState = {
+  groupScanFailures: 0,
+  lastGroupScanFailure: null
+};
 
 export function supportsPosixProcessGroups(platform = process.platform) {
   return platform !== "win32";
@@ -36,6 +40,49 @@ function runPs(args) {
     killSignal: "SIGKILL",
     maxBuffer: psProbeMaxBufferBytes()
   });
+}
+
+function psProbeFailure(result) {
+  if (result.error || result.errorCode || result.signal || result.status === null || result.status === undefined) {
+    return {
+      status: result.status ?? null,
+      signal: result.signal ?? "",
+      error: result.error ? String(result.error.message ?? result.error) : "",
+      errorCode: result.error?.code ? String(result.error.code) : result.errorCode ? String(result.errorCode) : "",
+      stderr: String(result.stderr ?? "").slice(0, 500)
+    };
+  }
+  return null;
+}
+
+function recordGroupScanProbeFailure(pgid, args, result, reason) {
+  const diagnostic = {
+    pgid,
+    args,
+    reason,
+    status: result.status ?? null,
+    signal: result.signal ?? "",
+    error: result.error ? String(result.error.message ?? result.error) : "",
+    errorCode: result.error?.code ? String(result.error.code) : result.errorCode ? String(result.errorCode) : "",
+    stderr: String(result.stderr ?? "").slice(0, 500),
+    timeoutMs: psProbeTimeoutMs(),
+    maxBufferBytes: psProbeMaxBufferBytes()
+  };
+  psProbeState.groupScanFailures += 1;
+  psProbeState.lastGroupScanFailure = diagnostic;
+  return diagnostic;
+}
+
+export function psProbeDiagnostics() {
+  return {
+    groupScanFailures: psProbeState.groupScanFailures,
+    lastGroupScanFailure: psProbeState.lastGroupScanFailure ? { ...psProbeState.lastGroupScanFailure } : null
+  };
+}
+
+export function resetPsProbeDiagnostics() {
+  psProbeState.groupScanFailures = 0;
+  psProbeState.lastGroupScanFailure = null;
 }
 
 function ps(pid) {
@@ -83,21 +130,34 @@ export function isProcessAlive(pid) {
   return Number.isInteger(pid) && Boolean(captureProcessIdentity(pid));
 }
 
-export function processGroupHasLiveMembers(pgid) {
+export function processGroupLiveness(pgid) {
   if (!Number.isInteger(pgid)) {
-    return false;
+    return { live: false, inconclusive: false, diagnostic: null };
   }
-  const result = runPs(["-eo", "pid=", "-o", "pgid=", "-o", "stat="]);
-  if (result.status !== 0 || !result.stdout.trim()) {
-    return true;
+  const args = ["-eo", "pid=", "-o", "pgid=", "-o", "stat="];
+  const result = runPs(args);
+  const failure = psProbeFailure(result);
+  if (failure || result.status !== 0 || !result.stdout.trim()) {
+    const diagnostic = recordGroupScanProbeFailure(
+      pgid,
+      args,
+      result,
+      failure ? "ps probe failed" : "ps probe returned no process rows"
+    );
+    return { live: true, inconclusive: true, diagnostic };
   }
-  return result.stdout.split(/\r?\n/).some((line) => {
+  const live = result.stdout.split(/\r?\n/).some((line) => {
     const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\S+)/);
     if (!match) {
       return false;
     }
     return Number(match[2]) === pgid && !String(match[3]).startsWith("Z");
   });
+  return { live, inconclusive: false, diagnostic: null };
+}
+
+export function processGroupHasLiveMembers(pgid) {
+  return processGroupLiveness(pgid).live;
 }
 
 export function captureProcessGroupIdentity(pid, options = {}) {
@@ -225,7 +285,15 @@ function leaderlessProcessGroupRefusal(pid, expectedIdentity) {
 
 export function terminateValidatedProcessGroup(pid, expectedIdentity, options = {}) {
   let validation = validateProcessGroupLeader(pid, expectedIdentity);
-  let groupStillAlive = () => validateProcessGroupLeader(pid, expectedIdentity).ok || processGroupHasLiveMembers(pid);
+  let lastGroupLiveness = null;
+  let groupStillAlive = () => {
+    if (validateProcessGroupLeader(pid, expectedIdentity).ok) {
+      lastGroupLiveness = null;
+      return true;
+    }
+    lastGroupLiveness = processGroupLiveness(pid);
+    return lastGroupLiveness.live;
+  };
   if (!validation.ok) {
     if (validation.reason === "process not found") {
       if (expectedIdentity && processGroupHasLiveMembers(pid)) {
@@ -287,7 +355,11 @@ export function terminateValidatedProcessGroup(pid, expectedIdentity, options = 
       ok: !stillAlive,
       delivered: true,
       escalated,
-      reason: stillAlive ? "process group still alive after SIGKILL" : undefined,
+      reason: stillAlive
+        ? lastGroupLiveness?.inconclusive
+          ? "process group liveness probe inconclusive after SIGKILL; preserving capacity"
+          : "process group still alive after SIGKILL"
+        : undefined,
       identity: validation.identity
     };
   } catch (error) {
