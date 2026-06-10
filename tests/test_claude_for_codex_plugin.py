@@ -3383,6 +3383,7 @@ def prepare_gate_repo(tmp_path, *, with_change=True):
 import json
 import os
 import pathlib
+import signal
 import sys
 import time
 
@@ -3398,6 +3399,8 @@ call_index = len(list(capture.glob("argv-*.json")))
 prompt = sys.argv[-1]
 (capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
 (capture / f"prompt-{call_index}.txt").write_text(prompt)
+if os.environ.get("IGNORE_TERM") == "1":
+    signal.signal(signal.SIGTERM, lambda signum, frame: None)
 sleep_ms = int(os.environ.get("SLEEP_MS", "0") or "0")
 if sleep_ms > 0:
     time.sleep(sleep_ms / 1000)
@@ -8219,6 +8222,89 @@ def test_reserved_worker_command_uses_embedded_cwd_when_launched_elsewhere(tmp_p
     assert "RESERVED_CWD_DONE" in result_payload["job"]["stdout"]
 
 
+def test_reserved_worker_retries_transient_workspace_lock_contention(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    state = PLUGIN / "scripts" / "lib" / "state.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("hello\n", encoding="utf8")
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "print('LOCK_RETRY_DONE')\n",
+        encoding="utf8",
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    reserved = subprocess.run(
+        [NODE, str(runtime), "reserve-job", "review", "lock-contention"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert reserved.returncode == 0, reserved.stderr
+    payload = json.loads(reserved.stdout)
+    holder_script = f"""
+import {{ withWorkspaceJobLock }} from {json.dumps(jobs.as_uri())};
+import {{ stateDirForCwd }} from {json.dumps(state.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+console.log(JSON.stringify({{ stateDir: stateDirForCwd(cwd, env) }}));
+withWorkspaceJobLock(cwd, env, () => {{
+  console.log("LOCK_HELD");
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2300);
+  return {{ status: "released" }};
+}});
+"""
+    holder = subprocess.Popen(
+        [NODE, "--input-type=module", "--eval", holder_script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip()
+        assert holder.stdout.readline().strip() == "LOCK_HELD"
+        worker = subprocess.run(
+            payload["workerCommand"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        if holder.poll() is None:
+            holder.terminate()
+            holder.wait(timeout=5)
+
+    assert worker.returncode == 0, worker.stderr
+    assert json.loads(worker.stdout)["status"] == "succeeded"
+    result = subprocess.run(
+        [NODE, str(runtime), "result", payload["job"]["id"]],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert "LOCK_RETRY_DONE" in json.loads(result.stdout)["job"]["stdout"]
+
+
 def test_direct_background_does_not_reuse_queued_host_forwarded_reservation(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -10313,6 +10399,24 @@ def test_review_gate_aggregate_timeout_does_not_cache_allow(tmp_path):
     assert "review gate aggregate timeout reached; allowing stop" in first.stderr
     assert second.stderr == ""
     assert len(list(capture_dir.glob("prompt-*.txt"))) == 6
+
+
+def test_review_gate_timeout_kills_child_that_ignores_sigterm(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={
+            "CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS": "1000",
+            "CLAUDE_FOR_CODEX_CLAUDE_KILL_GRACE_MS": "100",
+            "IGNORE_TERM": "1",
+            "SLEEP_MS": "30000",
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert len(prompts) == 1
+    assert "role correctness timed out; allowing stop" in result.stderr
+    assert "review gate aggregate timeout reached; allowing stop" in result.stderr
 
 
 def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):

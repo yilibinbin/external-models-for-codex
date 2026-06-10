@@ -1134,15 +1134,17 @@ function claudePrint(prompt, options) {
 
 function runClaudeAsync(args, options = {}) {
   return new Promise((resolve) => {
+    const childEnv = options.env ? { ...process.env, ...options.env } : process.env;
     const child = spawn(claudeCommand(), args, {
       cwd: options.cwd ?? process.cwd(),
-      env: options.env ? { ...process.env, ...options.env } : process.env,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"]
     });
     const stdoutChunks = [];
     const stderrChunks = [];
     let settled = false;
     let timedOut = false;
+    let killTimeout = null;
     const timeout = options.timeout
       ? setTimeout(() => {
           timedOut = true;
@@ -1151,6 +1153,13 @@ function runClaudeAsync(args, options = {}) {
           } catch {
             // Process may already have exited.
           }
+          killTimeout = setTimeout(() => {
+            try {
+              child.kill("SIGKILL");
+            } catch {
+              // Process may already have exited.
+            }
+          }, claudeKillGraceMs(childEnv));
         }, options.timeout)
       : null;
 
@@ -1163,6 +1172,9 @@ function runClaudeAsync(args, options = {}) {
       settled = true;
       if (timeout) {
         clearTimeout(timeout);
+      }
+      if (killTimeout) {
+        clearTimeout(killTimeout);
       }
       resolve({
         status: 1,
@@ -1179,6 +1191,9 @@ function runClaudeAsync(args, options = {}) {
       settled = true;
       if (timeout) {
         clearTimeout(timeout);
+      }
+      if (killTimeout) {
+        clearTimeout(killTimeout);
       }
       resolve({
         status: timedOut ? 1 : status ?? (signal ? 1 : 0),
@@ -1474,6 +1489,13 @@ function reviewGateTimeoutMs(env = process.env) {
   return parsePositiveInteger(env.CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS, REVIEW_GATE_TIMEOUT_MS, {
     min: 1_000,
     max: 30 * 60 * 1000
+  });
+}
+
+function claudeKillGraceMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_CLAUDE_KILL_GRACE_MS, 1_000, {
+    min: 100,
+    max: 10_000
   });
 }
 
@@ -3972,16 +3994,20 @@ async function runReservedJob(rawArgs) {
 
   let claim;
   try {
-    claim = claimReservedJob(stateCwd, jobId, process.pid);
+    claim = await claimReservedJobWithRetry(stateCwd, jobId);
   } catch (error) {
     console.error(error.message || String(error));
     process.exit(2);
   }
   if (claim.status !== "claimed") {
+    const retryable = claim.status === "workspace_locked" || claim.status === "locked";
     process.stdout.write(`${JSON.stringify({
       status: claim.status,
       jobId,
-      message: "Reserved job was not queued and was not executed."
+      retryable,
+      message: retryable
+        ? claim.reason ?? "Reserved job claim could not acquire required state locks; retry later."
+        : "Reserved job was not claimable and was not executed."
     }, null, 2)}\n`);
     process.exit(1);
   }
@@ -4003,6 +4029,20 @@ async function runReservedJob(rawArgs) {
     exitStatus: finished.exitStatus ?? result.status ?? 1
   }, null, 2)}\n`);
   process.exit(result.status ?? 1);
+}
+
+async function claimReservedJobWithRetry(stateCwd, jobId) {
+  let claim;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    claim = claimReservedJob(stateCwd, jobId, process.pid);
+    if (claim.status !== "workspace_locked" && claim.status !== "locked") {
+      return claim;
+    }
+    if (attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+  return claim;
 }
 
 const [command, ...rawArgs] = process.argv.slice(2);
