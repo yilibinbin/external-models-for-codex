@@ -1141,8 +1141,10 @@ function runClaudeAsync(args, options = {}) {
     const stdoutChunks = [];
     const stderrChunks = [];
     let settled = false;
+    let timedOut = false;
     const timeout = options.timeout
       ? setTimeout(() => {
+          timedOut = true;
           try {
             child.kill("SIGTERM");
           } catch {
@@ -1165,8 +1167,8 @@ function runClaudeAsync(args, options = {}) {
         status: 1,
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: error.message || String(error),
-        errorCode: error.code ? String(error.code) : ""
+        error: timedOut ? "ETIMEDOUT" : error.message || String(error),
+        errorCode: timedOut ? "ETIMEDOUT" : error.code ? String(error.code) : ""
       });
     });
     child.once("close", (status, signal) => {
@@ -1178,11 +1180,11 @@ function runClaudeAsync(args, options = {}) {
         clearTimeout(timeout);
       }
       resolve({
-        status: status ?? (signal ? 1 : 0),
+        status: timedOut ? 1 : status ?? (signal ? 1 : 0),
         stdout: Buffer.concat(stdoutChunks).toString("utf8"),
         stderr: Buffer.concat(stderrChunks).toString("utf8"),
-        error: "",
-        errorCode: ""
+        error: timedOut ? "ETIMEDOUT" : "",
+        errorCode: timedOut ? "ETIMEDOUT" : ""
       });
     });
   });
@@ -1471,6 +1473,13 @@ function maxActiveJobs(env = process.env) {
   return parsePositiveInteger(env.CLAUDE_FOR_CODEX_MAX_ACTIVE_JOBS, DEFAULT_MAX_ACTIVE_JOBS, {
     min: 1,
     max: 20
+  });
+}
+
+function reviewGateTimeoutMs(env = process.env) {
+  return parsePositiveInteger(env.CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS, REVIEW_GATE_TIMEOUT_MS, {
+    min: 1_000,
+    max: 30 * 60 * 1000
   });
 }
 
@@ -2863,7 +2872,6 @@ async function runReviewGate(rawArgs) {
     warnGate(`quality policy failed; allowing stop: ${error.message || String(error)}`);
     return;
   }
-  args.timeout = REVIEW_GATE_ROLE_TIMEOUT_MS;
   try {
     attachSemanticContext(args, { reviewGate: true, command: "review-gate" });
   } catch (error) {
@@ -2896,9 +2904,18 @@ async function runReviewGate(rawArgs) {
     gitRunner: (gitArgs) => gitShort(gitArgs, cwd, hookOptions)
   });
   const blocks = [];
+  const gateDeadline = Date.now() + reviewGateTimeoutMs();
   for (const role of roles) {
+    const remainingMs = gateDeadline - Date.now();
+    if (remainingMs <= 0) {
+      warnGate("review gate aggregate timeout reached; allowing stop");
+      break;
+    }
     const prompt = reviewGateRolePrompt(role, args, gitContext);
-    const result = await claudePrintAsync(prompt, args);
+    const result = await claudePrintAsync(prompt, {
+      ...args,
+      timeout: Math.min(REVIEW_GATE_ROLE_TIMEOUT_MS, remainingMs)
+    });
     if (result.errorCode === "ETIMEDOUT" || result.error.includes("ETIMEDOUT")) {
       warnGate(`role ${role.name} timed out; allowing stop`);
       continue;

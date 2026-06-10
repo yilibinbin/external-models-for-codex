@@ -167,6 +167,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -2558,6 +2559,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -2645,6 +2647,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -3342,6 +3345,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
@@ -3355,6 +3359,9 @@ call_index = len(list(capture.glob("argv-*.json")))
 prompt = sys.argv[-1]
 (capture / f"argv-{call_index}.json").write_text(json.dumps(sys.argv[1:]))
 (capture / f"prompt-{call_index}.txt").write_text(prompt)
+sleep_ms = int(os.environ.get("SLEEP_MS", "0") or "0")
+if sleep_ms > 0:
+    time.sleep(sleep_ms / 1000)
 fail_roles = [role for role in os.environ.get("FAIL_ROLES", "").split(",") if role]
 invalid_roles = [role for role in os.environ.get("INVALID_ROLES", "").split(",") if role]
 block_roles = [role for role in os.environ.get("BLOCK_ROLES", "").split(",") if role]
@@ -10210,6 +10217,22 @@ def test_review_gate_all_allow_exits_without_block(tmp_path):
     for role in ["correctness", "security", "tests", "release", "adversarial"]:
         assert f"<role_name>{role}</role_name>" in "\n".join(prompts)
         assert "Your first line must be exactly one of:" in "\n".join(prompts)
+
+
+def test_review_gate_aggregate_timeout_stops_later_roles(tmp_path):
+    result, prompts, _capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={
+            "CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS": "1000",
+            "SLEEP_MS": "1200",
+        },
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert len(prompts) == 1
+    assert "role correctness timed out; allowing stop" in result.stderr
+    assert "review gate aggregate timeout reached; allowing stop" in result.stderr
 
 
 def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):
