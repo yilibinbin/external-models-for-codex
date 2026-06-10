@@ -1078,6 +1078,15 @@ def test_wait_timeout_is_clamped_below_hard_timeout_in_source():
     assert "max: HARD_JOB_TIMEOUT_MS" not in wait_block
 
 
+def test_post_spawn_worker_stamp_is_terminal_safe_and_lock_tolerant_in_source():
+    companion = (PLUGIN / "scripts" / "claude-companion.mjs").read_text(encoding="utf8")
+    block = companion[companion.index("function startBackgroundJob"):companion.index("function reserveBackgroundJob")]
+    assert "updateJobUnlessTerminal(cwd, job.id" in block
+    assert 'stamped.status === "locked"' in block
+    assert "workerPidUpdatePending" in block
+    assert "return updateJob(cwd, job.id" not in block
+
+
 def test_recommend_execution_mode_routes_large_reviews_to_background(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -1892,6 +1901,61 @@ console.log(JSON.stringify({{ updates, lost: readJob(cwd, lost.id, env), done: r
     assert payload["lost"]["status"] == "failed"
     assert payload["lost"]["phase"] == "lost"
     assert payload["done"]["status"] == "succeeded"
+
+
+def test_lost_job_reaper_preserves_live_child_without_saved_identity(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    sleeper = subprocess.Popen(
+        ["python3", "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        script = f"""
+import {{ activeJobs, createJob, reapLostJobs, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const job = createJob(cwd, {{ id: "unsafe-child", command: "review", args: ["unsafe"], cwd }}, env);
+updateJob(cwd, job.id, {{
+  status: "running",
+  phase: "running",
+  workerPid: 999999,
+  childPid: {sleeper.pid},
+  startedAt: "2026-06-09T00:00:00.000Z",
+  lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
+}}, env);
+const updates = reapLostJobs(cwd, {{ now: Date.parse("2026-06-09T00:20:00.000Z") }}, env);
+console.log(JSON.stringify({{ updates, job: readJob(cwd, job.id, env), activeIds: activeJobs(cwd, env).map((item) => item.id) }}));
+"""
+        result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        payload = json.loads(result.stdout)
+        assert payload["job"]["status"] == "running"
+        assert payload["job"]["phase"] == "unsafe-child-identity"
+        assert payload["job"]["lifecycleState"] == "lost"
+        assert payload["job"]["workerPid"] is None
+        assert "manual inspection" in payload["job"]["lastProgressMessage"]
+        assert "unsafe-child" in payload["activeIds"]
+
+        env = os.environ.copy()
+        env["CLAUDE_PLUGIN_DATA"] = str(data)
+        listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+        assert listed.returncode == 0, listed.stderr
+        listed_job = next(item for item in json.loads(listed.stdout)["jobs"] if item["id"] == "unsafe-child")
+        assert listed_job["phase"] == "unsafe-child-identity"
+        assert listed_job["lifecycle"]["state"] == "lost"
+        assert any("manual inspection" in line for line in listed_job["progressPreview"])
+    finally:
+        sleeper.terminate()
+        try:
+            sleeper.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            sleeper.kill()
 
 
 def test_lost_job_reaper_preserves_leaderless_child_process_group(tmp_path):
@@ -8201,6 +8265,65 @@ print("BACKGROUND_REVIEW_OK")
     result_payload = json.loads(result.stdout)
     assert result_payload["job"]["resultViewedAt"]
     assert result_payload["job"]["stdout"].strip() == "BACKGROUND_REVIEW_OK"
+
+
+def test_background_progress_buffer_preserves_split_utf8_chunks(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    fake_bin = tmp_path / "bin"
+    repo.mkdir()
+    data.mkdir()
+    fake_bin.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "changed.txt").write_text("change\n", encoding="utf8")
+
+    fake_claude = fake_bin / "claude"
+    fake_claude.write_text(
+        """#!/usr/bin/env python3
+import json
+import os
+import sys
+import time
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+line = "[claude-for-codex progress] " + json.dumps({
+    "phase": "reviewing",
+    "message": "进度测试",
+    "role": "审阅"
+}, ensure_ascii=False) + "\\n"
+raw = line.encode("utf8")
+split = raw.index("测".encode("utf8")) + 1
+os.write(sys.stderr.fileno(), raw[:split])
+sys.stderr.flush()
+time.sleep(0.05)
+os.write(sys.stderr.fileno(), raw[split:])
+sys.stderr.flush()
+print("UTF8_PROGRESS_OK")
+"""
+    )
+    fake_claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review", "--background", "--wait", "split utf8 progress"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "succeeded"
+    assert payload["job"]["stdout"].strip() == "UTF8_PROGRESS_OK"
+    assert payload["job"]["lastProgressMessage"] == "进度测试"
+    assert payload["job"]["lastProgressRole"] == "审阅"
 
 
 def test_background_multi_review_failure_is_recorded_as_failed_job(tmp_path):

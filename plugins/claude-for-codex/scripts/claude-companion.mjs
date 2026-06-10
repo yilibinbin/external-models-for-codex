@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
   cancelJob,
@@ -24,7 +25,7 @@ import {
   readJob,
   reserveJob,
   resultForJob,
-  updateJob,
+  updateJobUnlessTerminal,
   withWorkspaceJobLock
 } from "./lib/jobs.mjs";
 import {
@@ -1536,10 +1537,11 @@ function backgroundExecutionControls(env = process.env) {
 }
 
 function makeProgressLineBuffer(onLine) {
+  const decoder = new StringDecoder("utf8");
   let buffer = "";
   return {
     push(chunk) {
-      buffer += Buffer.from(chunk).toString("utf8");
+      buffer += decoder.write(Buffer.from(chunk));
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? "";
       for (const line of lines) {
@@ -1547,6 +1549,7 @@ function makeProgressLineBuffer(onLine) {
       }
     },
     flush() {
+      buffer += decoder.end();
       if (buffer) {
         onLine(buffer);
         buffer = "";
@@ -1692,9 +1695,18 @@ function startBackgroundJob(command, rawArgs) {
       return { launchFailed: true, job: failed ?? readJob(cwd, job.id) ?? job };
     }
     child.unref();
-    return updateJob(cwd, job.id, {
+    const stamped = updateJobUnlessTerminal(cwd, job.id, {
       workerPid: child.pid
-    }) ?? job;
+    });
+    if (!stamped || stamped.status === "locked") {
+      return {
+        ...job,
+        workerPid: child.pid,
+        workerPidUpdatePending: stamped?.status === "locked",
+        workerPidUpdateReason: stamped?.reason ?? ""
+      };
+    }
+    return stamped;
   });
 }
 
