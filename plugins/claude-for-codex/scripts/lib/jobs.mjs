@@ -319,12 +319,27 @@ export function claimJobForRun(cwd, jobId, workerPid = process.pid, env = proces
   return claimQueuedJob(cwd, jobId, workerPid, env);
 }
 
-export function claimReservedJob(cwd, jobId, workerPid = process.pid, env = process.env) {
-  return claimQueuedJob(cwd, jobId, workerPid, env, (job) => (
-    isValidReservedWorkerCommand(job, jobId)
-      ? true
-      : { reason: "Job is not a valid host-forwarded reservation." }
+function hasActiveDirectJobWithIdempotencyKey(cwd, currentJobId, idempotencyKey, env) {
+  if (!idempotencyKey) {
+    return false;
+  }
+  return activeJobs(cwd, env).some((job) => (
+    job.id !== currentJobId &&
+    job.idempotencyKey === idempotencyKey &&
+    job.reservationMode !== "host-forwarded"
   ));
+}
+
+export function claimReservedJob(cwd, jobId, workerPid = process.pid, env = process.env) {
+  return claimQueuedJob(cwd, jobId, workerPid, env, (job) => {
+    if (!isValidReservedWorkerCommand(job, jobId)) {
+      return { reason: "Job is not a valid host-forwarded reservation." };
+    }
+    if (hasActiveDirectJobWithIdempotencyKey(cwd, jobId, job.idempotencyKey, env)) {
+      return { reason: "Another active direct job already owns this idempotency key." };
+    }
+    return true;
+  });
 }
 
 function mutateJobUnderLock(cwd, jobId, env, mutator) {

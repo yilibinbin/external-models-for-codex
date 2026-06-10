@@ -458,9 +458,9 @@ function parseArgs(argv, options = {}) {
       parsed.scope = readOptionValue(tokens, index, arg);
       index += 1;
     } else if (arg === "--path" || arg === "--paths") {
-      const path = readOptionValue(tokens, index, arg);
-      parsed.paths.push(path);
-      parsed.path = path;
+      const pathValue = readOptionValue(tokens, index, arg);
+      parsed.paths.push(pathValue);
+      parsed.path = pathValue;
       index += 1;
     } else if (arg === "--model") {
       parsed.model = assertSafeModelAliasOrId(readOptionValue(tokens, index, arg));
@@ -2905,9 +2905,12 @@ async function runReviewGate(rawArgs) {
   });
   const blocks = [];
   const gateDeadline = Date.now() + reviewGateTimeoutMs();
+  let allowCount = 0;
+  let gateReviewComplete = true;
   for (const role of roles) {
     const remainingMs = gateDeadline - Date.now();
     if (remainingMs <= 0) {
+      gateReviewComplete = false;
       warnGate("review gate aggregate timeout reached; allowing stop");
       break;
     }
@@ -2917,10 +2920,12 @@ async function runReviewGate(rawArgs) {
       timeout: Math.min(REVIEW_GATE_ROLE_TIMEOUT_MS, remainingMs)
     });
     if (result.errorCode === "ETIMEDOUT" || result.error.includes("ETIMEDOUT")) {
+      gateReviewComplete = false;
       warnGate(`role ${role.name} timed out; allowing stop`);
       continue;
     }
     if (result.status !== 0) {
+      gateReviewComplete = false;
       const detail = claudeFailureDiagnostic(result).trim();
       warnGate(`role ${role.name} failed; allowing stop: ${detail}`);
       continue;
@@ -2928,7 +2933,10 @@ async function runReviewGate(rawArgs) {
     const verdict = parseGateVerdict(result.stdout);
     if (verdict.kind === "block") {
       blocks.push({ role: role.name, reason: verdict.reason, output: verdict.output });
+    } else if (verdict.kind === "allow") {
+      allowCount += 1;
     } else if (verdict.kind === "invalid") {
+      gateReviewComplete = false;
       warnGate(`role ${role.name} returned invalid gate output; allowing stop: ${verdict.reason}`);
     }
   }
@@ -2953,7 +2961,7 @@ async function runReviewGate(rawArgs) {
     error: "",
     errorCode: ""
   }, startedAt);
-  if (diffFingerprintUsable) {
+  if (diffFingerprintUsable && gateReviewComplete && allowCount > 0) {
     setConfig(cwd, "lastAllowedReviewGateDiffHash", diffHash);
   }
 }

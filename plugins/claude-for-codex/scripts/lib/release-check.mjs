@@ -489,6 +489,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(companion.includes("function isExpectedActiveWaitStatus") && companion.includes('status === "queued" || status === "running"') && companion.includes('process.exit(waited.job.status === "succeeded" || stillRunning ? 0 : 1)'), "wait-cancelled-nonzero", "--wait treats terminal non-success jobs as nonzero and reports only queued/running timeouts as healthy"),
     result(companion.includes("--wait-timeout-ms") && companion.includes("stripBackgroundArgs"), "wait-timeout-stripped", "wait timeout flags are stripped"),
     result(jobs.includes("findActiveJobByIdempotencyKey") && companion.includes("deriveJobIdempotencyKey") && companion.includes("reusedExisting"), "job-idempotency-reuse", "duplicate active background submissions reuse the existing job"),
+    result(jobs.includes("hasActiveDirectJobWithIdempotencyKey") && jobs.includes("Another active direct job already owns this idempotency key."), "reserved-claim-direct-duplicate-guard", "host-forwarded reservations cannot start after a same-key direct job is active"),
     result(
       companion.includes("function reserveBackgroundJob") &&
         companion.includes("reserveJob(cwd") &&
@@ -550,7 +551,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(processText.includes("supportsPosixProcessGroups") && companion.includes("backgroundPlatformSupport") && companion.includes("unsupported_platform") && companion.includes("assertBackgroundPlatformSupported"), "background-posix-platform-guard", "background and reserved jobs fail fast where POSIX process groups are unavailable"),
     result(!gate.includes("--background") && !gate.toLowerCase().includes("ultrareview") && !gate.includes("startBackgroundJob("), "review-gate-no-background", "Stop hook does not spawn tracked/cloud jobs"),
     result(!gate.includes("reserveJob(") && companion.includes("rawArgs.includes(\"reserve-job\")") && companion.includes("allowing stop"), "review-gate-no-reserve-job", "Stop hook rejects reserved/background routing"),
-    result(companion.includes("REVIEW_GATE_ROLE_TIMEOUT_MS") && companion.includes("REVIEW_GATE_TIMEOUT_MS") && companion.includes("reviewGateTimeoutMs") && companion.includes("gateDeadline") && companion.includes("review gate aggregate timeout reached; allowing stop") && companion.includes("warnGate") && companion.includes("allowing stop"), "review-gate-bounded-fail-open", "Stop hook has bounded aggregate and per-role fail-open behavior")
+    result(companion.includes("REVIEW_GATE_ROLE_TIMEOUT_MS") && companion.includes("REVIEW_GATE_TIMEOUT_MS") && companion.includes("reviewGateTimeoutMs") && companion.includes("gateDeadline") && companion.includes("gateReviewComplete") && companion.includes("allowCount > 0") && companion.includes("review gate aggregate timeout reached; allowing stop") && companion.includes("warnGate") && companion.includes("allowing stop"), "review-gate-bounded-fail-open", "Stop hook has bounded aggregate and per-role fail-open behavior without caching incomplete reviews")
   ];
 }
 

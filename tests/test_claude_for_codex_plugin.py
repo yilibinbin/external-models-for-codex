@@ -387,6 +387,41 @@ console.log(JSON.stringify({{
         assert payload[key]["idempotencyKey"].startswith("sha256:")
 
 
+def test_reserved_claim_refuses_same_key_active_direct_job(tmp_path):
+    jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
+    repo = tmp_path / "repo"
+    data = tmp_path / "plugin-data"
+    repo.mkdir()
+    data.mkdir()
+    companion = PLUGIN / "scripts" / "claude-companion.mjs"
+    script = f"""
+import {{ createJob, reserveJob, claimJobForRun, claimReservedJob, readJob, updateJob }} from {json.dumps(jobs.as_uri())};
+const cwd = {json.dumps(str(repo))};
+const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const direct = createJob(cwd, {{ command: "review", args: ["same"], cwd, idempotencyKey: "sha256:same-key" }}, env);
+const directClaim = claimJobForRun(cwd, direct.id, 1111, env);
+const workerCommand = ["node", {json.dumps(str(companion))}, "run-reserved-job", "--job-id"];
+const reserved = reserveJob(cwd, {{ command: "review", args: ["same"], cwd, idempotencyKey: "sha256:same-key" }}, workerCommand, env);
+workerCommand.push(reserved.id);
+updateJob(cwd, reserved.id, {{ workerCommand }}, env);
+const reservedClaim = claimReservedJob(cwd, reserved.id, 2222, env);
+console.log(JSON.stringify({{
+  directClaim,
+  reservedClaim,
+  directStored: readJob(cwd, direct.id, env),
+  reservedStored: readJob(cwd, reserved.id, env)
+}}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "--eval", script], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["directClaim"]["status"] == "claimed"
+    assert payload["reservedClaim"]["status"] == "not_claimed"
+    assert "active direct job" in payload["reservedClaim"]["reason"]
+    assert payload["directStored"]["status"] == "running"
+    assert payload["reservedStored"]["status"] == "queued"
+
+
 def test_claim_job_for_run_is_exclusive_across_processes(tmp_path):
     jobs = PLUGIN / "scripts" / "lib" / "jobs.mjs"
     repo = tmp_path / "repo"
@@ -10233,6 +10268,47 @@ def test_review_gate_aggregate_timeout_stops_later_roles(tmp_path):
     assert len(prompts) == 1
     assert "role correctness timed out; allowing stop" in result.stderr
     assert "review gate aggregate timeout reached; allowing stop" in result.stderr
+
+
+def test_review_gate_aggregate_timeout_does_not_cache_allow(tmp_path):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path)
+    setup = subprocess.run(
+        ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert setup.returncode == 0, setup.stderr
+    hook_input = json.dumps({"hook_event_name": "Stop", "cwd": str(repo)})
+    first_env = env.copy()
+    first_env["CLAUDE_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "1000"
+    first_env["SLEEP_MS"] = "1200"
+
+    first = subprocess.run(
+        [NODE, str(runtime), "review-gate"],
+        cwd=repo,
+        env=first_env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+    second = subprocess.run(
+        [NODE, str(runtime), "review-gate"],
+        cwd=repo,
+        env=env,
+        input=hook_input,
+        capture_output=True,
+        text=True,
+    )
+
+    assert first.returncode == 0
+    assert second.returncode == 0
+    assert first.stdout == ""
+    assert second.stdout == ""
+    assert "review gate aggregate timeout reached; allowing stop" in first.stderr
+    assert second.stderr == ""
+    assert len(list(capture_dir.glob("prompt-*.txt"))) == 6
 
 
 def test_review_gate_skips_unchanged_diff_after_allow(tmp_path):
