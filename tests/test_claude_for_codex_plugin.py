@@ -1321,7 +1321,20 @@ def test_background_idempotency_changes_when_worktree_changes(tmp_path):
     assert len(spawn_marker.read_text(encoding="utf8")) >= 2
 
 
-def test_background_idempotency_changes_when_execution_controls_change(tmp_path):
+@pytest.mark.parametrize(
+    ("first_extra_env", "second_extra_env"),
+    [
+        ({"CLAUDE_FOR_CODEX_QUALITY": "standard"}, {"CLAUDE_FOR_CODEX_QUALITY": "max"}),
+        ({"CLAUDE_FOR_CODEX_TOP_MODEL": "opus"}, {"CLAUDE_FOR_CODEX_TOP_MODEL": "fable"}),
+        (
+            {"CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK": "opus"},
+            {"CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK": "opus,sonnet"},
+        ),
+    ],
+)
+def test_background_idempotency_changes_when_execution_controls_change(
+    tmp_path, first_extra_env, second_extra_env
+):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
@@ -1340,8 +1353,8 @@ def test_background_idempotency_changes_when_execution_controls_change(tmp_path)
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
-    first_env = {**env, "CLAUDE_FOR_CODEX_QUALITY": "standard"}
-    second_env = {**env, "CLAUDE_FOR_CODEX_QUALITY": "max"}
+    first_env = {**env, **first_extra_env}
+    second_env = {**env, **second_extra_env}
     first = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=first_env, capture_output=True, text=True)
     assert first.returncode == 0, first.stderr
     second = subprocess.run([NODE, str(runtime), "review", "--background", "same-request"], cwd=repo, env=second_env, capture_output=True, text=True)
@@ -2838,6 +2851,7 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "job-idempotency-reuse",
         "reserve-job-cap-idempotency",
         "job-idempotency-fingerprint-controls",
+        "job-idempotency-top-model-controls",
         "job-idempotency-timeout-no-reuse",
         "review-gate-baseline-shared-fingerprint",
         "review-gate-fingerprint-timeout-fail-open",

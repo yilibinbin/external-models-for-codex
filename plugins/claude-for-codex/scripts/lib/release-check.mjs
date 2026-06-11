@@ -514,6 +514,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(companion.includes('state: "queued-stale"') && companion.includes("validateJobWorkerProcess(job.workerPid, job.id).ok"), "queued-live-worker-not-lost", "user-facing lifecycle output distinguishes stale queued jobs with live workers from lost jobs"),
     result(jobs.includes('idempotencyKey: job.idempotencyKey ?? ""') && !jobs.includes("idempotencyKey: job.idempotencyKey ?? deriveJobIdempotencyKey(job)"), "legacy-claim-no-fake-idempotency", "legacy queued jobs without stored idempotency keys are not stamped with a non-matching recomputed key"),
     result(jobs.includes("hasActiveDirectJobWithIdempotencyKey") && jobs.includes("withWorkspaceJobLock(cwd, env") && jobs.includes("Another active direct job already owns this idempotency key."), "reserved-claim-direct-duplicate-guard", "host-forwarded reservations cannot start after a same-key direct job is active under the workspace lock"),
+    result(/const BACKGROUND_EXECUTION_CONTROL_ENVS[\s\S]*TOP_MODEL_ENV[\s\S]*TOP_MODEL_FALLBACK_ENV[\s\S]*"CLAUDE_FOR_CODEX_BACKEND"/.test(companion), "job-idempotency-top-model-controls", "background idempotency includes top-model routing environment controls"),
     result(
       companion.includes("function reserveBackgroundJob") &&
         companion.includes("reserveJob(cwd") &&
