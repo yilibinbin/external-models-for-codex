@@ -8275,6 +8275,23 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
+def test_repository_has_fork_safe_claude_for_codex_ci_workflow():
+    workflow = ROOT / ".github" / "workflows" / "claude-for-codex-ci.yml"
+    assert workflow.exists()
+    text = workflow.read_text(encoding="utf8")
+    assert "pull_request_target" not in text
+    assert "pull_request:" in text
+    assert "push:" in text
+    assert "permissions:" in text
+    assert "contents: read" in text
+    assert "node --check plugins/claude-for-codex/scripts/claude-companion.mjs" in text
+    assert "node --check plugins/claude-for-codex/scripts/lib/hook-compat.mjs" in text
+    assert "node --check plugins/claude-for-codex/scripts/lib/doctor.mjs" in text
+    assert "pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py" in text
+    assert "release-check --ci-simulate --json" in text
+    assert "git diff --check" in text
+
+
 def test_release_check_knows_claude_0160_native_assets():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run(
@@ -9042,6 +9059,13 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-model-env-forwarded"]["ok"] is True
     assert checks["github-actions-effort-env-forwarded"]["ok"] is True
     assert checks["github-actions-model-effort-quoted"]["ok"] is True
+    assert checks["github-actions-ci-present"]["ok"] is True
+    assert checks["github-actions-ci-fork-safe"]["ok"] is True
+    assert checks["github-actions-ci-minimal-permissions"]["ok"] is True
+    assert checks["github-actions-ci-node-check"]["ok"] is True
+    assert checks["github-actions-ci-pytest"]["ok"] is True
+    assert checks["github-actions-ci-release-check"]["ok"] is True
+    assert checks["github-actions-ci-whitespace"]["ok"] is True
     assert checks["quality-policy-assets"]["ok"] is True
     assert checks["quality-top-model-policy"]["ok"] is True
     assert checks["quality-no-concrete-model-defaults"]["ok"] is True

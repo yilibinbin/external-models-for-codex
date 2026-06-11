@@ -750,11 +750,13 @@ function checkNaturalLanguageRouting(root) {
 }
 
 function checkGithubActionsCi(root) {
-  const { pluginRoot } = resolveLayout(root);
+  const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
   const defaultWorkflow = renderWorkflow(pluginRoot);
   const annotationWorkflow = renderWorkflow(pluginRoot, { annotations: true });
   const validation = validateWorkflow(defaultWorkflow);
   const annotationValidation = validateWorkflow(annotationWorkflow, { annotations: true });
+  const ciWorkflow = installedPluginOnly ? "" : path.join(repoRoot, ".github", "workflows", "claude-for-codex-ci.yml");
+  const ciText = ciWorkflow && fs.existsSync(ciWorkflow) ? fs.readFileSync(ciWorkflow, "utf8") : "";
   const checks = [
     result(validation.ok && annotationValidation.ok, "github-actions-template-safe"),
     result(validation.checks.some((check) => check.name === "github-actions-fork-safe" && check.ok), "github-actions-fork-safe"),
@@ -770,7 +772,14 @@ function checkGithubActionsCi(root) {
     result(defaultWorkflow.includes('MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")'), "github-actions-model-env-forwarded"),
     result(defaultWorkflow.includes('MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")'), "github-actions-effort-env-forwarded"),
     result(defaultWorkflow.includes('${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}'), "github-actions-model-effort-quoted"),
-    result(defaultWorkflow.includes("retention-days: 5"), "github-actions-short-artifact-retention")
+    result(defaultWorkflow.includes("retention-days: 5"), "github-actions-short-artifact-retention"),
+    result(installedPluginOnly || fs.existsSync(ciWorkflow), "github-actions-ci-present"),
+    result(installedPluginOnly || (!ciText.includes("pull_request_target") && ciText.includes("pull_request:") && ciText.includes("push:")), "github-actions-ci-fork-safe"),
+    result(installedPluginOnly || ciText.includes("contents: read"), "github-actions-ci-minimal-permissions"),
+    result(installedPluginOnly || ciText.includes("node --check plugins/claude-for-codex/scripts/claude-companion.mjs"), "github-actions-ci-node-check"),
+    result(installedPluginOnly || ciText.includes("pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py"), "github-actions-ci-pytest"),
+    result(installedPluginOnly || ciText.includes("release-check --ci-simulate --json"), "github-actions-ci-release-check"),
+    result(installedPluginOnly || ciText.includes("git diff --check"), "github-actions-ci-whitespace")
   ];
   return checks;
 }
