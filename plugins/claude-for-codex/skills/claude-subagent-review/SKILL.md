@@ -44,6 +44,10 @@ User-facing examples:
 
 Internal routing procedure:
 - Classify the user's intent first, then invoke the narrowest Claude for Codex command that satisfies it.
+- If the user explicitly names Fable, Fable 5, or `claude-fable-5`, route with `--quality max` by default so the runtime can use capabilities detection (`best`, then `fable`, then `opus`). Use exact `--model fable` only when the user explicitly asks for an exact model flag or the local capabilities/status output advertises Fable support.
+- If the user asks for the strongest, top, best, max, 顶级, 最强, or 不要省成本 local Claude pass without naming Fable, route with `--quality max`; the runtime selects the strongest supported local model and uses Claude Code's native fallback-model only for supported availability failures.
+- Do not escalate routine "strict" or "deep" language directly to Fable; use `--quality strong` unless release, security, migration, multi-agent, SDK-subagent, large-diff, or explicit max signals justify `--quality max`.
+- Installed Stop hook / review-gate paths stay conservative: they do not auto-select Fable from env or auto scoring, and only manual `review-gate --quality max` can use top-model routing.
 - Use this skill only when a parent Codex turn delegates a Claude for Codex review or rescue command to exactly one Codex child.
 - Translate explicit strength, model, effort, backend, role, or background-job requests into argv tokens outside quoted `$ARGUMENTS`.
 - Keep Codex responsible for reading Claude output, judging whether findings are correct, and reconciling the final answer or implementation plan.

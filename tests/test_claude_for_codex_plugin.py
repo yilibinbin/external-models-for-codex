@@ -105,6 +105,7 @@ def run_fake_claude_review(
     command="review",
     branch_file_count=0,
     branch_lines_per_file=0,
+    extra_help=None,
 ):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -172,6 +173,15 @@ import time
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    marker = os.environ.get("HELP_PROBE_MARKER")
+    if marker:
+        pathlib.Path(marker).write_text("help-probed")
+    if os.environ.get("FAIL_ON_HELP") == "1":
+        print("unexpected help probe", file=sys.stderr)
+        raise SystemExit(23)
+    print(os.environ.get("FAKE_CLAUDE_HELP", "--model <model> alias opus sonnet --effort <level> --fallback-model <model> accepts a comma-separated list"))
+    raise SystemExit(0)
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 (capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
@@ -184,6 +194,8 @@ print(os.environ.get("FAKE_CLAUDE_STDOUT", "FAKE_CLAUDE_OK"))
     env = os.environ.copy()
     env["CAPTURE_DIR"] = str(capture_dir)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    if extra_help is not None:
+        env["FAKE_CLAUDE_HELP"] = extra_help
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(
@@ -2213,10 +2225,11 @@ def test_cancel_escalates_to_sigkill_for_sigterm_ignoring_child(tmp_path):
     started = subprocess.run([NODE, str(runtime), "review", "--background", "cancel-me"], cwd=repo, env=env, capture_output=True, text=True)
     assert started.returncode == 0, started.stderr
     job_id = json.loads(started.stdout)["job"]["id"]
-    for _ in range(30):
+    for _ in range(100):
         if pid_file.exists():
             break
         time.sleep(0.1)
+    assert pid_file.exists(), "fake Claude process did not start within 10 seconds"
     fake_pid = int(pid_file.read_text(encoding="utf8"))
     cancelled = subprocess.run([NODE, str(runtime), "cancel", job_id], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
     assert cancelled.returncode == 0, cancelled.stderr
@@ -2971,6 +2984,29 @@ export async function* query(input) {{
     return sdk_dir / "index.mjs", capture
 
 
+def write_fake_claude_cli(tmp_path, *, help_text="--model <model> alias opus sonnet --effort <level>"):
+    fake_cli_dir = tmp_path / "fake-claude-cli"
+    fake_cli_dir.mkdir(exist_ok=True)
+    fake_cli = fake_cli_dir / "claude"
+    fake_cli.write_text(
+        f"""#!/usr/bin/env python3
+import sys
+
+if sys.argv[1:] == ["--version"]:
+    print("claude fake")
+    raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    print({json.dumps(help_text)})
+    raise SystemExit(0)
+print("FAKE_CLAUDE_CLI_UNEXPECTED", file=sys.stderr)
+raise SystemExit(17)
+""",
+        encoding="utf8",
+    )
+    fake_cli.chmod(0o755)
+    return fake_cli
+
+
 def structured_review_payload(summary="structured sdk review ok", verdict="approve", findings=None):
     return {
         "verdict": verdict,
@@ -3053,6 +3089,15 @@ import time
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    marker = os.environ.get("HELP_PROBE_MARKER")
+    if marker:
+        pathlib.Path(marker).write_text("help-probed")
+    if os.environ.get("FAIL_ON_HELP") == "1":
+        print("unexpected help probe", file=sys.stderr)
+        raise SystemExit(23)
+    print(os.environ.get("FAKE_CLAUDE_HELP", "--model <model> alias opus sonnet --effort <level> --fallback-model <model> accepts a comma-separated list"))
+    raise SystemExit(0)
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
 (capture / "argv.json").write_text(json.dumps(sys.argv[1:]))
@@ -3077,7 +3122,16 @@ print("FAKE_CLAUDE_ADVERSARIAL_OK")
     return result, prompt, argv
 
 
-def run_fake_claude_multi_review(tmp_path, args, commit_head=False, fail_roles=None, extra_env=None):
+def run_fake_claude_multi_review(
+    tmp_path,
+    args,
+    commit_head=False,
+    fail_roles=None,
+    extra_env=None,
+    extra_help=None,
+    branch_file_count=0,
+    branch_lines_per_file=0,
+):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -3116,7 +3170,18 @@ def run_fake_claude_multi_review(tmp_path, args, commit_head=False, fail_roles=N
 
     if commit_head:
         (repo / "branch.txt").write_text("base\nbranch change\n")
+        for index in range(branch_file_count):
+            lines = "\n".join(f"branch {index} line {line}" for line in range(branch_lines_per_file))
+            (repo / f"branch-{index}.txt").write_text(f"base\n{lines}\n")
         subprocess.run(["git", "add", "branch.txt"], cwd=repo, check=True, capture_output=True, text=True)
+        if branch_file_count:
+            subprocess.run(
+                ["git", "add", *[f"branch-{index}.txt" for index in range(branch_file_count)]],
+                cwd=repo,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         subprocess.run(
             ["git", "commit", "-m", "branch change"],
             cwd=repo,
@@ -3140,6 +3205,15 @@ import time
 
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
+    raise SystemExit(0)
+if sys.argv[1:] == ["--help"]:
+    marker = os.environ.get("HELP_PROBE_MARKER")
+    if marker:
+        pathlib.Path(marker).write_text("help-probed")
+    if os.environ.get("FAIL_ON_HELP") == "1":
+        print("unexpected help probe", file=sys.stderr)
+        raise SystemExit(23)
+    print(os.environ.get("FAKE_CLAUDE_HELP", "--model <model> alias opus sonnet --effort <level> --fallback-model <model> accepts a comma-separated list"))
     raise SystemExit(0)
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
@@ -3170,6 +3244,8 @@ print(f"FAKE_CLAUDE_OK call {role}")
     if fail_roles:
         env["FAIL_ROLES"] = ",".join(fail_roles)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    if extra_help is not None:
+        env["FAKE_CLAUDE_HELP"] = extra_help
     if extra_env:
         env.update(extra_env)
     result = subprocess.run(
@@ -3279,6 +3355,30 @@ def test_multi_review_sdk_backend_rejects_fallback_model(tmp_path):
 
     result = subprocess.run(
         [NODE, str(runtime), "multi-review", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 2
+    assert "--fallback-model" in result.stderr
+    assert "CLI-only" in result.stderr or "unsupported for SDK backend" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "command_args",
+    [
+        ["review", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5"],
+        ["adversarial-review", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5"],
+        ["plan", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5", "make a plan"],
+        ["rescue", "--backend", "sdk", "--fallback-model", "claude-sonnet-4-5"],
+    ],
+)
+def test_prompt_commands_sdk_backend_reject_fallback_model(tmp_path, command_args):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+
+    result = subprocess.run(
+        [NODE, str(runtime), *command_args],
         cwd=tmp_path,
         capture_output=True,
         text=True,
@@ -3795,7 +3895,7 @@ def test_adversarial_review_parallel_rejects_json_contract(tmp_path):
     assert prompt == ""
 
 
-def prepare_gate_repo(tmp_path, *, with_change=True):
+def prepare_gate_repo(tmp_path, *, with_change=True, extra_help=None):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
     fake_bin = tmp_path / "bin"
@@ -3841,7 +3941,13 @@ if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
 if sys.argv[1:] == ["--help"]:
-    print("--print --permission-mode --tools --allowedTools --disallowedTools --mcp-config --strict-mcp-config --model --effort --output-format")
+    marker = os.environ.get("HELP_PROBE_MARKER")
+    if marker:
+        pathlib.Path(marker).write_text("help-probed")
+    if os.environ.get("FAIL_ON_HELP") == "1":
+        print("unexpected help probe", file=sys.stderr)
+        raise SystemExit(23)
+    print(os.environ.get("FAKE_CLAUDE_HELP", "--print --permission-mode --tools --allowedTools --disallowedTools --mcp-config --strict-mcp-config --model <model> alias opus sonnet --effort <level> --fallback-model <model> accepts a comma-separated list --output-format"))
     raise SystemExit(0)
 
 capture = pathlib.Path(os.environ["CAPTURE_DIR"])
@@ -3882,18 +3988,38 @@ print(f"ALLOW: no blocking issue from {role}")
     env["CAPTURE_DIR"] = str(capture_dir)
     env["CLAUDE_PLUGIN_DATA"] = str(plugin_data)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+    if extra_help is not None:
+        env["FAKE_CLAUDE_HELP"] = extra_help
     return runtime, repo, capture_dir, env
 
 
-def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=None, extra_env=None, args=None):
-    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path, with_change=with_change)
+def run_fake_review_gate(
+    tmp_path,
+    *,
+    enable=True,
+    with_change=True,
+    hook_input=None,
+    extra_env=None,
+    extra_help=None,
+    setup_extra_env=None,
+    gate_extra_env=None,
+    args=None,
+):
+    runtime, repo, capture_dir, env = prepare_gate_repo(tmp_path, with_change=with_change, extra_help=extra_help)
+    setup_env = env.copy()
+    gate_env = env.copy()
+    # Keep extra_env gate-only so setup's capability report cannot pollute hook probe sentinels.
+    if setup_extra_env:
+        setup_env.update(setup_extra_env)
     if extra_env:
-        env.update(extra_env)
+        gate_env.update(extra_env)
+    if gate_extra_env:
+        gate_env.update(gate_extra_env)
     if enable:
         setup = subprocess.run(
             ["node", str(runtime), "setup", "--enable-review-gate", "--review-gate-mode", "multi-role"],
             cwd=repo,
-            env=env,
+            env=setup_env,
             capture_output=True,
             text=True,
         )
@@ -3902,7 +4028,7 @@ def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=
     result = subprocess.run(
         [NODE, str(runtime), "review-gate", *(args or [])],
         cwd=repo,
-        env=env,
+        env=gate_env,
         input=input_text,
         capture_output=True,
         text=True,
@@ -3912,6 +4038,13 @@ def run_fake_review_gate(tmp_path, *, enable=True, with_change=True, hook_input=
         for path in sorted(capture_dir.glob("prompt-*.txt"), key=lambda p: int(p.stem.split("-")[1]))
     ]
     return result, prompts, capture_dir
+
+
+def review_gate_argvs(capture_dir):
+    return [
+        json.loads(path.read_text())
+        for path in sorted(capture_dir.glob("argv-*.json"), key=lambda p: int(p.stem.split("-")[1]))
+    ]
 
 
 def parse_skill_frontmatter(text):
@@ -3980,6 +4113,39 @@ def test_claude_docs_explain_natural_language_routing():
         text = (ROOT / relative_path).read_text(encoding="utf8")
         for phrase in phrases:
             assert phrase in text, f"{phrase!r} missing from {relative_path}"
+
+
+def test_fable_natural_language_routing_documented():
+    skill_files = [
+        PLUGIN / "skills" / "claude-review" / "SKILL.md",
+        PLUGIN / "skills" / "claude-multi-review" / "SKILL.md",
+        PLUGIN / "skills" / "claude-adversarial-review" / "SKILL.md",
+        PLUGIN / "skills" / "claude-plan" / "SKILL.md",
+        PLUGIN / "skills" / "claude-rescue" / "SKILL.md",
+        PLUGIN / "skills" / "claude-review-gate" / "SKILL.md",
+        PLUGIN / "skills" / "claude-subagent-review" / "SKILL.md",
+    ]
+    for path in skill_files:
+        text = path.read_text(encoding="utf8")
+        assert "Fable" in text
+        assert "--quality max" in text
+        assert "capabilities" in text or "能力" in text
+        assert "Stop hook" in text or "review-gate" in text or "Stop 钩子" in text
+
+
+def test_fable_policy_documented_in_readmes():
+    readmes = [
+        PLUGIN / "README.md",
+        ROOT / "README.md",
+        ROOT / "docs" / "README.en.md",
+        ROOT / "docs" / "README.zh-CN.md",
+    ]
+    for path in readmes:
+        text = path.read_text(encoding="utf8")
+        assert "Fable" in text
+        assert "best" in text
+        assert "fallback" in text.lower() or "回退" in text
+        assert "Stop hook" in text or "Stop 钩子" in text
 
 
 def test_plugin_manifest_is_valid():
@@ -5199,6 +5365,60 @@ def test_review_gate_explicit_max_quality_can_escalate_manual_gate(tmp_path):
         assert argv[argv.index("--effort") + 1] == "max"
 
 
+def test_review_gate_auto_does_not_select_fable_for_stop_hook(tmp_path):
+    result, _prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    argvs = review_gate_argvs(capture_dir)
+    assert argvs
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "sonnet"
+        assert argv[argv.index("--effort") + 1] == "high"
+        assert "--fallback-model" not in argv
+
+
+def test_review_gate_auto_does_not_probe_top_model_help(tmp_path):
+    marker = tmp_path / "help-probed"
+    result, _prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        extra_env={"CLAUDE_FOR_CODEX_QUALITY": "max"},
+        gate_extra_env={
+            "FAIL_ON_HELP": "1",
+            "HELP_PROBE_MARKER": str(marker),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    assert not marker.exists()
+    argvs = review_gate_argvs(capture_dir)
+    assert argvs
+    for argv in argvs:
+        assert "--fallback-model" not in argv
+
+
+def test_review_gate_manual_max_can_select_top_model(tmp_path):
+    result, _prompts, capture_dir = run_fake_review_gate(
+        tmp_path,
+        args=["--quality", "max"],
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == ""
+    argvs = review_gate_argvs(capture_dir)
+    assert argvs
+    for argv in argvs:
+        assert argv[argv.index("--model") + 1] == "fable"
+        assert argv[argv.index("--effort") + 1] == "max"
+        assert argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
+
+
 def test_review_gate_invalid_quality_env_fails_open_without_claude(tmp_path):
     result, prompts, _capture_dir = run_fake_review_gate(
         tmp_path,
@@ -5288,6 +5508,236 @@ def test_review_quality_max_forwards_max_effort_without_ultrareview(tmp_path):
     assert argv[argv.index("--model") + 1] == "opus"
     assert argv[argv.index("--effort") + 1] == "max"
     assert "ultrareview" not in argv
+
+
+def test_review_quality_max_prefers_fable_when_supported(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
+    assert "ultrareview" not in argv
+
+
+def test_review_quality_max_prefers_best_before_fable_when_supported(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="--model <model> alias best fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "best"
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
+
+
+def test_review_quality_max_falls_back_to_opus_without_top_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="--model <model> alias opus sonnet --fallback-model <model>",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert "--fallback-model" not in argv
+
+
+def test_review_quality_max_does_not_treat_best_prose_as_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="Use best practices for reviews. --model <model> alias opus sonnet --fallback-model <model>",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert "--fallback-model" not in argv
+
+
+def test_review_quality_max_does_not_treat_fable_prose_as_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="Tell a fable about code review. --model <model> alias opus sonnet --fallback-model <model>",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "opus"
+    assert "--fallback-model" not in argv
+
+
+def test_review_quality_max_preserves_user_fallback_model(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--fallback-model", "sonnet", "--scope", "working-tree"],
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--fallback-model") + 1] == "sonnet"
+    assert argv.count("--fallback-model") == 1
+
+
+def test_quality_max_preserves_user_fallback_model(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--quality", "max", "--fallback-model", "sonnet", "--roles", "correctness", "--scope", "working-tree"],
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(argvs) == 1
+    argv = argvs[0]
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--fallback-model") + 1] == "sonnet"
+    assert argv.count("--fallback-model") == 1
+
+
+def test_quality_max_does_not_emit_fallback_without_cli_support(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="--model <model> alias fable opus sonnet",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert "--fallback-model" not in argv
+
+
+def test_quality_max_uses_comma_separated_native_fallback_when_help_mentions_it(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
+
+
+def test_quality_max_uses_custom_comma_native_fallback_when_configured(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK": "sonnet,opus"},
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--fallback-model") + 1] == "sonnet,opus"
+
+
+def test_quality_max_uses_single_native_fallback_when_help_lacks_comma_support(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model>",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--fallback-model") + 1] == "opus"
+
+
+def test_quality_max_uses_first_custom_fallback_without_comma_support(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK": "sonnet,opus"},
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model>",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--fallback-model") + 1] == "sonnet"
+
+
+def test_quality_max_explicit_model_does_not_probe_help(tmp_path):
+    marker = tmp_path / "help-probed"
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--model", "sonnet", "--scope", "working-tree"],
+        extra_env={
+            "FAIL_ON_HELP": "1",
+            "HELP_PROBE_MARKER": str(marker),
+        },
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "sonnet"
+    assert "--fallback-model" not in argv
+    assert not marker.exists()
+
+
+def quality_policy_probe(capabilities, env=None):
+    module_uri = (PLUGIN / "scripts" / "lib" / "quality-policy.mjs").as_uri()
+    script = f"""
+import {{ resolveQualityPolicy }} from {json.dumps(module_uri)};
+const policy = resolveQualityPolicy('review', {{ quality: 'max' }}, {json.dumps(env or {})}, {{}}, {json.dumps(capabilities)});
+console.log(JSON.stringify(policy));
+"""
+    result = subprocess.run(
+        [NODE, "--input-type=module", "-e", script],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_quality_policy_max_prefers_fable_when_supported():
+    policy = quality_policy_probe({"fable": True, "opus": True, "sonnet": True})
+    assert policy["model"] == "fable"
+    assert policy["effort"] == "max"
+    assert policy["topModelProfile"] is True
+    assert policy["topModelSelected"] is True
+    assert policy["fallbackModel"] == "opus,sonnet"
+
+
+def test_quality_policy_max_prefers_best_before_fable_when_supported():
+    policy = quality_policy_probe({"best": True, "fable": True, "opus": True, "sonnet": True})
+    assert policy["model"] == "best"
+    assert policy["effort"] == "max"
+    assert policy["topModelProfile"] is True
+    assert policy["topModelSelected"] is True
+    assert policy["fallbackModel"] == "opus,sonnet"
+
+
+def test_quality_policy_max_falls_back_to_opus_without_top_alias():
+    policy = quality_policy_probe({"opus": True, "sonnet": True})
+    assert policy["model"] == "opus"
+    assert policy["effort"] == "max"
+    assert policy["topModelProfile"] is True
+    assert policy["topModelSelected"] is False
+    assert policy["fallbackModel"] == ""
+
+
+def test_quality_policy_top_model_fallback_env_applies_to_capabilities():
+    policy = quality_policy_probe(
+        {"fable": True, "opus": True, "sonnet": True},
+        {"CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK": "sonnet,opus"},
+    )
+    assert policy["model"] == "fable"
+    assert policy["fallbackModel"] == "sonnet,opus"
+
+
+def test_quality_policy_top_model_opus_env_suppresses_self_fallback():
+    policy = quality_policy_probe(
+        {"fable": True, "opus": True, "sonnet": True},
+        {"CLAUDE_FOR_CODEX_TOP_MODEL": "opus"},
+    )
+    assert policy["model"] == "opus"
+    assert policy["topModelSelected"] is False
+    assert policy["fallbackModel"] == ""
 
 
 def test_quality_preserves_explicit_model_and_effort_overrides(tmp_path):
@@ -5463,6 +5913,24 @@ def test_multi_review_quality_auto_uses_strong_for_risky_roles(tmp_path):
     for argv in argvs:
         assert argv[argv.index("--model") + 1] == "opus"
         assert argv[argv.index("--effort") + 1] == "xhigh"
+
+
+def test_multi_review_quality_auto_can_escalate_to_top_model_for_large_diff(tmp_path):
+    result, _prompts, argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--quality", "auto", "--roles", "correctness", "--scope", "branch", "--base", "HEAD~1"],
+        commit_head=True,
+        branch_file_count=15,
+        branch_lines_per_file=100,
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert len(argvs) == 1
+    argv = argvs[0]
+    assert argv[argv.index("--model") + 1] == "fable"
+    assert argv[argv.index("--effort") + 1] == "max"
+    assert argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
 
 
 def test_multi_review_quality_fast_can_be_requested_explicitly(tmp_path):
@@ -5715,8 +6183,13 @@ def test_capabilities_reports_quality_policy_metadata(tmp_path):
     payload = json.loads(result.stdout)
     policy = payload["qualityPolicy"]
     assert policy["defaultQualityEnv"] == "CLAUDE_FOR_CODEX_QUALITY"
+    assert policy["topModelEnv"] == "CLAUDE_FOR_CODEX_TOP_MODEL"
+    assert policy["topModelFallbackEnv"] == "CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK"
+    assert policy["defaultTopModelFallback"] == "opus,sonnet"
     assert policy["qualities"] == ["auto", "fast", "standard", "strong", "max"]
     assert policy["efforts"] == ["low", "medium", "high", "xhigh", "max"]
+    assert "modelAliases" in policy
+    assert "fallbackModelList" in policy
     assert policy["ultracodeEffortSupported"] is False
     assert policy["ultrareviewAutomatic"] is False
 
@@ -6121,6 +6594,8 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
             "correctness,security",
             "--backend",
             "sdk",
+            "--quality",
+            "strong",
             "--scope",
             "working-tree",
         ],
@@ -6252,6 +6727,181 @@ def test_sdk_subagents_receive_quality_resolved_opus_model(tmp_path):
     assert agents["cfc_security"]["model"] == "opus"
     assert agents["cfc_correctness"]["effort"] == "xhigh"
     assert agents["cfc_security"]["effort"] == "xhigh"
+
+
+def test_sdk_subagents_receive_fable_for_max_quality(tmp_path):
+    structured = {
+        "role_results": [
+            {
+                "agent": "cfc_correctness",
+                "role": "correctness",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("correctness ok"),
+                },
+            },
+            {
+                "agent": "cfc_security",
+                "role": "security",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("security ok"),
+                },
+            },
+        ]
+    }
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout=json.dumps(structured), structured_output=structured)
+    fake_claude = write_fake_claude_cli(
+        tmp_path,
+        help_text="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_entry)
+    env["CLAUDE_FOR_CODEX_TOP_MODEL"] = "fable"
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+            "--native-structured",
+            "--json",
+            "--roles",
+            "correctness,security",
+            "--quality",
+            "max",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "fable"
+    assert query["agents"]["cfc_correctness"]["model"] == "fable"
+    assert query["agents"]["cfc_security"]["model"] == "fable"
+    assert query["agents"]["cfc_correctness"]["effort"] == "max"
+    assert query["agents"]["cfc_security"]["effort"] == "max"
+    assert "--fallback-model" not in json.dumps(query)
+
+
+def test_sdk_subagents_quality_max_does_not_inherit_cli_top_alias_without_env(tmp_path):
+    structured = {
+        "role_results": [
+            {
+                "agent": "cfc_correctness",
+                "role": "correctness",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("correctness ok"),
+                },
+            },
+        ]
+    }
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout=json.dumps(structured), structured_output=structured)
+    fake_claude = write_fake_claude_cli(
+        tmp_path,
+        help_text="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_entry)
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+            "--native-structured",
+            "--json",
+            "--roles",
+            "correctness",
+            "--quality",
+            "max",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "opus"
+    assert query["agents"]["cfc_correctness"]["model"] == "opus"
+    assert query["agents"]["cfc_correctness"]["effort"] == "max"
+    assert "--fallback-model" not in json.dumps(query)
+
+
+def test_sdk_subagents_preserve_full_fable_model_id(tmp_path):
+    structured = {
+        "role_results": [
+            {
+                "agent": "cfc_correctness",
+                "role": "correctness",
+                "result": {
+                    "status": "ok",
+                    "review": structured_review_payload("ok"),
+                },
+            },
+        ]
+    }
+    sdk_entry, capture = write_fake_claude_sdk(tmp_path, stdout=json.dumps(structured), structured_output=structured)
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_entry)
+
+    result = subprocess.run(
+        [
+            NODE,
+            str(runtime),
+            "multi-review",
+            "--backend",
+            "sdk",
+            "--agent-team",
+            "sdk-subagents",
+            "--native-structured",
+            "--json",
+            "--roles",
+            "correctness",
+            "--model",
+            "claude-fable-5",
+            "--effort",
+            "max",
+        ],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    query = json.loads((capture / "query.json").read_text())
+    assert query["model"] == "claude-fable-5"
+    assert query["agents"]["cfc_correctness"]["model"] == "claude-fable-5"
+    assert query["agents"]["cfc_correctness"]["effort"] == "max"
 
 
 def test_sdk_native_structured_output_passes_schema(tmp_path):
@@ -7812,6 +8462,26 @@ def test_github_actions_explicit_model_and_effort_are_forwarded_to_review_comman
     assert '${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}' in text
 
 
+def test_github_actions_explicit_fable_model_is_forwarded(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    result = subprocess.run(
+        [NODE, str(runtime), "github-actions", "render", "--model", "fable", "--effort", "max"],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    text = result.stdout
+    assert 'CLAUDE_FOR_CODEX_MODEL: "fable"' in text
+    assert 'CLAUDE_FOR_CODEX_EFFORT: "max"' in text
+    assert 'MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")' in text
+    assert 'MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")' in text
+
+
 def test_github_actions_default_keeps_model_and_effort_empty_but_wired(tmp_path):
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     repo = tmp_path / "repo"
@@ -8123,6 +8793,9 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-model-env-forwarded"]["ok"] is True
     assert checks["github-actions-effort-env-forwarded"]["ok"] is True
     assert checks["github-actions-model-effort-quoted"]["ok"] is True
+    assert checks["quality-policy-assets"]["ok"] is True
+    assert checks["quality-top-model-policy"]["ok"] is True
+    assert checks["quality-no-concrete-model-defaults"]["ok"] is True
     assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.16.0"
 
 

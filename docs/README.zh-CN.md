@@ -170,7 +170,20 @@ Claude 原生 SDK 模式必须显式开启，并且在真实 SDK subagent smoke 
 
 SDK native subagent 结构化审阅使用嵌套的逐角色 review 对象，并且仍然是显式启用路径。默认审阅后端不变。
 
-Claude for Codex 支持 `--quality auto|fast|standard|strong|max`。`auto` 是默认策略，会根据命令类型、JSON 输出、角色数量、风险角色、backend、SDK subagent team、语义上下文和 diff 大小评分。`fast` 映射到 `sonnet` 加 low effort，`standard` 映射到 `sonnet` 加 high effort，`strong` 映射到 `opus` 加 xhigh effort，`max` 映射到 `opus` 加 max effort。显式传入的 `--model` 和 `--effort` 永远优先。策略使用 Claude Code alias，而不是 `claude-opus-4-8` 这类具体模型 id；不会把 `ultracode` 作为 `--effort` 传出，`ultrareview` 仍然是单独的显式费用确认命令。`review-gate` 默认最高保持 `standard`，除非用户手动显式运行 `review-gate --quality strong|max`。
+Claude for Codex 支持 `--quality auto|fast|standard|strong|max`。`auto` 是默认策略，会根据命令类型、JSON 输出、角色数量、风险角色、backend、SDK subagent team、语义上下文和 diff 大小评分。`fast` 映射到 `sonnet` 加 low effort，`standard` 映射到 `sonnet` 加 high effort，`strong` 映射到 `opus` 加 xhigh effort，`max` 映射到当前 Claude Code 暴露的最强本地 alias 加 max effort，优先 `best`，其次 `fable`，否则使用 `opus`。显式传入的 `--model` 和 `--effort` 永远优先。策略使用 Claude Code alias，而不是 `claude-opus-4-8` 这类具体模型 id；不会把 `ultracode` 作为 `--effort` 传出，`ultrareview` 仍然是单独的显式费用确认命令。`review-gate` 默认最高保持 `standard`，除非用户手动显式运行 `review-gate --quality strong|max`。
+
+### Fable / 顶级模型路由
+
+Claude for Codex 将 `--quality max` 视为最强本地 Claude 档位。若当前 Claude Code 暴露顶级模型别名，运行时优先选择 `best`，其次选择 `fable`，否则回退到 `opus`。当 CLI backend 选择顶级模型且支持 `--fallback-model` 时，插件会自动追加 Claude Code 原生 fallback，除非用户已经显式提供 fallback。只有当本机 CLI help 明确支持 comma-separated fallback list 时才使用 `--fallback-model opus,sonnet`；否则使用 `--fallback-model opus`。这个 fallback 只覆盖 Claude Code 支持的模型不可用、过载或服务端错误场景，不覆盖认证、额度、账单、限流、网络或请求过大问题。
+
+显式模型选择永远优先：
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs review \
+  --model fable --effort max --scope branch --base origin/main --json
+```
+
+自然语言只有在用户明确提到 Fable、顶级、最强、max、不要省成本，或自动评分达到极高风险时才进入 `--quality max` 档；CLI runtime 再根据本机能力选择 `best`、`fable` 或 `opus`。普通“深度/严格”审阅仍保持 `--quality strong`，也就是 Opus。安装后的 Stop 钩子保持保守，不会自动使用 Fable。SDK backend 不会根据 CLI help 推断顶级模型可用性；如果希望 SDK subagents 使用顶级 alias，请显式传 `--model` 或设置 `CLAUDE_FOR_CODEX_TOP_MODEL`。
 
 `ultrareview` 会转发到 Claude 原生 cloud ultrareview 命令。它不会被 hooks 或默认审阅路径自动调用；因为可能使用远端/cloud 执行并消耗 usage credits，所以必须传 `--confirm-cost`，或设置 `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1`，否则运行时会拒绝执行。
 

@@ -259,6 +259,7 @@ function checkNativeReleaseAssets(root) {
   const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
+  const nativeReview = fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "";
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
   const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
   const hookWrapper = fs.readFileSync(path.join(pluginRoot, "hooks", "claude-review-gate.mjs"), "utf8");
@@ -342,9 +343,25 @@ function checkNativeReleaseAssets(root) {
       fs.existsSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs")) &&
         sourceArrayIncludes(qualityPolicy, "VALID_QUALITIES", ["auto", "fast", "standard", "strong", "max"]) &&
         sourceArrayIncludes(qualityPolicy, "VALID_EFFORTS", ["low", "medium", "high", "xhigh", "max"]) &&
+        sourceArrayIncludes(qualityPolicy, "VALID_MODEL_ALIASES", ["haiku", "sonnet", "opus", "fable", "best", "inherit"]) &&
         companion.includes("--quality auto|fast|standard|strong|max"),
       "quality-policy-assets",
       "--quality auto|fast|standard|strong|max"
+    ),
+    result(
+      qualityPolicy.includes("resolveTopModel") &&
+        qualityPolicy.includes("DEFAULT_TOP_MODEL_FALLBACK") &&
+        qualityPolicy.includes('model: "top"') &&
+        qualityPolicy.includes("topModelProfile") &&
+        qualityPolicy.includes("topModelSelected") &&
+        companion.includes("modelAliasAdvertised") &&
+        companion.includes("modelAliasCapabilities") &&
+        companion.includes("fallbackModelCapabilities") &&
+        companion.includes("fallbackModel") &&
+        companion.includes("fallbackModelList") &&
+        (nativeReview.includes("claude-fable-5") || nativeReview.includes("CLAUDE_MODEL_ID_PATTERN")),
+      "quality-top-model-policy",
+      "max quality is capability-aware and SDK subagents preserve safe Claude model ids"
     ),
     result(
       !qualityPolicy.includes("ultracode") &&
@@ -375,6 +392,7 @@ function checkNativeReleaseAssets(root) {
     ),
     result(
       !/claude-(opus|sonnet|haiku)-\d/i.test(qualityPolicy) &&
+        !/claude-fable-\d/i.test(qualityPolicy) &&
         sourceHasAliasProfile(qualityPolicy, "opus", "xhigh") &&
         sourceHasAliasProfile(qualityPolicy, "sonnet", "high"),
       "quality-no-concrete-model-defaults",

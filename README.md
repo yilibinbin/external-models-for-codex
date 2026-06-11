@@ -91,7 +91,20 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs setup
 
 These are skills-and-hook plugins, not MCP/app tool plugins. It is expected that `tool_search` will not expose callable `claude-for-codex`, `gemini-for-codex`, or `antigravity-for-codex` tools. Codex should route through the provider skills such as `claude-for-codex:*`, `gemini-for-codex:*`, and `antigravity-for-codex:*`.
 
-Claude for Codex supports `--quality auto|fast|standard|strong|max`. The policy uses Claude Code aliases (`sonnet`, `opus`) plus valid effort values (`low`, `medium`, `high`, `xhigh`, `max`) instead of concrete model ids, so future Claude Code alias updates do not require a plugin change. Explicit `--model` and `--effort` override quality. `ultracode` is not emitted as an effort value, and `claude-ultrareview` remains explicit-cost only.
+Claude for Codex supports `--quality auto|fast|standard|strong|max`. The policy uses Claude Code aliases (`sonnet`, `opus`, `fable`, `best`) plus valid effort values (`low`, `medium`, `high`, `xhigh`, `max`) instead of concrete model ids, so future Claude Code alias updates do not require a plugin change. Explicit `--model` and `--effort` override quality. `ultracode` is not emitted as an effort value, and `claude-ultrareview` remains explicit-cost only.
+
+### Fable / top-model routing
+
+Claude for Codex treats `--quality max` as the strongest local Claude tier. On Claude Code versions that advertise a top model alias, the runtime prefers `best`, then `fable`, then falls back to `opus`. When a top model is selected through the CLI backend and `--fallback-model` is available, the plugin adds Claude Code's native fallback unless you supplied your own fallback. It uses `--fallback-model opus,sonnet` only when the installed CLI help advertises comma-separated fallback lists; otherwise it uses `--fallback-model opus`. This fallback only handles Claude Code-supported model unavailable, overload, or server-side model errors; it does not handle auth, quota, billing, rate-limit, network, or request-size failures.
+
+Explicit model choices always win:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs review \
+  --model fable --effort max --scope branch --base origin/main --json
+```
+
+Natural language routing uses Fable only for explicit Fable/top/max requests or very high-risk automatic scores. Ordinary deep review remains `--quality strong`, which maps to Opus. Installed Stop hooks stay conservative and do not automatically use Fable. SDK backend runs do not infer top-model availability from CLI help; use explicit `--model` or `CLAUDE_FOR_CODEX_TOP_MODEL` when you want SDK subagents to use a top alias.
 
 ## Stop Review Gate
 
