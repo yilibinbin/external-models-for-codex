@@ -45,6 +45,8 @@ import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib/mailbox.mjs";
 import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
+import { doctorReport, renderDoctorText } from "./lib/doctor.mjs";
+import { hookCompatibilityReport } from "./lib/hook-compat.mjs";
 import { latestReport, listReports, reportFromResult, safeWriteReport } from "./lib/reports.mjs";
 import { runReleaseCheck } from "./lib/release-check.mjs";
 import {
@@ -142,7 +144,7 @@ import {
   workingTreeFingerprintMatches
 } from "./lib/worktree-fingerprint.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
@@ -2394,7 +2396,8 @@ function hookDiagnostics() {
     codexConfigPath: configPath,
     codexConfigChecked,
     codexConfigError,
-    trustedInCodexConfig: hookTrustedInCodexConfig(configText)
+    trustedInCodexConfig: hookTrustedInCodexConfig(configText),
+    compatibility: hookCompatibilityReport({ installedEvents: events })
   };
 }
 
@@ -2410,27 +2413,31 @@ function mcpDiagnostics() {
 
 function buildSetupReport(actionsTaken = []) {
   const cwd = process.cwd();
-  const stateReport = readStateReport(cwd);
-  const config = stateReport.state.config;
   return {
     node: process.version,
     claudeAvailable: hasClaude(),
     claudeCommand: claudeCommand(),
     gitAvailable: hasBinary("git"),
     cwd,
-    reviewGate: {
-      enabled: Boolean(config.reviewGateEnabled),
-      mode: config.reviewGateMode,
-      stateFile: stateFileForCwd(cwd),
-      stateReadable: stateReport.readable,
-      stateError: stateReport.error,
-      bypassEnv: REVIEW_GATE_ENV
-    },
+    reviewGate: reviewGateDiagnostics(cwd),
     jobCommands: ["jobs", "result", "cancel", "rescue"],
     hooks: hookDiagnostics(),
     mcp: mcpDiagnostics(),
     capabilities: buildCapabilitiesReport(),
     actionsTaken
+  };
+}
+
+function reviewGateDiagnostics(cwd = process.cwd()) {
+  const stateReport = readStateReport(cwd);
+  const config = stateReport.state.config;
+  return {
+    enabled: Boolean(config.reviewGateEnabled),
+    mode: config.reviewGateMode,
+    stateFile: stateFileForCwd(cwd),
+    stateReadable: stateReport.readable,
+    stateError: stateReport.error,
+    bypassEnv: REVIEW_GATE_ENV
   };
 }
 
@@ -2483,6 +2490,27 @@ function printStatus() {
 
 function printCapabilities() {
   process.stdout.write(`${JSON.stringify(buildCapabilitiesReport({ probeNativeSubcommands: true }), null, 2)}\n`);
+}
+
+function printDoctor(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const jsonOutput = tokens.includes("--json");
+  const unknown = tokens.find((token) => token !== "--json");
+  if (unknown) {
+    console.error(`Unknown doctor option "${unknown}".`);
+    process.exit(2);
+  }
+  const cwd = process.cwd();
+  const report = doctorReport({
+    cwd,
+    pluginRoot: pluginRoot(),
+    env: process.env,
+    capabilities: buildCapabilitiesReport(),
+    state: {
+      reviewGate: reviewGateDiagnostics(cwd)
+    }
+  });
+  process.stdout.write(jsonOutput ? `${JSON.stringify(report, null, 2)}\n` : `${renderDoctorText(report)}\n`);
 }
 
 function recordCommandReport(command, args, result, startedAt, parsed, roleResults = []) {
@@ -4232,6 +4260,9 @@ switch (command) {
     break;
   case "capabilities":
     printCapabilities();
+    break;
+  case "doctor":
+    printDoctor(rawArgs);
     break;
   case "review":
     await runClaudeTask("review", rawArgs);

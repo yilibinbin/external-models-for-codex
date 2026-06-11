@@ -4252,7 +4252,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job", "subagent-command"]:
+    for command in ["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job", "subagent-command"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -6320,6 +6320,61 @@ def test_setup_reports_lifecycle_hook_support_and_job_commands(tmp_path):
     assert "semanticProviders" in payload["capabilities"]
     assert payload["hooks"]["manifest"] == "hooks/hooks.json"
     assert payload["hooks"]["events"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+    assert payload["hooks"]["compatibility"]["codexSubset"] is True
+    assert "PreToolUse" in payload["hooks"]["compatibility"]["knownClaudeEvents"]
+
+
+def test_hook_compat_reports_codex_subset_without_mutating_hooks_json():
+    module_uri = (PLUGIN / "scripts" / "lib" / "hook-compat.mjs").as_uri()
+    code = f"""
+import {{ hookCompatibilityReport }} from {json.dumps(module_uri)};
+const report = hookCompatibilityReport({{
+  installedEvents: ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop']
+}});
+if (!report.supportedEvents.includes('Stop')) throw new Error('Stop missing');
+if (!report.knownClaudeEvents.includes('PreToolUse')) throw new Error('Claude known event missing');
+if (report.unsupportedInstalledEvents.length) throw new Error('unexpected unsupported installed event');
+if (!report.codexSubset) throw new Error('codexSubset should be true');
+if (report.decisionShapes.Stop.shape !== 'top-level-decision') throw new Error('Stop shape mismatch');
+if (report.decisionShapes.PreToolUse.shape !== 'hook-specific-permission') throw new Error('PreToolUse shape mismatch');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_doctor_json_is_cheap_and_reports_core_surfaces(tmp_path):
+    claude = tmp_path / "claude"
+    claude.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"--version\" ]]; then echo '2.1.173 (Claude Code)'; exit 0; fi\n"
+        "if [[ \"$1\" == \"--help\" ]]; then echo '--model sonnet opus fable best opusplan opus[1m] sonnet[1m] --fallback-model comma-separated --effort low medium high xhigh max'; exit 0; fi\n"
+        "echo 'doctor should not run a prompt' >&2\n"
+        "exit 42\n",
+        encoding="utf8",
+    )
+    claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(claude)
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "claude-companion.mjs"), "doctor", "--json"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["checks"]["claude"]["available"] is True
+    assert payload["checks"]["modelAliases"]["opusplan"] is True
+    assert payload["checks"]["modelAliases"]["opus1m"] is True
+    assert payload["checks"]["modelAliases"]["sonnet1m"] is True
+    assert payload["checks"]["fallbackModel"]["supported"] is True
+    assert payload["checks"]["hooks"]["codexSubset"] is True
+    assert payload["checks"]["hookFiles"]["hooksJson"] is True
+    assert "semanticProviders" in payload["checks"]
+    assert "doctor should not run a prompt" not in result.stderr
 
 
 def test_capabilities_reports_quality_policy_metadata(tmp_path):
@@ -8246,6 +8301,8 @@ def test_release_check_knows_claude_0160_native_assets():
     assert checks["manifest-asset-logo"]["ok"] is True
     assert checks["manifest-asset-screenshots.0"]["ok"] is True
     assert checks["manifest-asset-screenshots.1"]["ok"] is True
+    assert checks["hook-compat-report"]["ok"] is True
+    assert checks["doctor-command"]["ok"] is True
     assert checks["native-review-helper"]["ok"] is True
     assert checks["ultrareview-skill"]["ok"] is True
     assert checks["native-cli-flags"]["ok"] is True

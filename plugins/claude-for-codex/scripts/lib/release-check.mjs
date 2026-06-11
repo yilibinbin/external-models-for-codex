@@ -262,6 +262,8 @@ function checkNativeReleaseAssets(root) {
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
   const nativeReview = fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "";
+  const hookCompat = path.join(pluginRoot, "scripts", "lib", "hook-compat.mjs");
+  const doctor = path.join(pluginRoot, "scripts", "lib", "doctor.mjs");
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
   const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
   const hookWrapper = fs.readFileSync(path.join(pluginRoot, "hooks", "claude-review-gate.mjs"), "utf8");
@@ -293,6 +295,21 @@ function checkNativeReleaseAssets(root) {
   return [
     ...manifestAssetChecks(pluginRoot),
     result(fs.existsSync(nativeHelper), "native-review-helper", path.relative(pluginRoot, nativeHelper)),
+    result(
+      fs.existsSync(hookCompat) &&
+        companion.includes("hookCompatibilityReport") &&
+        fs.readFileSync(hookCompat, "utf8").includes("CODEX_DISCOVERED_HOOK_EVENTS"),
+      "hook-compat-report",
+      "hook compatibility report preserves Codex-discovered hook subset"
+    ),
+    result(
+      fs.existsSync(doctor) &&
+        companion.includes('"doctor"') &&
+        companion.includes("doctorReport") &&
+        fs.readFileSync(doctor, "utf8").includes("semanticCapabilities"),
+      "doctor-command",
+      "doctor --json reports cheap diagnostics without Claude prompt execution"
+    ),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
     result(
       companion.includes("--agent-team") &&
