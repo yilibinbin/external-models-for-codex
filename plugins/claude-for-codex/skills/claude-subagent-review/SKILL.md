@@ -57,6 +57,7 @@ Child rules:
 - The child must not inspect or reinterpret the repository before execution.
 - The child must not replace it with raw claude, `claude -p`, or any hand-built Claude CLI command.
 - The child reports exit status, stdout, and stderr to the parent.
+- The child preserves plugin output as-is, including compact outcome classification metadata; the parent decides how to interpret refusal, fallback, timeout, or permission-compatibility categories.
 - The child does not apply fixes, edit files, stage changes, or reinterpret Claude output as implementation instructions.
 
 Background jobs:

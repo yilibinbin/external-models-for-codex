@@ -16,6 +16,7 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" jobs "$ARGUMENTS"
 Rules:
 - Treat this as job status only.
 - Do not confuse it with the runtime `status` diagnostic command, which checks live Claude agents and setup health.
+- For cheap setup, PATH, SDK, hook compatibility, review-gate, state-file, or semantic-provider health checks, run `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" doctor --json` instead of starting a review.
 - If no jobs are listed, say there are no tracked Claude jobs for this workspace.
 - Report `lifecycle.state`, `phase`, and the latest `progressPreview` when present.
 - Treat `suspect` as "worker heartbeat is stale but the plugin has not proven failure"; do not rerun the same job automatically.
