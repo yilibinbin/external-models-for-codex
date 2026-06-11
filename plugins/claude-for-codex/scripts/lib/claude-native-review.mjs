@@ -1,9 +1,8 @@
 import { configuredWriteDenyTools } from "./claude-backend.mjs";
+import { normalizeModelSelection } from "./model-registry.mjs";
 
 const READ_ONLY_TOOLS = Object.freeze(["Read", "Grep", "Glob"]);
 const NATIVE_PARENT_DENY_TOOLS = Object.freeze(["Agent"]);
-const SUBAGENT_MODEL_ALIASES = Object.freeze(new Set(["sonnet", "opus", "haiku", "fable", "best", "inherit"]));
-const CLAUDE_MODEL_ID_PATTERN = /^claude-[a-z0-9][a-z0-9-]*$/i;
 
 function roleName(role) {
   if (typeof role === "string") {
@@ -36,15 +35,8 @@ export function nativeAgentName(role) {
 }
 
 function nativeAgentModel(model) {
-  const normalized = String(model ?? "").trim();
-  if (!normalized) {
-    return "inherit";
-  }
-  const lower = normalized.toLowerCase();
-  if (SUBAGENT_MODEL_ALIASES.has(lower)) {
-    return lower;
-  }
-  return CLAUDE_MODEL_ID_PATTERN.test(normalized) ? normalized : "inherit";
+  const normalized = normalizeModelSelection(model || "inherit");
+  return normalized.valid ? normalized.model : "inherit";
 }
 
 function structuredReviewContract() {
@@ -70,8 +62,10 @@ function nativeAgentPrompt(role, { structuredJson = false } = {}) {
     : "Return concise findings for your assigned role as JSON-compatible content.";
   return [
     "You are a read-only Claude for Codex review subagent.",
+    "You run in a fresh isolated context. You do not see the parent conversation history, prior tool results, or files the parent already read unless they are included in this prompt.",
     "Inspect repository files and git context only. Do not edit files, run shell commands, spawn agents, or request write-capable tools.",
     "Use only Read, Grep, and Glob when tool access is needed.",
+    "Do not invoke Agent, Task, Workflow, Bash, Edit, Write, MultiEdit, or notebook mutation tools.",
     outputInstruction,
     "",
     `Role: ${roleName(role)}`,

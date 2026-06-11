@@ -6705,8 +6705,31 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     assert query["options"]["env"].get("CLAUDE_CONFIG_DIR") == os.environ.get("CLAUDE_CONFIG_DIR")
     assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
     assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
+    assert "Agent" not in query["allowedTools"]
+    assert "Agent" not in query["options"]["allowedTools"]
+    assert "agents" not in query
     assert "mcp__claude-for-codex-git__git_status" in query["allowedTools"]
     assert "claude-for-codex-git" in query["mcpServers"]
+
+
+def test_sdk_subagent_definitions_follow_official_read_only_contract():
+    module_uri = (PLUGIN / "scripts" / "lib" / "claude-native-review.mjs").as_uri()
+    code = f"""
+import {{ buildNativeReviewAgents }} from {json.dumps(module_uri)};
+const agents = buildNativeReviewAgents(['security'], {{ model: 'opus[1m]', effort: 'max', structuredJson: true }});
+const agent = agents.cfc_security;
+if (!agent) throw new Error('missing cfc_security');
+if (agent.model !== 'opus[1m]') throw new Error('model alias not preserved: ' + agent.model);
+if (agent.effort !== 'max') throw new Error('effort not preserved');
+if (!agent.tools.every((tool) => ['Read', 'Grep', 'Glob'].includes(tool))) throw new Error('non read-only tool allowed');
+if (!agent.disallowedTools.includes('Agent')) throw new Error('subagent can spawn subagents');
+if ('hooks' in agent || 'mcpServers' in agent || 'permissionMode' in agent) throw new Error('plugin-unsupported subagent fields leaked');
+if (!agent.prompt.includes('fresh isolated context')) throw new Error('prompt does not state official context boundary');
+if (!agent.prompt.includes('Do not invoke Agent')) throw new Error('prompt does not deny nested Agent use');
+console.log(JSON.stringify(agent));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_sdk_backend_receives_quality_resolved_model_and_effort(tmp_path):
@@ -6796,9 +6819,13 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     for definition in agents.values():
         assert definition["tools"] == ["Read", "Grep", "Glob"]
         assert "permissionMode" not in definition
+        assert "hooks" not in definition
+        assert "mcpServers" not in definition
         assert definition["maxTurns"] == 4
         assert definition["model"] == "opus"
         assert definition["effort"] == query["effort"]
+        assert "fresh isolated context" in definition["prompt"]
+        assert "Do not invoke Agent" in definition["prompt"]
         assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
             set(definition["disallowedTools"])
         )

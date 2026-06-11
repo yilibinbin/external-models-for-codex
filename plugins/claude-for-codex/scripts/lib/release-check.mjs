@@ -257,6 +257,8 @@ function checkNativeReleaseAssets(root) {
   const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
   const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
+  const modelRegistryPath = path.join(pluginRoot, "scripts", "lib", "model-registry.mjs");
+  const modelRegistry = fs.existsSync(modelRegistryPath) ? fs.readFileSync(modelRegistryPath, "utf8") : "";
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
   const nativeReview = fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "";
@@ -343,13 +345,17 @@ function checkNativeReleaseAssets(root) {
       fs.existsSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs")) &&
         sourceArrayIncludes(qualityPolicy, "VALID_QUALITIES", ["auto", "fast", "standard", "strong", "max"]) &&
         sourceArrayIncludes(qualityPolicy, "VALID_EFFORTS", ["low", "medium", "high", "xhigh", "max"]) &&
-        sourceArrayIncludes(qualityPolicy, "VALID_MODEL_ALIASES", ["haiku", "sonnet", "opus", "fable", "best", "inherit"]) &&
+        modelRegistry.includes("MODEL_ALIAS_REGISTRY") &&
+        ["best", "fable", "opus", "sonnet", "haiku", "opusplan", "inherit"].every((alias) => modelRegistry.includes(`alias: "${alias}"`)) &&
+        modelRegistry.includes("supportsOneMillionSuffix: true") &&
+        qualityPolicy.includes("VALID_MODEL_ALIASES = MODEL_ALIASES") &&
         companion.includes("--quality auto|fast|standard|strong|max"),
       "quality-policy-assets",
       "--quality auto|fast|standard|strong|max"
     ),
     result(
       qualityPolicy.includes("resolveTopModel") &&
+        modelRegistry.includes("resolveTopModelFromCapabilities") &&
         qualityPolicy.includes("DEFAULT_TOP_MODEL_FALLBACK") &&
         qualityPolicy.includes('model: "top"') &&
         qualityPolicy.includes("topModelProfile") &&
@@ -359,7 +365,8 @@ function checkNativeReleaseAssets(root) {
         companion.includes("fallbackModelCapabilities") &&
         companion.includes("fallbackModel") &&
         companion.includes("fallbackModelList") &&
-        (nativeReview.includes("claude-fable-5") || nativeReview.includes("CLAUDE_MODEL_ID_PATTERN")),
+        nativeReview.includes("normalizeModelSelection") &&
+        nativeReview.includes('model || "inherit"'),
       "quality-top-model-policy",
       "max quality is capability-aware and SDK subagents preserve safe Claude model ids"
     ),
