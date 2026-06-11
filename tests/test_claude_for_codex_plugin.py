@@ -5708,6 +5708,46 @@ console.log(JSON.stringify(policy));
     return json.loads(result.stdout)
 
 
+def test_model_registry_accepts_dynamic_aliases_without_dated_defaults():
+    module_uri = (PLUGIN / "scripts" / "lib" / "model-registry.mjs").as_uri()
+    code = f"""
+import {{
+  normalizeModelSelection,
+  resolveTopModelFromCapabilities,
+  MODEL_ALIAS_REGISTRY
+}} from {json.dumps(module_uri)};
+
+const aliases = ['best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]', 'inherit'];
+for (const alias of aliases) {{
+  const resolved = normalizeModelSelection(alias);
+  if (!resolved.valid) throw new Error(alias + ' rejected');
+}}
+const top = resolveTopModelFromCapabilities({{ modelAliases: {{ best: true, fable: true, opus: true }} }}, {{}});
+if (top.model !== 'best') throw new Error('expected best top model, got ' + top.model);
+if (MODEL_ALIAS_REGISTRY.some((entry) => /claude-(opus|sonnet|haiku|fable)-\\d/.test(entry.alias))) {{
+  throw new Error('registry contains dated model alias');
+}}
+console.log(JSON.stringify({{ ok: true, top }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["top"]["model"] == "best"
+
+
+def test_quality_policy_accepts_one_million_context_alias_and_opusplan_override():
+    module_uri = (PLUGIN / "scripts" / "lib" / "quality-policy.mjs").as_uri()
+    code = f"""
+import {{ resolveQualityPolicy }} from {json.dumps(module_uri)};
+const oneMillion = resolveQualityPolicy('review', {{ model: 'opus[1m]' }}, {{}}, {{}}, {{}});
+const opusPlan = resolveQualityPolicy('plan', {{ model: 'opusplan', effort: 'max' }}, {{}}, {{}}, {{}});
+if (oneMillion.model !== 'opus[1m]') throw new Error('opus[1m] override lost');
+if (opusPlan.model !== 'opusplan' || opusPlan.effort !== 'max') throw new Error('opusplan/max override lost');
+console.log(JSON.stringify({{ oneMillion, opusPlan }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_quality_policy_max_prefers_fable_when_supported():
     policy = quality_policy_probe({"fable": True, "opus": True, "sonnet": True})
     assert policy["model"] == "fable"
@@ -6486,7 +6526,7 @@ def test_capabilities_reports_native_claude_cli_surfaces(tmp_path):
         "    print('2.1.162 (Claude Code)')\n"
         "    raise SystemExit(0)\n"
         "if sys.argv[1:] == ['--help']:\n"
-        "    print('--agent <agent> --agents <json> --json-schema <schema> --include-partial-messages --fallback-model <model> --max-budget-usd <amount> --resume --continue --session-id --fork-session --output-format')\n"
+        "    print('--agent <agent> --agents <json> --json-schema <schema> --include-partial-messages --fallback-model <model> accepts a comma-separated list --max-budget-usd <amount> --resume --continue --session-id --fork-session --output-format --model alias best fable opus sonnet haiku opusplan opus[1m] sonnet[1m]')\n"
         "    raise SystemExit(0)\n"
         "if sys.argv[1:] == ['agents', '--help']:\n"
         "    print('Usage: claude agents [options] --json --cwd <path>')\n"
@@ -6518,6 +6558,16 @@ def test_capabilities_reports_native_claude_cli_surfaces(tmp_path):
     assert payload["claude"]["streaming"]["includePartialMessages"] is True
     assert payload["claude"]["ultrareview"]["available"] is True
     assert payload["claude"]["sessions"]["resume"] is True
+    assert payload["claude"]["modelAliases"]["best"] is True
+    assert payload["claude"]["modelAliases"]["fable"] is True
+    assert payload["claude"]["modelAliases"]["opus"] is True
+    assert payload["claude"]["modelAliases"]["sonnet"] is True
+    assert payload["claude"]["modelAliases"]["haiku"] is True
+    assert payload["claude"]["modelAliases"]["opusplan"] is True
+    assert payload["claude"]["modelAliases"]["opus1m"] is True
+    assert payload["claude"]["modelAliases"]["sonnet1m"] is True
+    assert payload["claude"]["fallbackModel"] is True
+    assert payload["claude"]["fallbackModelList"] is True
 
 
 def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):

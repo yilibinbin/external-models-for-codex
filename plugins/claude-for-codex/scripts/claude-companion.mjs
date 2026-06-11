@@ -351,19 +351,23 @@ function flagSupport(helpText, flags) {
 function modelAliasAdvertised(helpText = "", alias = "") {
   const normalized = String(helpText).toLowerCase();
   const escaped = String(alias).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\balias(?:es)?\\b[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized)
-    || new RegExp(`--model[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized)
-    || new RegExp(`\\b(?:models?|choices?|options?)\\b[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized);
+  const suffix = "(?=$|[\\s,.;:)])";
+  return new RegExp(`\\balias(?:es)?\\b[^\\r\\n.;:]*\\b${escaped}${suffix}`).test(normalized)
+    || new RegExp(`--model[^\\r\\n.;:]*\\b${escaped}${suffix}`).test(normalized)
+    || new RegExp(`\\b(?:models?|choices?|options?)\\b[^\\r\\n.;:]*\\b${escaped}${suffix}`).test(normalized);
 }
 
 function modelAliasCapabilities(helpText = "") {
   const normalized = String(helpText).toLowerCase();
   return {
     best: modelAliasAdvertised(normalized, "best"),
-    fable: modelAliasAdvertised(normalized, "fable") || /claude-fable-5/.test(normalized),
-    opus: /\bopus\b/.test(normalized),
-    sonnet: /\bsonnet\b/.test(normalized),
-    haiku: /\bhaiku\b/.test(normalized)
+    fable: modelAliasAdvertised(normalized, "fable"),
+    opus: modelAliasAdvertised(normalized, "opus"),
+    sonnet: modelAliasAdvertised(normalized, "sonnet"),
+    haiku: modelAliasAdvertised(normalized, "haiku"),
+    opusplan: modelAliasAdvertised(normalized, "opusplan"),
+    opus1m: modelAliasAdvertised(normalized, "opus[1m]"),
+    sonnet1m: modelAliasAdvertised(normalized, "sonnet[1m]")
   };
 }
 
