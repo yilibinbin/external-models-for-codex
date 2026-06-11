@@ -5748,6 +5748,104 @@ console.log(JSON.stringify({{ oneMillion, opusPlan }}));
     assert result.returncode == 0, result.stderr
 
 
+def test_outcome_classifier_detects_refusal_and_fallback_served():
+    module_uri = (PLUGIN / "scripts" / "lib" / "outcome-classifier.mjs").as_uri()
+    code = f"""
+import {{ classifyClaudeOutcome }} from {json.dumps(module_uri)};
+const refusal = classifyClaudeOutcome({{
+  status: 0,
+  metadata: {{ sdkEvents: [{{ type: 'result', stop_reason: 'refusal', stop_details: {{ category: 'cyber' }} }}] }}
+}});
+const served = classifyClaudeOutcome({{
+  status: 0,
+  metadata: {{ sdkEvents: [{{ type: 'result', stop_reason: 'end_turn', usage: {{ iterations: [{{ type: 'message' }}, {{ type: 'fallback_message' }}] }} }}] }}
+}});
+const timeout = classifyClaudeOutcome({{ status: 1, stderr: 'Error: ETIMEDOUT' }});
+const unknownDeny = classifyClaudeOutcome({{ status: 1, stderr: 'Permission deny rule "MultiEdit" matches no known tool.' }});
+if (refusal.kind !== 'refusal' || refusal.refusalCategory !== 'cyber' || refusal.ok !== false) throw new Error(JSON.stringify(refusal));
+if (served.kind !== 'success' || served.servedByFallback !== true || served.stopReason !== 'end_turn') throw new Error(JSON.stringify(served));
+if (timeout.kind !== 'timeout') throw new Error(JSON.stringify(timeout));
+if (unknownDeny.kind !== 'unknown_deny_tool') throw new Error(JSON.stringify(unknownDeny));
+console.log(JSON.stringify({{ refusal, served, timeout, unknownDeny }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_sdk_backend_metadata_compacts_events_for_classification_without_raw_text(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        extra_js="""
+  yield {
+    type: 'result',
+    subtype: 'success',
+    result: 'RAW_REFUSAL_TEXT_SHOULD_NOT_BE_IN_METADATA',
+    text: 'RAW_TEXT_SHOULD_NOT_BE_IN_METADATA',
+    stop_reason: 'refusal',
+    stop_details: { category: 'cyber', raw_prompt: 'SECRET_PROMPT_SHOULD_NOT_BE_IN_METADATA' },
+    usage: { input_tokens: 9, output_tokens: 1, iterations: [{ type: 'message', model: 'fable' }, { type: 'fallback_message', model: 'opus' }] }
+  };
+  return;
+""",
+    )
+    backend_uri = (PLUGIN / "scripts" / "lib" / "claude-backend.mjs").as_uri()
+    classifier_uri = (PLUGIN / "scripts" / "lib" / "outcome-classifier.mjs").as_uri()
+    code = f"""
+import {{ runSdkPrompt }} from {json.dumps(backend_uri)};
+import {{ classifyClaudeOutcome }} from {json.dumps(classifier_uri)};
+const result = await runSdkPrompt('prompt containing SECRET_PROMPT_SHOULD_NOT_BE_IN_METADATA', {{}}, {{ cwd: {json.dumps(str(repo))} }});
+result.metadata.outcome = classifyClaudeOutcome(result);
+console.log(JSON.stringify(result.metadata));
+"""
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    metadata = json.loads(result.stdout)
+    assert metadata["sdkEvents"][0]["stop_reason"] == "refusal"
+    assert metadata["sdkEvents"][0]["stop_details"] == {"category": "cyber"}
+    assert metadata["sdkEvents"][0]["usage"]["iterations"][1]["type"] == "fallback_message"
+    assert metadata["outcome"]["kind"] == "refusal"
+    assert metadata["outcome"]["servedByFallback"] is True
+    serialized = json.dumps(metadata)
+    assert "RAW_REFUSAL_TEXT_SHOULD_NOT_BE_IN_METADATA" not in serialized
+    assert "SECRET_PROMPT_SHOULD_NOT_BE_IN_METADATA" not in serialized
+
+
+def test_cli_fallback_model_is_added_per_request_not_global_state(tmp_path):
+    claude = tmp_path / "claude"
+    claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        "    print('--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list --effort <level>')\n"
+        "    raise SystemExit(0)\n"
+        "print(json.dumps({'argv': sys.argv[1:]}))\n",
+        encoding="utf8",
+    )
+    claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(claude)
+    env["CLAUDE_FOR_CODEX_TOP_MODEL"] = "fable"
+    env["CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK"] = "opus,sonnet"
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "claude-companion.mjs"), "review", "--quality", "max"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(result.stdout)["argv"]
+    assert "--model" in argv and argv[argv.index("--model") + 1] == "fable"
+    assert "--fallback-model" in argv and argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
+
+
 def test_quality_policy_max_prefers_fable_when_supported():
     policy = quality_policy_probe({"fable": True, "opus": True, "sonnet": True})
     assert policy["model"] == "fable"
@@ -7801,9 +7899,12 @@ def test_sdk_backend_structured_review_and_report_metadata(tmp_path):
     assert report["backend"] == "sdk"
     assert report["sdkMessageCount"] == 1
     assert report["sdkSessionIdHash"]
+    assert report["outcome"]["kind"] == "success"
+    assert report["outcome"]["ok"] is True
     serialized = json.dumps(report)
     assert "sdk-session-secret" not in serialized
     assert "SDK_REVIEW_OK" not in serialized
+    assert "sdkEvents" not in serialized
 
 
 def test_sdk_backend_review_gate_allows_and_uses_sdk(tmp_path):

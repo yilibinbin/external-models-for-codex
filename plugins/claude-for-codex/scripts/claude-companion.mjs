@@ -68,6 +68,7 @@ import {
   runSdkNativeReview,
   runSdkPrompt
 } from "./lib/claude-backend.mjs";
+import { classifyClaudeOutcome } from "./lib/outcome-classifier.mjs";
 import {
   buildNativeReviewAgents,
   nativeReviewTeamPrompt
@@ -1280,9 +1281,20 @@ function runClaudeAsync(args, options = {}) {
   });
 }
 
+function withClaudeOutcome(result = {}) {
+  const enriched = {
+    ...result,
+    metadata: {
+      ...(result?.metadata ?? {})
+    }
+  };
+  enriched.metadata.outcome = classifyClaudeOutcome(enriched);
+  return enriched;
+}
+
 async function claudePrintAsync(prompt, options) {
   if (resolveBackend(options, process.env) === "sdk") {
-    return runSdkPrompt(prompt, options, { cwd: process.cwd(), timeout: options.timeout });
+    return withClaudeOutcome(await runSdkPrompt(prompt, options, { cwd: process.cwd(), timeout: options.timeout }));
   }
   let denyTools = configuredWriteDenyTools(process.env);
   const omitted = new Set();
@@ -1301,12 +1313,12 @@ async function claudePrintAsync(prompt, options) {
       }
     }
     if (options.write) {
-      return result;
+      return withClaudeOutcome(result);
     }
     // Newer Claude runtimes may warn about an unknown deny tool and still emit stdout; retry before trusting that run.
     const candidate = parseUnknownDenyToolFailure(result, denyTools);
     if (!candidate || omitted.has(candidate)) {
-      return result;
+      return withClaudeOutcome(result);
     }
     const remainingTools = buildDenyToolsAfterOmission(denyTools, candidate);
     if (remainingTools.length === denyTools.length || remainingTools.length === 0) {
@@ -2475,14 +2487,19 @@ function printCapabilities() {
 
 function recordCommandReport(command, args, result, startedAt, parsed, roleResults = []) {
   const endedAt = new Date().toISOString();
+  const enrichedResult = withClaudeOutcome(result);
+  const enrichedRoleResults = roleResults.map((entry) => ({
+    ...entry,
+    result: withClaudeOutcome(entry.result)
+  }));
   const report = reportFromResult({
     command,
     args,
-    result,
+    result: enrichedResult,
     startedAt,
     endedAt,
     parsed,
-    roleResults
+    roleResults: enrichedRoleResults
   });
   safeWriteReport(process.cwd(), report);
   return endedAt;

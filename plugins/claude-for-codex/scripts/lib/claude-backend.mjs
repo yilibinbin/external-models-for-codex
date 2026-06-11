@@ -354,9 +354,55 @@ function fullErrorMessage(error) {
   return String(error?.message ?? error ?? "");
 }
 
+function compactStopDetails(details) {
+  if (!details || typeof details !== "object" || Array.isArray(details)) {
+    return undefined;
+  }
+  const output = {};
+  for (const key of ["category", "reason", "code"]) {
+    if (typeof details[key] === "string" || typeof details[key] === "number" || typeof details[key] === "boolean") {
+      output[key] = details[key];
+    }
+  }
+  return Object.keys(output).length ? output : undefined;
+}
+
+function compactUsage(usage) {
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
+    return undefined;
+  }
+  const output = {};
+  const numericCounts = Object.fromEntries(
+    Object.entries(usage).filter(([, value]) => typeof value === "number")
+  );
+  Object.assign(output, numericCounts);
+  if (Array.isArray(usage.iterations)) {
+    output.iterations = usage.iterations.map((entry) => ({
+      type: typeof entry?.type === "string" ? entry.type : undefined,
+      model: typeof entry?.model === "string" ? entry.model : undefined
+    })).filter((entry) => entry.type || entry.model);
+  }
+  return Object.keys(output).length ? output : undefined;
+}
+
+function compactSdkEvent(event) {
+  if (!event || typeof event !== "object") {
+    return typeof event === "string" ? { type: "text" } : { type: typeof event };
+  }
+  const compact = {
+    type: typeof event.type === "string" ? event.type : undefined,
+    subtype: typeof event.subtype === "string" ? event.subtype : undefined,
+    stop_reason: typeof event.stop_reason === "string" ? event.stop_reason : undefined,
+    stop_details: compactStopDetails(event.stop_details),
+    usage: compactUsage(event.usage)
+  };
+  return Object.fromEntries(Object.entries(compact).filter(([, value]) => value !== undefined));
+}
+
 function metadataFromEvents(events) {
   const metadata = {
-    sdkMessageCount: events.length
+    sdkMessageCount: events.length,
+    sdkEvents: events.map(compactSdkEvent)
   };
   for (const event of events) {
     if (event && typeof event === "object") {
