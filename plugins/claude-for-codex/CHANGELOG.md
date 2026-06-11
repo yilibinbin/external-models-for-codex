@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.0 - 2026-06-11
+
+### Added
+
+- Route `--quality max` through Claude Code top-model aliases by preferring `best`, then `fable`, then `opus` without hardcoding dated model IDs.
+- Add top-model fallback controls with native CLI `--fallback-model` support when Claude Code advertises the option.
+- Add regression coverage for top-model routing, SDK subagent model propagation, Stop-hook conservatism, auto-quality max escalation, and GitHub Actions Fable forwarding.
+
+### Fixed
+
+- Keep SDK subagent `--quality max` from inferring top-model availability from CLI help; SDK top aliases now require explicit `--model` or `CLAUDE_FOR_CODEX_TOP_MODEL`.
+- Reject CLI-only fallback options under the SDK backend for foreground prompt commands.
+- Include top-model routing environment variables in background/reserved job idempotency controls.
+- Avoid prose false positives when detecting the `fable` alias in Claude CLI help.
+- Suppress redundant `opus` to `opus` fallback when `CLAUDE_FOR_CODEX_TOP_MODEL=opus`.
+
+### Documentation
+
+- Document Fable/top-model routing, native fallback limits, SDK backend boundaries, and conservative Stop-hook behavior in README and Claude skills.
+
 ## 0.16.0 - 2026-06-10
 
 ### Added

@@ -15,7 +15,7 @@ Natural-language Claude routing rule: users should ask for Claude normally, for 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.17.0
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
@@ -170,7 +170,20 @@ Claude native SDK mode is explicit and experimental until live SDK subagent smok
 
 SDK native subagent structured reviews use nested per-role review objects and remain an explicit opt-in path. The default review backend is unchanged.
 
-Claude for Codex supports `--quality auto|fast|standard|strong|max`. `auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size. `fast` maps to `sonnet` plus low effort, `standard` maps to `sonnet` plus high effort, `strong` maps to `opus` plus xhigh effort, and `max` maps to `opus` plus max effort. Explicit `--model` and `--effort` always win. The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`; `ultracode` is not passed as `--effort`, and `ultrareview` remains a separate explicit-cost command. `review-gate` remains capped to `standard` unless manually run with explicit `--quality strong|max`.
+Claude for Codex supports `--quality auto|fast|standard|strong|max`. `auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size. `fast` maps to `sonnet` plus low effort, `standard` maps to `sonnet` plus high effort, `strong` maps to `opus` plus xhigh effort, and `max` maps to the strongest advertised local Claude alias with max effort, preferring `best`, then `fable`, then `opus`. Explicit `--model` and `--effort` always win. The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`; `ultracode` is not passed as `--effort`, and `ultrareview` remains a separate explicit-cost command. `review-gate` remains capped to `standard` unless manually run with explicit `--quality strong|max`.
+
+### Fable / top-model routing
+
+Claude for Codex treats `--quality max` as the strongest local Claude tier. On Claude Code versions that advertise a top model alias, the runtime prefers `best`, then `fable`, then falls back to `opus`. When a top model is selected through the CLI backend and `--fallback-model` is available, the plugin adds Claude Code's native fallback unless you supplied your own fallback. It uses `--fallback-model opus,sonnet` only when the installed CLI help advertises comma-separated fallback lists; otherwise it uses `--fallback-model opus`. This fallback only handles Claude Code-supported model unavailable, overload, or server-side model errors; it does not handle auth, quota, billing, rate-limit, network, or request-size failures.
+
+Explicit model choices always win:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs review \
+  --model fable --effort max --scope branch --base origin/main --json
+```
+
+Natural language routing uses Fable only for explicit Fable/top/max requests or very high-risk automatic scores. Ordinary deep review remains `--quality strong`, which maps to Opus. Installed Stop hooks stay conservative and do not automatically use Fable. SDK backend runs do not infer top-model availability from CLI help; use explicit `--model` or `CLAUDE_FOR_CODEX_TOP_MODEL` when you want SDK subagents to use a top alias.
 
 `ultrareview` forwards to Claude's native cloud ultrareview command. It is not used by hooks or default review paths, and it refuses to run unless the user has explicitly consented with `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1` because it may use remote/cloud execution and usage-credit billing.
 

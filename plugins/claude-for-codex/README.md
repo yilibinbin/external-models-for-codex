@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.16.0`
+- Current version: `0.17.0`
 
 Published capabilities:
 
@@ -61,12 +61,25 @@ Adaptive quality:
 - `--quality fast` uses Claude Code's `sonnet` alias with low effort.
 - `--quality standard` uses `sonnet` with high effort.
 - `--quality strong` uses `opus` with xhigh effort.
-- `--quality max` uses `opus` with max effort for explicit deepest local review.
+- `--quality max` uses the strongest advertised local Claude alias with max effort, preferring `best`, then `fable`, then `opus`.
 - Explicit `--model` and `--effort` always win over `--quality`.
 - The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`, so Claude Code can map aliases to the current best available model.
 - `ultracode` is not passed as `--effort`; current noninteractive Claude Code accepts only `low`, `medium`, `high`, `xhigh`, and `max`.
 - `claude ultrareview` remains a separate explicit command requiring `--confirm-cost` and is never used by hooks or default review paths.
 - Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks and `review-gate` remain capped to `standard` unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
+
+### Fable / top-model routing
+
+Claude for Codex treats `--quality max` as the strongest local Claude tier. On Claude Code versions that advertise a top model alias, the runtime prefers `best`, then `fable`, then falls back to `opus`. When a top model is selected through the CLI backend and `--fallback-model` is available, the plugin adds Claude Code's native fallback unless you supplied your own fallback. It uses `--fallback-model opus,sonnet` only when the installed CLI help advertises comma-separated fallback lists; otherwise it uses `--fallback-model opus`. This fallback only handles Claude Code-supported model unavailable, overload, or server-side model errors; it does not handle auth, quota, billing, rate-limit, network, or request-size failures.
+
+Explicit model choices always win:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs review \
+  --model fable --effort max --scope branch --base origin/main --json
+```
+
+Natural language routing uses Fable only for explicit Fable/top/max requests or very high-risk automatic scores. Ordinary deep review remains `--quality strong`, which maps to Opus. Installed Stop hooks stay conservative and do not automatically use Fable. SDK backend runs do not infer top-model availability from CLI help; use explicit `--model` or `CLAUDE_FOR_CODEX_TOP_MODEL` when you want SDK subagents to use a top alias.
 
 Natural-language Claude routing:
 
@@ -137,7 +150,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.17.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -250,9 +263,9 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.16.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.17.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.16.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.16.0` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.17.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.17.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

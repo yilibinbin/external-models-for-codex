@@ -6,7 +6,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.16.0";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.17.0";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -182,9 +182,9 @@ function checkManifest(root) {
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.16.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.16.0"), "changelog-version", "CHANGELOG contains 0.16.0"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.16.0`"), "readme-current-version", "README current version is 0.16.0"),
+    result(manifest.version === "0.17.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.17.0"), "changelog-version", "CHANGELOG contains 0.17.0"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.17.0`"), "readme-current-version", "README current version is 0.17.0"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -259,6 +259,7 @@ function checkNativeReleaseAssets(root) {
   const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
+  const nativeReview = fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "";
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
   const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
   const hookWrapper = fs.readFileSync(path.join(pluginRoot, "hooks", "claude-review-gate.mjs"), "utf8");
@@ -342,9 +343,25 @@ function checkNativeReleaseAssets(root) {
       fs.existsSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs")) &&
         sourceArrayIncludes(qualityPolicy, "VALID_QUALITIES", ["auto", "fast", "standard", "strong", "max"]) &&
         sourceArrayIncludes(qualityPolicy, "VALID_EFFORTS", ["low", "medium", "high", "xhigh", "max"]) &&
+        sourceArrayIncludes(qualityPolicy, "VALID_MODEL_ALIASES", ["haiku", "sonnet", "opus", "fable", "best", "inherit"]) &&
         companion.includes("--quality auto|fast|standard|strong|max"),
       "quality-policy-assets",
       "--quality auto|fast|standard|strong|max"
+    ),
+    result(
+      qualityPolicy.includes("resolveTopModel") &&
+        qualityPolicy.includes("DEFAULT_TOP_MODEL_FALLBACK") &&
+        qualityPolicy.includes('model: "top"') &&
+        qualityPolicy.includes("topModelProfile") &&
+        qualityPolicy.includes("topModelSelected") &&
+        companion.includes("modelAliasAdvertised") &&
+        companion.includes("modelAliasCapabilities") &&
+        companion.includes("fallbackModelCapabilities") &&
+        companion.includes("fallbackModel") &&
+        companion.includes("fallbackModelList") &&
+        (nativeReview.includes("claude-fable-5") || nativeReview.includes("CLAUDE_MODEL_ID_PATTERN")),
+      "quality-top-model-policy",
+      "max quality is capability-aware and SDK subagents preserve safe Claude model ids"
     ),
     result(
       !qualityPolicy.includes("ultracode") &&
@@ -375,6 +392,7 @@ function checkNativeReleaseAssets(root) {
     ),
     result(
       !/claude-(opus|sonnet|haiku)-\d/i.test(qualityPolicy) &&
+        !/claude-fable-\d/i.test(qualityPolicy) &&
         sourceHasAliasProfile(qualityPolicy, "opus", "xhigh") &&
         sourceHasAliasProfile(qualityPolicy, "sonnet", "high"),
       "quality-no-concrete-model-defaults",
@@ -496,6 +514,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(companion.includes('state: "queued-stale"') && companion.includes("validateJobWorkerProcess(job.workerPid, job.id).ok"), "queued-live-worker-not-lost", "user-facing lifecycle output distinguishes stale queued jobs with live workers from lost jobs"),
     result(jobs.includes('idempotencyKey: job.idempotencyKey ?? ""') && !jobs.includes("idempotencyKey: job.idempotencyKey ?? deriveJobIdempotencyKey(job)"), "legacy-claim-no-fake-idempotency", "legacy queued jobs without stored idempotency keys are not stamped with a non-matching recomputed key"),
     result(jobs.includes("hasActiveDirectJobWithIdempotencyKey") && jobs.includes("withWorkspaceJobLock(cwd, env") && jobs.includes("Another active direct job already owns this idempotency key."), "reserved-claim-direct-duplicate-guard", "host-forwarded reservations cannot start after a same-key direct job is active under the workspace lock"),
+    result(/const BACKGROUND_EXECUTION_CONTROL_ENVS[\s\S]*TOP_MODEL_ENV[\s\S]*TOP_MODEL_FALLBACK_ENV[\s\S]*"CLAUDE_FOR_CODEX_BACKEND"/.test(companion), "job-idempotency-top-model-controls", "background idempotency includes top-model routing environment controls"),
     result(
       companion.includes("function reserveBackgroundJob") &&
         companion.includes("reserveJob(cwd") &&

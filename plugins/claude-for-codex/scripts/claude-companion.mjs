@@ -101,7 +101,10 @@ import {
   validateSemanticArgs
 } from "./lib/semantic-context.mjs";
 import {
+  DEFAULT_TOP_MODEL_FALLBACK,
   QUALITY_ENV,
+  TOP_MODEL_ENV,
+  TOP_MODEL_FALLBACK_ENV,
   VALID_QUALITIES,
   VALID_EFFORTS,
   applyQualityPolicy,
@@ -167,6 +170,8 @@ const READ_ONLY_MCP_TOOLS = Object.freeze([
 const BACKGROUND_EXECUTION_CONTROL_ENVS = Object.freeze([
   CLAUDE_CODE_PATH_ENV,
   QUALITY_ENV,
+  TOP_MODEL_ENV,
+  TOP_MODEL_FALLBACK_ENV,
   "CLAUDE_FOR_CODEX_BACKEND",
   "CLAUDE_FOR_CODEX_DENY_TOOLS",
   "CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG",
@@ -343,10 +348,39 @@ function flagSupport(helpText, flags) {
   return Object.fromEntries(flags.map((flag) => [flag, helpText.includes(flag)]));
 }
 
+function modelAliasAdvertised(helpText = "", alias = "") {
+  const normalized = String(helpText).toLowerCase();
+  const escaped = String(alias).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\balias(?:es)?\\b[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized)
+    || new RegExp(`--model[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized)
+    || new RegExp(`\\b(?:models?|choices?|options?)\\b[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized);
+}
+
+function modelAliasCapabilities(helpText = "") {
+  const normalized = String(helpText).toLowerCase();
+  return {
+    best: modelAliasAdvertised(normalized, "best"),
+    fable: modelAliasAdvertised(normalized, "fable") || /claude-fable-5/.test(normalized),
+    opus: /\bopus\b/.test(normalized),
+    sonnet: /\bsonnet\b/.test(normalized),
+    haiku: /\bhaiku\b/.test(normalized)
+  };
+}
+
+function fallbackModelCapabilities(helpText = "") {
+  const normalized = String(helpText).toLowerCase();
+  return {
+    fallbackModel: normalized.includes("--fallback-model"),
+    fallbackModelList: normalized.includes("comma-separated")
+  };
+}
+
 function nativeClaudeCliCapabilities(helpText = claudeHelpText(), { probeSubcommands = false } = {}) {
   const agentsHelp = probeSubcommands ? claudeSubcommandHelpText(["agents", "--help"]) : "";
   const ultrareviewHelp = probeSubcommands ? claudeSubcommandHelpText(["ultrareview", "--help"]) : "";
   return {
+    modelAliases: modelAliasCapabilities(helpText),
+    ...fallbackModelCapabilities(helpText),
     nativeAgents: {
       agentFlag: helpText.includes("--agent "),
       agentsJson: helpText.includes("--agents"),
@@ -417,8 +451,13 @@ function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
     backend: backendCapabilities(process.env, process.cwd()),
     qualityPolicy: {
       defaultQualityEnv: QUALITY_ENV,
+      topModelEnv: TOP_MODEL_ENV,
+      topModelFallbackEnv: TOP_MODEL_FALLBACK_ENV,
+      defaultTopModelFallback: DEFAULT_TOP_MODEL_FALLBACK,
       qualities: VALID_QUALITIES,
       efforts: VALID_EFFORTS,
+      modelAliases: nativeCapabilities.modelAliases,
+      fallbackModelList: nativeCapabilities.fallbackModelList,
       ultracodeEffortSupported: false,
       ultrareviewAutomatic: false
     },
@@ -596,8 +635,7 @@ function parseArgs(argv, options = {}) {
 const MULTI_REVIEW_ONLY_OPTIONS = Object.freeze([
   ["agentTeam", "--agent-team"],
   ["nativeStructured", "--native-structured"],
-  ["maxBudgetUsd", "--max-budget-usd"],
-  ["fallbackModel", "--fallback-model"]
+  ["maxBudgetUsd", "--max-budget-usd"]
 ]);
 const STREAM_PROGRESS_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const PROMPT_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "plan", "rescue"]);
@@ -666,6 +704,7 @@ function commandHelp(command) {
     "--effort <effort>",
     "--quality auto|fast|standard|strong|max",
     "--backend cli|sdk",
+    "--fallback-model <model>",
     "--json",
     "--stream-progress"
   ];
@@ -1028,10 +1067,37 @@ function qualityGitSignals(args) {
   return { changedFiles: files.size, diffLines };
 }
 
+function reviewGateQualityExplicitlyEscalates(args = {}, requestedQuality = "") {
+  const normalized = String(requestedQuality ?? "").trim().toLowerCase();
+  return args.quality !== undefined && (normalized === "strong" || normalized === "max");
+}
+
+function firstFallbackModel(value = "") {
+  return String(value)
+    .split(",")
+    .map((entry) => entry.trim())
+    .find(Boolean) || "opus";
+}
+
 function applyCommandQualityPolicy(command, args) {
   const requestedQuality = args.quality ?? process.env[QUALITY_ENV] ?? "auto";
-  const needsSignals = String(requestedQuality).trim().toLowerCase() === "auto";
-  return applyQualityPolicy(command, args, process.env, needsSignals ? qualityGitSignals(args) : {});
+  const normalizedQuality = String(requestedQuality).trim().toLowerCase();
+  const needsSignals = normalizedQuality === "auto";
+  const automaticReviewGate = command === "review-gate" && !reviewGateQualityExplicitlyEscalates(args, requestedQuality);
+  const signals = needsSignals ? qualityGitSignals(args) : {};
+  const explicitModel = args.model !== undefined && String(args.model).trim() !== "";
+  const preflightArgs = { ...args };
+  const preflightPolicy = applyQualityPolicy(command, preflightArgs, process.env, signals, {});
+  const shouldProbeTopModel = !automaticReviewGate && args.backend !== "sdk" && !explicitModel && preflightPolicy.topModelProfile;
+  const helpText = shouldProbeTopModel ? claudeHelpText() : "";
+  const capabilities = shouldProbeTopModel
+    ? { ...modelAliasCapabilities(helpText), ...fallbackModelCapabilities(helpText) }
+    : {};
+  const policy = applyQualityPolicy(command, args, process.env, signals, capabilities);
+  if (!args.fallbackModel && policy.fallbackModel && capabilities.fallbackModel && args.backend !== "sdk") {
+    args.fallbackModel = capabilities.fallbackModelList ? policy.fallbackModel : firstFallbackModel(policy.fallbackModel);
+  }
+  return policy;
 }
 
 function buildClaudePrintInvocation(prompt, options) {
@@ -3296,6 +3362,7 @@ async function runClaudeTask(kind, rawArgs) {
     args = parseArgs(rawArgs);
     validateNativeModeOptions(args, kind);
     validateBackendArgs(args);
+    validateBackendCompatibleOptions(args);
     if (kind === "adversarial-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
     }

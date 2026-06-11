@@ -1,15 +1,19 @@
 export const QUALITY_ENV = "CLAUDE_FOR_CODEX_QUALITY";
+export const TOP_MODEL_ENV = "CLAUDE_FOR_CODEX_TOP_MODEL";
+export const TOP_MODEL_FALLBACK_ENV = "CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK";
 
 export const VALID_QUALITIES = Object.freeze(["auto", "fast", "standard", "strong", "max"]);
 export const VALID_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
-export const VALID_MODEL_ALIASES = Object.freeze(["haiku", "sonnet", "opus", "inherit"]);
+export const VALID_MODEL_ALIASES = Object.freeze(["haiku", "sonnet", "opus", "fable", "best", "inherit"]);
 
 const QUALITY_PROFILES = Object.freeze({
-  fast: Object.freeze({ quality: "fast", model: "sonnet", effort: "low" }),
-  standard: Object.freeze({ quality: "standard", model: "sonnet", effort: "high" }),
-  strong: Object.freeze({ quality: "strong", model: "opus", effort: "xhigh" }),
-  max: Object.freeze({ quality: "max", model: "opus", effort: "max" })
+  fast: Object.freeze({ quality: "fast", model: "sonnet", effort: "low", topModel: false }),
+  standard: Object.freeze({ quality: "standard", model: "sonnet", effort: "high", topModel: false }),
+  strong: Object.freeze({ quality: "strong", model: "opus", effort: "xhigh", topModel: false }),
+  max: Object.freeze({ quality: "max", model: "top", effort: "max", topModel: true })
 });
+
+export const DEFAULT_TOP_MODEL_FALLBACK = "opus,sonnet";
 
 const COMMAND_BASE_SCORE = Object.freeze({
   review: 2,
@@ -52,6 +56,46 @@ export function assertSafeModelAliasOrId(value) {
     throw new Error("Invalid --model value.");
   }
   return model;
+}
+
+function safeModelAliasOrId(value) {
+  try {
+    return assertSafeModelAliasOrId(value);
+  } catch {
+    return "";
+  }
+}
+
+function booleanCapability(value) {
+  return value === true || normalized(value) === "true" || normalized(value) === "1";
+}
+
+function requestedTopModel(env = process.env) {
+  const configured = safeModelAliasOrId(env[TOP_MODEL_ENV]);
+  return configured ? configured.toLowerCase() : "";
+}
+
+function topModelFallback(env = process.env) {
+  return safeModelAliasOrId(env[TOP_MODEL_FALLBACK_ENV]) || DEFAULT_TOP_MODEL_FALLBACK;
+}
+
+export function resolveTopModel(capabilities = {}, env = process.env) {
+  const requested = requestedTopModel(env);
+  if (requested) {
+    return {
+      model: requested,
+      source: TOP_MODEL_ENV,
+      fallbackModel: requested === "opus" ? "" : topModelFallback(env)
+    };
+  }
+  const fallbackModel = topModelFallback(env);
+  if (booleanCapability(capabilities.best)) {
+    return { model: "best", source: "claude-capabilities", fallbackModel };
+  }
+  if (booleanCapability(capabilities.fable)) {
+    return { model: "fable", source: "claude-capabilities", fallbackModel };
+  }
+  return { model: "opus", source: "default", fallbackModel: "" };
 }
 
 function roleNames(args = {}) {
@@ -104,7 +148,7 @@ export function profileForQuality(quality, context = {}) {
   return profile;
 }
 
-export function resolveQualityPolicy(command, args = {}, env = process.env, signals = {}) {
+export function resolveQualityPolicy(command, args = {}, env = process.env, signals = {}, capabilities = {}) {
   const explicitQuality = args.quality !== undefined;
   const rawQuality = explicitQuality ? args.quality : env[QUALITY_ENV] || "auto";
   const quality = assertValidQuality(rawQuality, explicitQuality ? "--quality" : QUALITY_ENV);
@@ -116,15 +160,19 @@ export function resolveQualityPolicy(command, args = {}, env = process.env, sign
     signals,
     explicitQuality
   });
-  const model = explicitModel || profile.model;
+  const topModel = profile.topModel ? resolveTopModel(capabilities, env) : null;
+  const model = explicitModel || topModel?.model || profile.model;
   const effort = explicitEffort || profile.effort;
   return {
     requestedQuality: quality,
     resolvedQuality: profile.quality,
     model,
     effort,
-    modelSource: explicitModel ? "explicit" : "quality-policy",
+    modelSource: explicitModel ? "explicit" : topModel?.source || "quality-policy",
     effortSource: explicitEffort ? "explicit" : "quality-policy",
+    topModelProfile: Boolean(profile.topModel),
+    topModelSelected: Boolean(!explicitModel && profile.topModel && topModel?.model !== "opus"),
+    fallbackModel: !explicitModel && profile.topModel ? topModel?.fallbackModel || "" : "",
     score: quality === "auto" ? scoreQuality(command, args, signals) : null,
     signals: {
       changedFiles: Number(signals.changedFiles ?? 0),
@@ -133,8 +181,8 @@ export function resolveQualityPolicy(command, args = {}, env = process.env, sign
   };
 }
 
-export function applyQualityPolicy(command, args = {}, env = process.env, signals = {}) {
-  const policy = resolveQualityPolicy(command, args, env, signals);
+export function applyQualityPolicy(command, args = {}, env = process.env, signals = {}, capabilities = {}) {
+  const policy = resolveQualityPolicy(command, args, env, signals, capabilities);
   args.qualityPolicy = policy;
   args.model = policy.model;
   args.effort = policy.effort;

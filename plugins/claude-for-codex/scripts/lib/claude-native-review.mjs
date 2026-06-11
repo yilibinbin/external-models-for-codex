@@ -2,7 +2,8 @@ import { configuredWriteDenyTools } from "./claude-backend.mjs";
 
 const READ_ONLY_TOOLS = Object.freeze(["Read", "Grep", "Glob"]);
 const NATIVE_PARENT_DENY_TOOLS = Object.freeze(["Agent"]);
-const SUBAGENT_MODELS = Object.freeze(new Set(["sonnet", "opus", "haiku", "inherit"]));
+const SUBAGENT_MODEL_ALIASES = Object.freeze(new Set(["sonnet", "opus", "haiku", "fable", "best", "inherit"]));
+const CLAUDE_MODEL_ID_PATTERN = /^claude-[a-z0-9][a-z0-9-]*$/i;
 
 function roleName(role) {
   if (typeof role === "string") {
@@ -35,7 +36,15 @@ export function nativeAgentName(role) {
 }
 
 function nativeAgentModel(model) {
-  return SUBAGENT_MODELS.has(model) ? model : "inherit";
+  const normalized = String(model ?? "").trim();
+  if (!normalized) {
+    return "inherit";
+  }
+  const lower = normalized.toLowerCase();
+  if (SUBAGENT_MODEL_ALIASES.has(lower)) {
+    return lower;
+  }
+  return CLAUDE_MODEL_ID_PATTERN.test(normalized) ? normalized : "inherit";
 }
 
 function structuredReviewContract() {
