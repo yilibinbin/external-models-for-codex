@@ -741,6 +741,56 @@ function childProcessGroupPidForJob(job) {
   return null;
 }
 
+function cancelledJobUpdates(requested, childTermination, workerTermination = {}) {
+  return {
+    status: "cancelled",
+    phase: "cancelled",
+    submissionState: "cancelled",
+    cancelledAt: new Date().toISOString(),
+    cancelIdentity: workerTermination.identity ?? requested.pidIdentity ?? childTermination.identity ?? requested.childProcessGroupIdentity,
+    cancelChildIdentity: childTermination.identity ?? requested.childProcessGroupIdentity,
+    cancelWorkerIdentity: workerTermination.identity ?? requested.pidIdentity,
+    cancelChildDelivered: Boolean(childTermination.delivered),
+    cancelWorkerDelivered: Boolean(workerTermination.delivered),
+    cancelWorkerDeferred: Boolean(workerTermination.deferred)
+  };
+}
+
+function persistCancelledAfterValidatedSignal(cwd, jobId, updates, env) {
+  const deadline = Date.now() + 5_000;
+  let updated;
+  while (Date.now() <= deadline) {
+    updated = updateJobUnlessTerminal(cwd, jobId, updates, env);
+    if (updated?.status !== "locked") {
+      break;
+    }
+    sleepSync(50);
+  }
+  if (!updated || updated.status === "locked") {
+    return {
+      status: "cancel_failed",
+      jobId,
+      reason: updated?.reason ?? "Cancellation signal was delivered but the cancelled state could not be persisted.",
+      job: updated
+    };
+  }
+  if (updated && isTerminalJobStatus(updated.status) && updated.status !== "cancelled") {
+    return {
+      status: updated.status,
+      jobId,
+      reason: "Job reached a terminal state before cancellation could be persisted.",
+      job: updated
+    };
+  }
+  if (updated?.status === "cancelled" && (!updated.cancelWorkerIdentity || !updated.cancelChildIdentity)) {
+    const annotated = updateJob(cwd, jobId, updates, env);
+    if (annotated?.status === "cancelled") {
+      return { status: "cancelled", jobId, job: annotated };
+    }
+  }
+  return { status: "cancelled", jobId, job: updated };
+}
+
 function cancelFailure(cwd, jobId, reason, env, options = {}) {
   const updated = updateJobUnlessTerminal(cwd, jobId, {
     ...(options.preserveActive ? {} : { status: "cancel_failed" }),
@@ -855,6 +905,18 @@ export function cancelJob(cwd, jobId, env = process.env) {
         { preserveActive: true }
       );
     }
+    if (childTermination.ok && childTermination.delivered) {
+      return persistCancelledAfterValidatedSignal(
+        cwd,
+        jobId,
+        cancelledJobUpdates(requested, childTermination, {
+          identity: requested.pidIdentity,
+          delivered: false,
+          deferred: true
+        }),
+        env
+      );
+    }
     let workerTermination = Number.isInteger(requested.workerPid)
       ? terminateValidatedJobWorker(requested.workerPid, jobId)
       : { ok: true, delivered: false, reason: "worker process already absent" };
@@ -875,37 +937,17 @@ export function cancelJob(cwd, jobId, env = process.env) {
       if (missingStartingChildSupervision && workerTermination.delivered) {
         return cancelFailure(cwd, jobId, "Running job cancellation reached the worker before child supervision metadata was persisted; refusing to report cancelled until reaper/result confirms the child state.", env, { preserveActive: true });
       }
-      const updates = {
-        status: "cancelled",
-        cancelledAt: new Date().toISOString(),
-        cancelIdentity: workerTermination.identity ?? requested.pidIdentity ?? childTermination.identity ?? requested.childProcessGroupIdentity,
-        cancelChildIdentity: childTermination.identity ?? requested.childProcessGroupIdentity,
-        cancelWorkerIdentity: workerTermination.identity ?? requested.pidIdentity,
-        cancelChildDelivered: Boolean(childTermination.delivered),
-        cancelWorkerDelivered: Boolean(workerTermination.delivered)
-      };
-      const updated = updateJobUnlessTerminal(cwd, jobId, updates, env);
-      if (!updated || updated.status === "locked") {
-        return {
-          status: "cancel_failed",
-          jobId,
-          reason: updated?.reason ?? "Cancellation signal was delivered but the cancelled state could not be persisted.",
-          job: updated
-        };
+      const updates = cancelledJobUpdates(requested, childTermination, workerTermination);
+      const persisted = persistCancelledAfterValidatedSignal(cwd, jobId, updates, env);
+      if (persisted.status !== "cancelled") {
+        return persisted;
       }
-      if (updated && isTerminalJobStatus(updated.status) && updated.status !== "cancelled") {
-        return {
-          status: updated.status,
-          jobId,
-          reason: "Job reached a terminal state before cancellation could be persisted.",
-          job: updated
-        };
-      }
+      const updated = persisted.job;
       if (updated?.status === "cancelled" && (!updated.cancelWorkerIdentity || !updated.cancelChildIdentity)) {
         const annotated = updateJob(cwd, jobId, updates, env);
         return { status: "cancelled", jobId, job: annotated?.status === "cancelled" ? annotated : updated };
       }
-      return { status: "cancelled", jobId, job: updated };
+      return persisted;
     }
     const details = [
       childTermination.ok ? "" : `child process group: ${childTermination.reason || "termination failed"}`,

@@ -29,6 +29,27 @@ def process_is_running(pid):
     return not stat.startswith("Z")
 
 
+def run_cancel_with_lock_retry(runtime, job_id, *, cwd, env, attempts=20):
+    last = None
+    for _ in range(attempts):
+        last = subprocess.run(
+            [NODE, str(runtime), "cancel", job_id],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            payload = json.loads(last.stdout)
+        except json.JSONDecodeError:
+            return last
+        retryable_statuses = {payload.get("status"), payload.get("job", {}).get("status")}
+        if retryable_statuses.isdisjoint({"locked", "workspace_locked"}):
+            return last
+        time.sleep(0.1)
+    return last
+
+
 def companion_working_tree_fingerprint(repo):
     def git_part(args):
         result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
@@ -2872,7 +2893,7 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "child-process-identity-required",
         "unvalidated-child-no-negative-pgid",
         "process-identity-no-prefix-match",
-        "cancel-child-and-worker",
+        "cancel-child-worker-deferred",
         "cancel-queued-lock-reread",
         "cancel-queued-worker-terminated",
         "cancel-requires-delivered-signal",
@@ -5606,6 +5627,16 @@ def test_review_quality_max_preserves_user_fallback_model(tmp_path):
     assert argv.count("--fallback-model") == 1
 
 
+def test_review_accepts_explicit_default_model_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--model", "default", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "default"
+
+
 def test_quality_max_preserves_user_fallback_model(tmp_path):
     result, _prompts, argvs = run_fake_claude_multi_review(
         tmp_path,
@@ -5654,6 +5685,18 @@ def test_quality_max_uses_custom_comma_native_fallback_when_configured(tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert argv[argv.index("--fallback-model") + 1] == "sonnet,opus"
+
+
+def test_quality_max_invalid_top_model_env_falls_back_to_detected_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_TOP_MODEL": "-inject"},
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "fable"
 
 
 def test_quality_max_uses_single_native_fallback_when_help_lacks_comma_support(tmp_path):
@@ -5722,17 +5765,21 @@ import {{
   MODEL_ALIAS_REGISTRY
 }} from {json.dumps(module_uri)};
 
-const aliases = ['best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]', 'inherit'];
+const aliases = ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]', 'inherit'];
 for (const alias of aliases) {{
   const resolved = normalizeModelSelection(alias);
   if (!resolved.valid) throw new Error(alias + ' rejected');
 }}
 const top = resolveTopModelFromCapabilities({{ modelAliases: {{ best: true, fable: true, opus: true }} }}, {{}});
 if (top.model !== 'best') throw new Error('expected best top model, got ' + top.model);
+const invalidEnvFallback = resolveTopModelFromCapabilities({{ modelAliases: {{ fable: true, opus: true }} }}, {{ CLAUDE_FOR_CODEX_TOP_MODEL: '-inject' }});
+if (invalidEnvFallback.model !== 'fable') throw new Error('invalid TOP_MODEL should fall back, got ' + invalidEnvFallback.model);
+const defaultEnv = resolveTopModelFromCapabilities({{ modelAliases: {{ fable: true, opus: true }} }}, {{ CLAUDE_FOR_CODEX_TOP_MODEL: 'default' }});
+if (defaultEnv.model !== 'default' || defaultEnv.fallbackModel !== '') throw new Error('default TOP_MODEL not preserved: ' + JSON.stringify(defaultEnv));
 if (MODEL_ALIAS_REGISTRY.some((entry) => /claude-(opus|sonnet|haiku|fable)-\\d/.test(entry.alias))) {{
   throw new Error('registry contains dated model alias');
 }}
-console.log(JSON.stringify({{ ok: true, top }}));
+console.log(JSON.stringify({{ ok: true, top, invalidEnvFallback, defaultEnv }}));
 """
     result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -5767,11 +5814,16 @@ const served = classifyClaudeOutcome({{
 }});
 const timeout = classifyClaudeOutcome({{ status: 1, stderr: 'Error: ETIMEDOUT' }});
 const unknownDeny = classifyClaudeOutcome({{ status: 1, stderr: 'Permission deny rule "MultiEdit" matches no known tool.' }});
+const successfulReviewText = classifyClaudeOutcome({{
+  status: 0,
+  stdout: 'Reviewed retry timeout handling, API key redaction, and 429 rate limit docs with no findings.'
+}});
 if (refusal.kind !== 'refusal' || refusal.refusalCategory !== 'cyber' || refusal.ok !== false) throw new Error(JSON.stringify(refusal));
 if (served.kind !== 'success' || served.servedByFallback !== true || served.stopReason !== 'end_turn') throw new Error(JSON.stringify(served));
 if (timeout.kind !== 'timeout') throw new Error(JSON.stringify(timeout));
 if (unknownDeny.kind !== 'unknown_deny_tool') throw new Error(JSON.stringify(unknownDeny));
-console.log(JSON.stringify({{ refusal, served, timeout, unknownDeny }}));
+if (successfulReviewText.kind !== 'success' || successfulReviewText.ok !== true) throw new Error(JSON.stringify(successfulReviewText));
+console.log(JSON.stringify({{ refusal, served, timeout, unknownDeny, successfulReviewText }}));
 """
     result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -7043,6 +7095,22 @@ def test_sdk_subagents_receive_fable_for_max_quality(tmp_path):
     assert query["agents"]["cfc_correctness"]["effort"] == "max"
     assert query["agents"]["cfc_security"]["effort"] == "max"
     assert "--fallback-model" not in json.dumps(query)
+
+
+def test_sdk_native_agents_fall_back_to_inherit_for_custom_and_default_models():
+    module_uri = (PLUGIN / "scripts" / "lib" / "claude-native-review.mjs").as_uri()
+    code = f"""
+import {{ buildNativeReviewAgents }} from {json.dumps(module_uri)};
+const custom = buildNativeReviewAgents(['correctness'], {{ model: 'gpt-4' }});
+const defaultModel = buildNativeReviewAgents(['correctness'], {{ model: 'default' }});
+const modelId = buildNativeReviewAgents(['correctness'], {{ model: 'claude-opus-latest' }});
+if (custom.cfc_correctness.model !== 'inherit') throw new Error('custom should inherit: ' + custom.cfc_correctness.model);
+if (defaultModel.cfc_correctness.model !== 'inherit') throw new Error('default should inherit: ' + defaultModel.cfc_correctness.model);
+if (modelId.cfc_correctness.model !== 'claude-opus-latest') throw new Error('model id should be preserved: ' + modelId.cfc_correctness.model);
+console.log(JSON.stringify({{ custom, defaultModel, modelId }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_sdk_subagents_quality_max_does_not_inherit_cli_top_alias_without_env(tmp_path):
@@ -8331,6 +8399,8 @@ def test_release_check_knows_claude_0160_native_assets():
     assert checks["native-sdk-package-compat"]["ok"] is True
     assert checks["native-docs"]["ok"] is True
     assert checks["native-maturity-docs"]["ok"] is True
+    assert checks["outcome-success-stdout-not-failure"]["ok"] is True
+    assert checks["model-registry-default-and-env-fallback"]["ok"] is True
     assert checks["native-sdk-explicit-opt-in"]["ok"] is True
     assert checks["native-sdk-explicit-opt-in"]["detail"] == "--backend sdk --agent-team sdk-subagents"
     assert checks["native-default-cli-preserved"]["ok"] is True
@@ -8851,7 +8921,7 @@ def test_github_actions_rejects_invalid_model_before_render(tmp_path, model):
     )
 
     assert result.returncode == 2
-    assert "Invalid --model value." in result.stderr
+    assert "Invalid --model value" in result.stderr
 
 
 def test_github_actions_init_write_and_force(tmp_path):
@@ -10725,7 +10795,7 @@ import sys
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
-time.sleep(30)
+time.sleep(120)
 print("SHOULD_NOT_FINISH")
 """
     )
@@ -10762,18 +10832,19 @@ print("SHOULD_NOT_FINISH")
     assert job["pidIdentity"]["command"]
     assert job["childProcessGroupIdentity"]["command"]
 
-    cancel = subprocess.run(
-        [NODE, str(runtime), "cancel", job_id],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    cancel = run_cancel_with_lock_retry(runtime, job_id, cwd=repo, env=env)
     assert cancel.returncode == 0, cancel.stderr
     cancel_payload = json.loads(cancel.stdout)
     assert cancel_payload["status"] == "cancelled"
     assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == job["workerPid"]
     assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
+    assert cancel_payload["job"]["cancelWorkerDeferred"] is True
+    assert cancel_payload["job"]["cancelWorkerDelivered"] is False
+    for _ in range(30):
+        if not process_is_running(job["workerPid"]):
+            break
+        time.sleep(0.1)
+    assert not process_is_running(job["workerPid"])
 
 
 def test_cancel_running_host_forwarded_reserved_job_validates_and_terminates_worker(tmp_path):
@@ -10798,7 +10869,7 @@ import time
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
-time.sleep(2)
+time.sleep(120)
 open(os.environ["FAKE_CLAUDE_COMPLETION_MARKER"], "w", encoding="utf8").write("completed\\n")
 print("SHOULD_NOT_FINISH")
 """
@@ -10846,19 +10917,15 @@ print("SHOULD_NOT_FINISH")
         assert "run-reserved-job" in job["pidIdentity"]["command"]
         assert job["childProcessGroupIdentity"]["command"]
 
-        cancel = subprocess.run(
-            [NODE, str(runtime), "cancel", job_id],
-            cwd=repo,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        cancel = run_cancel_with_lock_retry(runtime, job_id, cwd=repo, env=env)
         assert cancel.returncode == 0, cancel.stderr
         cancel_payload = json.loads(cancel.stdout)
         assert cancel_payload["status"] == "cancelled"
         assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == worker.pid
         assert "run-reserved-job" in cancel_payload["job"]["cancelWorkerIdentity"]["command"]
         assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
+        assert cancel_payload["job"]["cancelWorkerDeferred"] is True
+        assert cancel_payload["job"]["cancelWorkerDelivered"] is False
         worker_stdout, worker_stderr = worker.communicate(timeout=5)
         assert worker.returncode == 0, worker_stderr
         worker_payload = json.loads(worker_stdout)

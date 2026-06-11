@@ -36,7 +36,10 @@ export function nativeAgentName(role) {
 
 function nativeAgentModel(model) {
   const normalized = normalizeModelSelection(model || "inherit");
-  return normalized.valid ? normalized.model : "inherit";
+  if (!normalized.valid || normalized.family === "custom" || normalized.family === "default") {
+    return "inherit";
+  }
+  return normalized.model;
 }
 
 function structuredReviewContract() {

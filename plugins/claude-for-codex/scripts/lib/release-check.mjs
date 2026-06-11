@@ -257,6 +257,7 @@ function checkNativeReleaseAssets(root) {
   const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
   const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
+  const outcomeClassifier = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "outcome-classifier.mjs"), "utf8");
   const modelRegistryPath = path.join(pluginRoot, "scripts", "lib", "model-registry.mjs");
   const modelRegistry = fs.existsSync(modelRegistryPath) ? fs.readFileSync(modelRegistryPath, "utf8") : "";
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
@@ -331,6 +332,21 @@ function checkNativeReleaseAssets(root) {
     result(backend.includes("@anthropic-ai/claude-agent-sdk"), "native-sdk-package-compat", "@anthropic-ai/claude-agent-sdk"),
     result(docsOk, "native-docs", detail),
     result(v018DocsOk, "native-maturity-docs", "0.18 docs include model alias registry, outcome classification, doctor, SDK isolation, and CI dogfood"),
+    result(
+      outcomeClassifier.includes("unknownOnly") &&
+        outcomeClassifier.includes("const failureText = status === 0") &&
+        outcomeClassifier.includes("`${result.stderr ?? \"\"}\\n${result.error ?? \"\"}`"),
+      "outcome-success-stdout-not-failure",
+      "successful model stdout is not scanned with broad auth/rate-limit/timeout failure classifiers"
+    ),
+    result(
+      modelRegistry.includes("safeModelAliasOrId(env.CLAUDE_FOR_CODEX_TOP_MODEL)") &&
+        modelRegistry.includes('requested === "default"') &&
+        nativeReview.includes('normalized.family === "custom"') &&
+        nativeReview.includes('normalized.family === "default"'),
+      "model-registry-default-and-env-fallback",
+      "default is a selectable CLI alias, invalid top-model env falls back, and SDK child agents inherit for custom/default models"
+    ),
     result(
       companion.includes("args.agentTeam = args.agentTeam ?? \"plugin\"") &&
         companion.includes("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.") &&
@@ -518,6 +534,7 @@ function longRunningLifecycleChecks(pluginRoot) {
   const workerSignalHandlerIndex = companion.indexOf('process.once("SIGTERM", signalHandler)');
   const workerSpawnIndex = companion.indexOf("child = spawn(process.execPath");
   const cancelChildTerminationIndex = jobs.indexOf("let childTermination = Number.isInteger(requestedChildGroupPid)");
+  const cancelChildDeliveredIndex = jobs.indexOf("childTermination.ok && childTermination.delivered");
   const cancelWorkerTerminationIndex = jobs.indexOf("let workerTermination = Number.isInteger(requested.workerPid)");
   // These source guards intentionally complement behavior tests. They pin
   // security/lifecycle invariants that are easy to preserve accidentally in
@@ -590,7 +607,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(processText.includes("captureProcessGroupIdentity") && processText.includes("missing saved process identity") && companion.includes("Child process group identity could not be validated") && companion.includes("!isProcessAlive(child.pid)") && processText.includes("commandHash") && processText.includes("processIdentityCommandMatches"), "child-process-identity-required", "child groups require stable saved private identity before signaling while fast exits are allowed to close normally"),
     result(companion.includes("function stopUnvalidatedChild") && companion.includes('stopUnvalidatedChild("SIGKILL")') && companion.includes("Child process group identity could not be validated"), "unvalidated-child-no-negative-pgid", "identity validation failure does not signal an unvalidated process group"),
     result(processText.includes("current === expected") && !processText.includes("expected.includes(current)") && !processText.includes("current.includes(expected)"), "process-identity-no-prefix-match", "process identity validation does not accept prefix/subset command matches"),
-    result(jobs.includes("childTermination.ok && workerTermination.ok") && jobs.includes("cancelChildIdentity") && jobs.includes("cancelWorkerIdentity") && jobs.includes("requires child process group validation before signaling the worker") && jobs.includes("{ preserveActive: true }") && cancelChildTerminationIndex >= 0 && cancelWorkerTerminationIndex > cancelChildTerminationIndex, "cancel-child-and-worker", "cancel validates and terminates the child group before signaling the worker, then waits for both"),
+    result(jobs.includes("persistCancelledAfterValidatedSignal") && jobs.includes("cancelledJobUpdates") && jobs.includes("cancelWorkerDeferred") && jobs.includes("deferred: true") && jobs.includes("childTermination.ok && workerTermination.ok") && jobs.includes("requires child process group validation before signaling the worker") && jobs.includes("{ preserveActive: true }") && cancelChildTerminationIndex >= 0 && cancelChildDeliveredIndex > cancelChildTerminationIndex && cancelWorkerTerminationIndex > cancelChildDeliveredIndex, "cancel-child-worker-deferred", "cancel validates and terminates the child group first, persists cancellation from that delivered signal, and defers worker termination to avoid killing the worker while it holds the job lock"),
     result(jobs.includes("function cancelQueuedJob") && jobs.includes('current.status !== "queued"') && jobs.includes("return cancelJob(cwd, jobId, env)"), "cancel-queued-lock-reread", "queued cancel re-reads under lock and routes claimed jobs through running cancel"),
     result(jobs.includes("cancelQueuedWorkerPid") && jobs.includes("terminateValidatedJobWorker(updated.cancelQueuedWorkerPid") && jobs.includes("Queued worker cancellation requires process identity validation"), "cancel-queued-worker-terminated", "queued jobs with a spawned worker are not reported cancelled until the validated worker is handled"),
     result(jobs.includes("Running job cancellation did not deliver a signal") && jobs.includes("signalDelivered") && jobs.includes("phaseBeforeCancel") && jobs.includes("missingStartingChildSupervision") && jobs.includes("before child supervision metadata was persisted") && jobs.includes("preserveActive") && jobs.includes("Job reached a terminal state before cancellation failure could be persisted"), "cancel-requires-delivered-signal", "running cancel cannot report cancelled unless a validated signal was delivered and startup child supervision is known"),

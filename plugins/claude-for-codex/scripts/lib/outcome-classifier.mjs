@@ -39,10 +39,13 @@ function hasFallbackServed(events) {
   });
 }
 
-function classifyTextFailure(text = "") {
+function classifyTextFailure(text = "", options = {}) {
   const value = String(text ?? "");
   if (UNKNOWN_DENY_PATTERN.test(value)) {
     return "unknown_deny_tool";
+  }
+  if (options.unknownOnly) {
+    return "";
   }
   if (/not logged in|please run\s+\/login|authentication required|api key/i.test(value)) {
     return "auth";
@@ -74,7 +77,23 @@ export function classifyClaudeOutcome(result = {}) {
     };
   }
 
-  const textKind = classifyTextFailure(`${result.stderr ?? ""}\n${result.stdout ?? ""}\n${result.error ?? ""}`);
+  const status = statusCode(result);
+  const allText = `${result.stderr ?? ""}\n${result.stdout ?? ""}\n${result.error ?? ""}`;
+  const unknownDenyKind = classifyTextFailure(allText, { unknownOnly: true });
+  if (unknownDenyKind) {
+    return {
+      kind: unknownDenyKind,
+      ok: false,
+      servedByFallback: hasFallbackServed(events),
+      refusalCategory: "",
+      stopReason: events.find((event) => stopReasonForEvent(event)) ? stopReasonForEvent(events.find((event) => stopReasonForEvent(event))) : ""
+    };
+  }
+
+  const failureText = status === 0
+    ? `${result.stderr ?? ""}\n${result.error ?? ""}`
+    : allText;
+  const textKind = classifyTextFailure(failureText);
   if (textKind) {
     return {
       kind: textKind,
@@ -85,7 +104,7 @@ export function classifyClaudeOutcome(result = {}) {
     };
   }
 
-  if (statusCode(result) !== 0) {
+  if (status !== 0) {
     return {
       kind: "provider_error",
       ok: false,

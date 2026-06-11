@@ -24,7 +24,7 @@ function aliasEntry(alias) {
   return MODEL_ALIAS_REGISTRY.find((entry) => entry.alias === alias) ?? null;
 }
 
-export function normalizeModelSelection(value, { allowDefault = false, allowInherit = true } = {}) {
+export function normalizeModelSelection(value, { allowDefault = true, allowInherit = true } = {}) {
   const raw = String(value ?? "").trim();
   if (!raw || raw.startsWith("-") || /[\r\n\0]/.test(raw)) {
     return { valid: false, model: "", reason: "empty-or-unsafe" };
@@ -64,7 +64,7 @@ export function assertSafeModelAliasOrId(value, options = {}) {
   return selection.model;
 }
 
-function safeModelAliasOrId(value, options = {}) {
+export function safeModelAliasOrId(value, options = {}) {
   try {
     return assertSafeModelAliasOrId(value, options);
   } catch {
@@ -82,12 +82,12 @@ export function topModelFallback(env = {}) {
 }
 
 export function resolveTopModelFromCapabilities(capabilities = {}, env = {}) {
-  const requested = env.CLAUDE_FOR_CODEX_TOP_MODEL ? assertSafeModelAliasOrId(env.CLAUDE_FOR_CODEX_TOP_MODEL) : "";
+  const requested = env.CLAUDE_FOR_CODEX_TOP_MODEL ? safeModelAliasOrId(env.CLAUDE_FOR_CODEX_TOP_MODEL) : "";
   if (requested) {
     return {
       model: requested,
       source: "CLAUDE_FOR_CODEX_TOP_MODEL",
-      fallbackModel: requested === "opus" ? "" : topModelFallback(env)
+      fallbackModel: requested === "opus" || requested === "default" ? "" : topModelFallback(env)
     };
   }
   const aliases = capabilities.modelAliases ?? capabilities;
