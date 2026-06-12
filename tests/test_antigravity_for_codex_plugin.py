@@ -1,6 +1,7 @@
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import subprocess
 import time
@@ -359,6 +360,402 @@ def run_node_eval(source, env=None):
         capture_output=True,
         text=True,
     )
+
+
+def test_antigravity_process_probe_timeout_is_fail_closed_for_cancel(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ps = fake_bin / "ps"
+    ps.write_text("#!/bin/sh\nsleep 2\n", encoding="utf8")
+    ps.chmod(0o755)
+    env = sanitized_env()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["ANTIGRAVITY_FOR_CODEX_PS_TIMEOUT_MS"] = "50"
+    source = """
+import { captureProcessIdentityProbe, psProbeDiagnostics } from './plugins/antigravity-for-codex/scripts/lib/process.mjs';
+const identity = captureProcessIdentityProbe(999999, process.env);
+const diagnostics = psProbeDiagnostics();
+if (!identity.inconclusive) throw new Error('expected inconclusive identity');
+if (!diagnostics.lastFailure) throw new Error('missing ps diagnostic');
+console.log(JSON.stringify(diagnostics));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_process_probe_nonzero_ps_for_live_process_is_inconclusive(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ps = fake_bin / "ps"
+    ps.write_text("#!/bin/sh\necho 'fake ps failed' >&2\nexit 2\n", encoding="utf8")
+    ps.chmod(0o755)
+    env = sanitized_env()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    source = """
+import { spawn } from 'node:child_process';
+import process from 'node:process';
+import { captureProcessIdentityProbe } from './plugins/antigravity-for-codex/scripts/lib/process.mjs';
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+if (!child.pid) throw new Error('failed to spawn test child');
+
+const deadline = Date.now() + 1000;
+let running = false;
+while (Date.now() < deadline) {
+  try {
+    process.kill(child.pid, 0);
+    running = true;
+    break;
+  } catch {}
+  sleepMs(25);
+}
+if (!running) throw new Error('test child did not become observable');
+
+try {
+  const probe = captureProcessIdentityProbe(child.pid, process.env);
+  if (!probe.inconclusive) throw new Error(`expected inconclusive probe: ${JSON.stringify(probe)}`);
+  if (probe.notRunning) throw new Error(`live process was classified as not running: ${JSON.stringify(probe)}`);
+  if (!String(probe.diagnostic?.stderr || '').includes('fake ps failed')) {
+    throw new Error(`expected ps diagnostic stderr: ${JSON.stringify(probe)}`);
+  }
+  console.log(JSON.stringify(probe));
+} finally {
+  try {
+    process.kill(child.pid, 'SIGKILL');
+  } catch {}
+}
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_cancel_probe_timeout_does_not_signal_worker(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ps = fake_bin / "ps"
+    ps.write_text("#!/bin/sh\nsleep 2\n", encoding="utf8")
+    ps.chmod(0o755)
+    env = sanitized_env()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["ANTIGRAVITY_FOR_CODEX_PS_TIMEOUT_MS"] = "50"
+    source = """
+import { terminateValidatedJobWorker } from './plugins/antigravity-for-codex/scripts/lib/process.mjs';
+
+const expected = {
+  pid: 999999,
+  ppid: process.pid,
+  command: `${process.execPath} plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake`
+};
+
+const termination = terminateValidatedJobWorker(expected.pid, expected, process.env);
+if (termination.status !== 'failed') throw new Error(`expected failed cancellation: ${JSON.stringify(termination)}`);
+if (termination.phase !== 'initial') throw new Error(`expected initial phase: ${JSON.stringify(termination)}`);
+if (!termination.diagnostic) throw new Error(`expected diagnostic: ${JSON.stringify(termination)}`);
+console.log(JSON.stringify(termination));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_windows_taskkill_failure_after_worker_exit_is_not_running(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    count_file = tmp_path / "powershell-count"
+    powershell = fake_bin / "powershell.exe"
+    powershell.write_text(
+        "#!/bin/sh\n"
+        f"count_file={shlex.quote(str(count_file))}\n"
+        "count=0\n"
+        "[ -f \"$count_file\" ] && count=$(cat \"$count_file\")\n"
+        "next=$((count + 1))\n"
+        "printf '%s' \"$next\" > \"$count_file\"\n"
+        "if [ \"$count\" -eq 0 ]; then\n"
+        "  printf '%s\\n' '{\"ProcessId\":4242,\"ParentProcessId\":1,\"CommandLine\":\"node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake\"}'\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 1\n",
+        encoding="utf8",
+    )
+    powershell.chmod(0o755)
+    taskkill = fake_bin / "taskkill.exe"
+    taskkill.write_text("#!/bin/sh\necho 'taskkill target not found' >&2\nexit 128\n", encoding="utf8")
+    taskkill.chmod(0o755)
+    env = sanitized_env()
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    source = """
+import process from 'node:process';
+import { terminateValidatedJobWorker } from './plugins/antigravity-for-codex/scripts/lib/process.mjs';
+
+try {
+  Object.defineProperty(process, 'platform', { value: 'win32' });
+} catch {
+  process.exit(0);
+}
+
+const expected = {
+  pid: 4242,
+  ppid: 1,
+  command: 'node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake'
+};
+const termination = terminateValidatedJobWorker(4242, expected, process.env);
+if (termination.status !== 'not_running') {
+  throw new Error(`expected not_running after taskkill race: ${JSON.stringify(termination)}`);
+}
+if (termination.phase !== 'taskkill') {
+  throw new Error(`expected taskkill phase: ${JSON.stringify(termination)}`);
+}
+console.log(JSON.stringify(termination));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_cancel_missing_trusted_identity_rejects_missing_pid():
+    source = """
+import { terminateValidatedJobWorker } from './plugins/antigravity-for-codex/scripts/lib/process.mjs';
+
+const termination = terminateValidatedJobWorker(undefined, {}, process.env);
+if (termination.status !== 'failed') throw new Error(`expected failed cancellation: ${JSON.stringify(termination)}`);
+if (termination.phase !== 'initial') throw new Error(`expected initial phase: ${JSON.stringify(termination)}`);
+if (!String(termination.error || '').includes('missing trusted worker identity')) {
+  throw new Error(`expected missing trusted identity error: ${JSON.stringify(termination)}`);
+}
+console.log(JSON.stringify(termination));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_cancel_uses_top_level_worker_pid_when_worker_pid_missing(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ps = fake_bin / "ps"
+    ps.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '4242 1 node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake'\n",
+        encoding="utf8",
+    )
+    ps.chmod(0o755)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["ANTIGRAVITY_FOR_CODEX_TEST_REPO"] = str(repo)
+    source = """
+import process from 'node:process';
+import { createJob, updateJob, cancelJob } from './plugins/antigravity-for-codex/scripts/lib/jobs.mjs';
+
+const originalKill = process.kill;
+const killCalls = [];
+const cwd = process.env.ANTIGRAVITY_FOR_CODEX_TEST_REPO;
+
+try {
+  process.kill = (pid, signal = 0) => {
+    killCalls.push({ pid, signal });
+    if (pid === -4242 && signal === 'SIGTERM') {
+      return true;
+    }
+    if (pid === -4242 && signal === 0) {
+      const error = new Error('no such process group');
+      error.code = 'ESRCH';
+      throw error;
+    }
+    return originalKill(pid, signal);
+  };
+
+  const expectedIdentity = {
+    pid: 4242,
+    ppid: 1,
+    command: 'node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake'
+  };
+  const job = createJob({ command: 'review', args: ['top-level worker pid'], cwd }, process.env);
+  updateJob(job.id, (draft) => {
+    draft.status = 'running';
+    draft.submissionState = 'running';
+    draft.worker = { identity: expectedIdentity };
+    draft.workerPid = 4242;
+    return draft;
+  }, cwd, process.env);
+
+  const cancelled = cancelJob(job.id, cwd, process.env);
+  if (cancelled.status !== 'cancelled') throw new Error(`expected cancelled: ${JSON.stringify(cancelled)}`);
+  if (cancelled.cancel.status === 'not_running') {
+    throw new Error(`top-level worker pid was not used for termination: ${JSON.stringify(cancelled)}`);
+  }
+  if (cancelled.cancel.status !== 'terminated') {
+    throw new Error(`expected terminated cancellation: ${JSON.stringify(cancelled)}`);
+  }
+  if (!killCalls.some((call) => call.pid === -4242 && call.signal === 'SIGTERM')) {
+    throw new Error(`expected SIGTERM for top-level worker pid: ${JSON.stringify({ cancelled, killCalls })}`);
+  }
+  console.log(JSON.stringify({ cancel: cancelled.cancel, killCalls }));
+} finally {
+  process.kill = originalKill;
+}
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_cancel_post_sigterm_probe_timeout_does_not_sigkill(tmp_path):
+    worker_script = tmp_path / "antigravity-companion.mjs"
+    worker_script.write_text(
+        "process.on('SIGTERM', () => {});\n"
+        "setInterval(() => {}, 1000);\n",
+        encoding="utf8",
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    count_file = tmp_path / "ps-count"
+    real_ps = shutil.which("ps") or "/bin/ps"
+    ps = fake_bin / "ps"
+    ps.write_text(
+        "#!/bin/sh\n"
+        f"count_file={shlex.quote(str(count_file))}\n"
+        f"real_ps={shlex.quote(real_ps)}\n"
+        "count=0\n"
+        "[ -f \"$count_file\" ] && count=$(cat \"$count_file\")\n"
+        "next=$((count + 1))\n"
+        "printf '%s' \"$next\" > \"$count_file\"\n"
+        "if [ \"$count\" -eq 0 ]; then\n"
+        "  exec \"$real_ps\" \"$@\"\n"
+        "fi\n"
+        "sleep 2\n",
+        encoding="utf8",
+    )
+    ps.chmod(0o755)
+    env = sanitized_env()
+    env["REAL_PATH"] = env.get("PATH", "")
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["ANTIGRAVITY_FOR_CODEX_PS_TIMEOUT_MS"] = "500"
+    env["ANTIGRAVITY_FOR_CODEX_TEST_WORKER_SCRIPT"] = str(worker_script)
+    source = """
+import { spawn } from 'node:child_process';
+import process from 'node:process';
+import {
+  captureProcessIdentityProbe,
+  terminateValidatedJobWorker
+} from './plugins/antigravity-for-codex/scripts/lib/process.mjs';
+
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+const child = spawn(process.execPath, [process.env.ANTIGRAVITY_FOR_CODEX_TEST_WORKER_SCRIPT, '__run-job', 'fake'], {
+  detached: process.platform !== 'win32',
+  stdio: 'ignore'
+});
+child.unref();
+if (!child.pid) throw new Error('failed to spawn test child');
+
+const deadline = Date.now() + 1000;
+let running = false;
+while (Date.now() < deadline) {
+  try {
+    process.kill(child.pid, 0);
+    running = true;
+    break;
+  } catch {}
+  sleepMs(25);
+}
+if (!running) throw new Error('test child did not become observable');
+
+try {
+  const expectedProbe = captureProcessIdentityProbe(child.pid, { ...process.env, PATH: process.env.REAL_PATH });
+  if (!expectedProbe.ok) throw new Error(`expected initial real probe: ${JSON.stringify(expectedProbe)}`);
+  const termination = terminateValidatedJobWorker(child.pid, expectedProbe.identity, process.env);
+  if (termination.status !== 'failed') throw new Error(`expected failed cancellation: ${JSON.stringify(termination)}`);
+  if (termination.phase !== 'post-sigterm') throw new Error(`expected post-sigterm phase: ${JSON.stringify(termination)}`);
+  try {
+    process.kill(child.pid, 0);
+  } catch {
+    throw new Error('child was SIGKILLed after inconclusive post-SIGTERM probe');
+  }
+  console.log(JSON.stringify(termination));
+} finally {
+  try {
+    if (process.platform === 'win32') {
+      process.kill(child.pid, 'SIGKILL');
+    } else {
+      process.kill(-child.pid, 'SIGKILL');
+    }
+  } catch {}
+}
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_cancel_missing_trusted_identity_for_active_job_fails(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_TEST_REPO"] = str(repo)
+    source = """
+import { createJob, updateJob } from './plugins/antigravity-for-codex/scripts/lib/jobs.mjs';
+
+const cwd = process.env.ANTIGRAVITY_FOR_CODEX_TEST_REPO;
+const job = createJob({ command: 'review', args: ['missing trusted identity'], cwd }, process.env);
+updateJob(job.id, (draft) => {
+  draft.status = 'running';
+  draft.submissionState = 'running';
+  draft.worker = null;
+  draft.workerPid = 123456;
+  return draft;
+}, cwd, process.env);
+console.log(job.id);
+"""
+    created = run_node_eval(source, env)
+    assert created.returncode == 0, created.stderr
+    job_id = created.stdout.strip()
+
+    cancel = run_companion(["cancel", job_id], repo, env)
+
+    assert cancel.returncode == 0, cancel.stderr
+    payload = json.loads(cancel.stdout)
+    assert payload["status"] == "cancel_failed"
+    assert "missing trusted worker identity" in payload["error"]
+    latest = json.loads(run_companion(["status", job_id], repo, env).stdout)
+    assert latest["status"] == "cancel_failed"
+    assert latest["cancel"]["phase"] == "initial"
+
+
+def test_antigravity_cancel_missing_trusted_identity_for_starting_queued_job_fails(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_TEST_REPO"] = str(repo)
+    source = """
+import { createJob, updateJob } from './plugins/antigravity-for-codex/scripts/lib/jobs.mjs';
+
+const cwd = process.env.ANTIGRAVITY_FOR_CODEX_TEST_REPO;
+const job = createJob({ command: 'review', args: ['starting missing trusted identity'], cwd }, process.env);
+updateJob(job.id, (draft) => {
+  draft.status = 'queued';
+  draft.submissionState = 'starting';
+  draft.worker = null;
+  draft.workerPid = null;
+  return draft;
+}, cwd, process.env);
+console.log(job.id);
+"""
+    created = run_node_eval(source, env)
+    assert created.returncode == 0, created.stderr
+    job_id = created.stdout.strip()
+
+    cancel = run_companion(["cancel", job_id], repo, env)
+
+    assert cancel.returncode == 0, cancel.stderr
+    payload = json.loads(cancel.stdout)
+    assert payload["status"] == "cancel_failed"
+    assert "missing trusted worker identity" in payload["error"]
+    assert payload["cancel"]["phase"] == "initial"
 
 
 def companion_env(tmp_path, agy=None):
@@ -2487,6 +2884,122 @@ def test_reserved_job_lifecycle_is_explicit(tmp_path):
     assert json.loads(result.stdout)["stdout"] == "RESERVED_OK"
 
 
+def test_reserved_job_cancel_is_metadata_only(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="RESERVED_OK", delay_ms=100))
+
+    reserved = run_companion(["reserve-job", "review", "reserved cancel"], repo, env)
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["jobId"]
+
+    cancelled = run_companion(["cancel", job_id], repo, env)
+
+    assert cancelled.returncode == 0, cancelled.stderr
+    payload = json.loads(cancelled.stdout)
+    assert payload["status"] == "cancelled"
+    assert payload["cancel"]["status"] == "not_running"
+    assert "missing trusted worker identity" not in payload.get("error", "")
+
+
+def test_reserved_job_cancel_uses_recorded_worker_pid_when_present(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    ps = fake_bin / "ps"
+    ps.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' '4242 1 node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake'\n",
+        encoding="utf8",
+    )
+    ps.chmod(0o755)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+    env["ANTIGRAVITY_FOR_CODEX_TEST_REPO"] = str(repo)
+    source = """
+import process from 'node:process';
+import { createJob, updateJob, cancelJob } from './plugins/antigravity-for-codex/scripts/lib/jobs.mjs';
+
+const originalKill = process.kill;
+const killCalls = [];
+const cwd = process.env.ANTIGRAVITY_FOR_CODEX_TEST_REPO;
+
+try {
+  process.kill = (pid, signal = 0) => {
+    killCalls.push({ pid, signal });
+    if (pid === -4242 && signal === 'SIGTERM') {
+      return true;
+    }
+    if (pid === -4242 && signal === 0) {
+      const error = new Error('no such process group');
+      error.code = 'ESRCH';
+      throw error;
+    }
+    return originalKill(pid, signal);
+  };
+
+  const expectedIdentity = {
+    pid: 4242,
+    ppid: 1,
+    command: 'node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs __run-job fake'
+  };
+  const job = createJob({ command: 'review', args: ['reserved with worker pid'], cwd }, process.env);
+  updateJob(job.id, (draft) => {
+    draft.status = 'reserved';
+    draft.submissionState = 'created';
+    draft.worker = { identity: expectedIdentity };
+    draft.workerPid = '4242';
+    return draft;
+  }, cwd, process.env);
+
+  const cancelled = cancelJob(job.id, cwd, process.env);
+  if (cancelled.status !== 'cancelled') throw new Error(`expected cancelled: ${JSON.stringify(cancelled)}`);
+  if (cancelled.cancel.status === 'not_running') {
+    throw new Error(`reserved worker pid was not used for termination: ${JSON.stringify(cancelled)}`);
+  }
+  if (cancelled.cancel.status !== 'terminated') {
+    throw new Error(`expected terminated cancellation: ${JSON.stringify(cancelled)}`);
+  }
+  if (!killCalls.some((call) => call.pid === -4242 && call.signal === 'SIGTERM')) {
+    throw new Error(`expected SIGTERM for reserved worker pid: ${JSON.stringify({ cancelled, killCalls })}`);
+  }
+  console.log(JSON.stringify({ cancel: cancelled.cancel, killCalls }));
+} finally {
+  process.kill = originalKill;
+}
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+
+
+def test_queued_unstarted_job_cancel_is_metadata_only(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path))
+    env["ANTIGRAVITY_FOR_CODEX_TEST_REPO"] = str(repo)
+    source = """
+import { createJob } from './plugins/antigravity-for-codex/scripts/lib/jobs.mjs';
+
+const cwd = process.env.ANTIGRAVITY_FOR_CODEX_TEST_REPO;
+const job = createJob({ command: 'review', args: ['queued only'], cwd }, process.env);
+console.log(job.id);
+"""
+    created = run_node_eval(source, env)
+    assert created.returncode == 0, created.stderr
+    job_id = created.stdout.strip()
+
+    cancelled = run_companion(["cancel", job_id], repo, env)
+
+    assert cancelled.returncode == 0, cancelled.stderr
+    payload = json.loads(cancelled.stdout)
+    assert payload["status"] == "cancelled"
+    assert payload["cancel"]["status"] == "not_running"
+    assert "missing trusted worker identity" not in payload.get("error", "")
+
+
 def test_reserved_job_duplicate_start_is_rejected(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -2922,11 +3435,12 @@ def test_process_identity_validation_checks_pid_ppid_command_before_group_kill()
     text = (PLUGIN / "scripts" / "lib" / "process.mjs").read_text(encoding="utf8")
     jobs_text = (PLUGIN / "scripts" / "lib" / "jobs.mjs").read_text(encoding="utf8")
 
-    assert "current.pid !== expectedIdentity.pid" in text
-    assert "current.command !== expectedIdentity.command" in text
-    assert 'current.command.includes("antigravity-companion.mjs")' in text
+    assert "sameProcessIdentity(expectedIdentity, initialProbe.identity)" in text
+    assert "actualCommand === expectedCommand" in text
+    assert 'expectedCommand.includes("antigravity-companion.mjs")' in text
+    assert 'expectedCommand.includes("__run-job")' in text
     assert "ppid changed" not in text
-    assert 'process.kill(-numericPid, "SIGTERM")' in text
+    assert "process.kill(-pid, signal)" in text
     assert 'process.platform === "win32"' in text
     assert '"taskkill.exe"' in text
     assert "fs.renameSync(lockFile, staleFile)" in jobs_text

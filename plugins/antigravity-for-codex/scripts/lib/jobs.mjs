@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { stateDirForCwd } from "./state.mjs";
-import { terminateValidatedJobWorker } from "./process.mjs";
+import { hasTrustedExpectedIdentity, terminateValidatedJobWorker } from "./process.mjs";
 import { classifyJobLiveness } from "./job-lifecycle.mjs";
 
 export const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled", "cancel_failed"]);
@@ -120,6 +120,55 @@ function capText(value) {
   }
   const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf8");
   return `${bytes.subarray(0, OUTPUT_CAP_BYTES - markerBytes).toString("utf8")}${TRUNCATION_MARKER}`;
+}
+
+function positiveIntegerOrNull(value) {
+  const numericValue = Number(value);
+  return Number.isInteger(numericValue) && numericValue > 0 ? numericValue : null;
+}
+
+function recordedWorkerPid(job) {
+  return positiveIntegerOrNull(job?.worker?.pid)
+    ?? positiveIntegerOrNull(job?.workerPid)
+    ?? positiveIntegerOrNull(job?.worker?.identity?.pid);
+}
+
+function requiresTrustedWorkerIdentityForCancellation(job) {
+  const status = String(job?.status || "");
+  const submissionState = String(job?.submissionState || "");
+  const hasRecordedWorker = Boolean(recordedWorkerPid(job));
+  return ["starting", "running"].includes(status)
+    || ["starting", "running"].includes(submissionState)
+    || (status === "queued" && hasRecordedWorker);
+}
+
+function isMetadataOnlyCancellable(job) {
+  const status = String(job?.status || "");
+  const submissionState = String(job?.submissionState || "");
+  const hasRecordedWorker = Boolean(recordedWorkerPid(job));
+  return (status === "reserved" && !hasRecordedWorker && !["starting", "running"].includes(submissionState))
+    || (status === "queued" && !hasRecordedWorker && !["starting", "running"].includes(submissionState));
+}
+
+function missingTrustedWorkerIdentityResult(expected) {
+  return {
+    status: "failed",
+    error: "missing trusted worker identity",
+    phase: "initial",
+    diagnostic: { expected: expected || null }
+  };
+}
+
+function workerPidIdentityMismatchResult(workerPid, expected) {
+  return {
+    status: "failed",
+    error: "worker pid does not match trusted identity",
+    phase: "initial",
+    diagnostic: {
+      workerPid,
+      expected: expected || null
+    }
+  };
 }
 
 export function createJob({ command, args = [], cwd = process.cwd() }, env = process.env) {
@@ -262,7 +311,7 @@ export function markJobRunning(jobId, worker, cwd = process.cwd(), env = process
     }
     job.status = "running";
     job.worker = worker;
-    job.workerPid = worker?.pid ?? null;
+    job.workerPid = recordedWorkerPid({ worker });
     job.submissionState = "running";
     job.startedAt = job.startedAt || now();
     job.lastHeartbeatAt = job.lastHeartbeatAt || now();
@@ -297,7 +346,22 @@ export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
       return refreshed;
     }
 
-    const termination = terminateValidatedJobWorker(refreshed.worker?.pid, refreshed.worker?.identity);
+    let termination;
+    if (isMetadataOnlyCancellable(refreshed)) {
+      termination = { status: "not_running" };
+    } else {
+      const expectedIdentity = refreshed.worker?.identity;
+      const workerPid = recordedWorkerPid(refreshed);
+      if (requiresTrustedWorkerIdentityForCancellation(refreshed)
+        && !hasTrustedExpectedIdentity(expectedIdentity)) {
+        termination = missingTrustedWorkerIdentityResult(expectedIdentity);
+      } else if (hasTrustedExpectedIdentity(expectedIdentity)
+        && workerPid !== Number(expectedIdentity.pid)) {
+        termination = workerPidIdentityMismatchResult(workerPid, expectedIdentity);
+      } else {
+        termination = terminateValidatedJobWorker(workerPid, expectedIdentity, env);
+      }
+    }
     if (termination.status === "failed") {
       refreshed.status = "cancel_failed";
       refreshed.error = capText(termination.error || "Failed to cancel job.");
