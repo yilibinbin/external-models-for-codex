@@ -2467,7 +2467,9 @@ function printSetup(rawArgs) {
   };
 
   console.log(JSON.stringify(report, null, 2));
-  process.exit(report.claudeAvailable && report.gitAvailable && report.reviewGate.stateReadable ? 0 : 1);
+  const mutatedConfig = Boolean(options.enable || options.disable || options.mode);
+  const healthy = report.claudeAvailable && report.gitAvailable && report.reviewGate.stateReadable;
+  process.exit((mutatedConfig && report.reviewGate.stateReadable) || healthy ? 0 : 1);
 }
 
 function printStatus() {

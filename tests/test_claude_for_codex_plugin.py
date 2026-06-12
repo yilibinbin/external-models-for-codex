@@ -2284,10 +2284,18 @@ def test_cancel_orphaned_job_uses_validated_child_process_group(tmp_path):
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
     pid_file = tmp_path / "orphan.pid"
+    child_script = tmp_path / "orphan_child.py"
     repo.mkdir()
     data.mkdir()
+    child_script.write_text(
+        f"import os, pathlib, signal, time\n"
+        f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
+        f"signal.signal(signal.SIGTERM, lambda signum, frame: None)\n"
+        f"while True: time.sleep(1)\n",
+        encoding="utf8",
+    )
     child = subprocess.Popen(
-        ["python3", "-c", f"import os, pathlib, signal, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM, lambda signum, frame: None)\nwhile True: time.sleep(1)\n"],
+        ["python3", str(child_script)],
         start_new_session=True,
     )
     try:
@@ -2340,30 +2348,29 @@ def test_cancel_preserves_terminal_result_written_during_signal(tmp_path):
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
     pid_file = tmp_path / "race.pid"
+    child_script = tmp_path / "cancel_race_child.py"
     repo.mkdir()
     data.mkdir()
+    child_script.write_text(
+        "import json, os, pathlib, signal, sys, time\n"
+        f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
+        "job_file = pathlib.Path(os.environ['JOB_FILE'])\n"
+        "def handler(signum, frame):\n"
+        "    job = json.loads(job_file.read_text())\n"
+        "    job.update({'status': 'succeeded', 'phase': 'succeeded', 'finishedAt': '2026-06-09T00:01:00.000Z', 'exitStatus': 0})\n"
+        "    job_file.write_text(json.dumps(job))\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, handler)\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf8",
+    )
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
     listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
     jobs_dir = pathlib.Path(json.loads(listed.stdout)["stateDir"]) / "jobs"
     job_file = jobs_dir / "cancel-race.json"
     child = subprocess.Popen(
-        [
-            "python3",
-            "-c",
-            (
-                "import json, os, pathlib, signal, sys, time\n"
-                f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
-                "job_file = pathlib.Path(os.environ['JOB_FILE'])\n"
-                "def handler(signum, frame):\n"
-                "    job = json.loads(job_file.read_text())\n"
-                "    job.update({'status': 'succeeded', 'phase': 'succeeded', 'finishedAt': '2026-06-09T00:01:00.000Z', 'exitStatus': 0})\n"
-                "    job_file.write_text(json.dumps(job))\n"
-                "    sys.exit(0)\n"
-                "signal.signal(signal.SIGTERM, handler)\n"
-                "while True: time.sleep(1)\n"
-            ),
-        ],
+        ["python3", str(child_script)],
         env={**os.environ, "JOB_FILE": str(job_file)},
         start_new_session=True,
     )
@@ -6319,6 +6326,8 @@ def test_setup_state_file_is_outside_repo_and_corruption_is_reported(tmp_path):
 
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = str(tmp_path / "bin")
 
     enabled = subprocess.run(
         [NODE, str(runtime), "setup", "--enable-review-gate"],
@@ -6328,6 +6337,9 @@ def test_setup_state_file_is_outside_repo_and_corruption_is_reported(tmp_path):
         text=True,
     )
     assert enabled.returncode == 0, enabled.stderr
+    payload = json.loads(enabled.stdout)
+    assert payload["claudeAvailable"] is False
+    assert payload["gitAvailable"] is False
     state_file = pathlib.Path(json.loads(enabled.stdout)["reviewGate"]["stateFile"])
     assert data in state_file.parents
     assert repo not in state_file.parents
