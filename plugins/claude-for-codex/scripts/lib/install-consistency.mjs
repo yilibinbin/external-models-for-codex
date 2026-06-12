@@ -26,14 +26,20 @@ function sourcePath(entry) {
   return typeof entry?.source?.path === "string" ? entry.source.path : "";
 }
 
-function installedEntry(pluginListJson, { pluginId, pluginName = DEFAULT_PLUGIN_NAME, marketplaceName = MARKETPLACE_NAME } = {}) {
+export function matchesClaudePluginEntry(entry, { pluginId = DEFAULT_PLUGIN_ID, pluginName = DEFAULT_PLUGIN_NAME, marketplaceName = MARKETPLACE_NAME } = {}) {
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+  if (entry.pluginId === pluginId) {
+    return true;
+  }
+  return entry.name === pluginName && entry.marketplaceName === marketplaceName;
+}
+
+export function installedEntry(pluginListJson, { pluginId = DEFAULT_PLUGIN_ID, pluginName = DEFAULT_PLUGIN_NAME, marketplaceName = MARKETPLACE_NAME } = {}) {
   const parsed = typeof pluginListJson === "string" ? parseJson(pluginListJson, {}) : pluginListJson;
-  return (parsed?.installed ?? []).find((entry) => {
-    if (entry?.pluginId === pluginId) {
-      return true;
-    }
-    return entry?.name === pluginName && entry?.marketplaceName === marketplaceName;
-  }) ?? null;
+  const installed = Array.isArray(parsed?.installed) ? parsed.installed : [];
+  return installed.find((entry) => matchesClaudePluginEntry(entry, { pluginId, pluginName, marketplaceName })) ?? null;
 }
 
 function commandList(pluginId = DEFAULT_PLUGIN_ID) {
@@ -88,6 +94,12 @@ export function installConsistencyReport({
     problems.push({
       code: "stale-installed-version",
       message: `${pluginId} installed version ${installedVersion} differs from running plugin version ${runningVersion}.`
+    });
+  }
+  if (installedVersion && cacheVersion && installedVersion !== cacheVersion) {
+    problems.push({
+      code: "installed-cache-version-mismatch",
+      message: `${pluginId} Codex installed version ${installedVersion} differs from cached plugin manifest version ${cacheVersion}.`
     });
   }
 

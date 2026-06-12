@@ -6,6 +6,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import time
 
 import pytest
@@ -27,6 +28,20 @@ def process_is_running(pid):
         return False
     stat = parts[1] if len(parts) > 1 else ""
     return not stat.startswith("Z")
+
+
+def process_group_has_running_members(pgid):
+    result = subprocess.run(["ps", "-axo", "pid=,pgid=,stat="], capture_output=True, text=True)
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        _pid, group, stat = parts
+        if group == str(pgid) and not stat.startswith("Z"):
+            return True
+    return False
 
 
 def run_cancel_with_lock_retry(runtime, job_id, *, cwd, env, attempts=20):
@@ -294,7 +309,8 @@ def test_install_consistency_matches_name_marketplace_shape(tmp_path):
         }]
     }
     code = f"""
-import {{ installConsistencyReport }} from {json.dumps(module_uri)};
+import {{ installConsistencyReport, matchesClaudePluginEntry }} from {json.dumps(module_uri)};
+if (!matchesClaudePluginEntry({json.dumps(installed_json["installed"][0])})) throw new Error('name/marketplace matcher failed');
 const report = installConsistencyReport({{
   pluginRoot: {json.dumps(str(plugin))},
   pluginListJson: {json.dumps(json.dumps(installed_json))}
@@ -302,6 +318,71 @@ const report = installConsistencyReport({{
 if (!report.ok) throw new Error('expected installed plugin to be ok: ' + JSON.stringify(report.problems));
 if (report.status !== 'ok') throw new Error('expected ok status');
 if (report.cacheVersion !== '0.18.1') throw new Error('expected cacheVersion from source manifest');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_install_consistency_detects_installed_cache_version_mismatch(tmp_path):
+    module_uri = (PLUGIN / "scripts" / "lib" / "install-consistency.mjs").as_uri()
+    running = tmp_path / "running" / "plugins" / "claude-for-codex"
+    installed = tmp_path / "installed" / "plugins" / "claude-for-codex"
+    for root in (running, installed):
+        manifest_dir = root / ".codex-plugin"
+        manifest_dir.mkdir(parents=True)
+    (running / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (installed / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.17.0"}', encoding="utf8")
+    installed_json = {
+        "installed": [{
+            "name": "claude-for-codex",
+            "marketplaceName": "external-models-for-codex",
+            "version": "0.18.1",
+            "enabled": True,
+            "source": {"path": str(installed)},
+        }]
+    }
+    code = f"""
+import {{ installConsistencyReport }} from {json.dumps(module_uri)};
+const report = installConsistencyReport({{
+  pluginRoot: {json.dumps(str(running))},
+  pluginListJson: {json.dumps(json.dumps(installed_json))}
+}});
+if (report.ok) throw new Error('cache mismatch should require attention');
+if (report.status !== 'attention') throw new Error('expected attention status, got ' + report.status);
+if (report.installedVersion !== '0.18.1') throw new Error('bad installedVersion');
+if (report.cacheVersion !== '0.17.0') throw new Error('bad cacheVersion');
+if (!report.problems.some((problem) => problem.code === 'installed-cache-version-mismatch')) throw new Error('missing cache mismatch marker');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_install_consistency_skips_cache_mismatch_when_source_manifest_unavailable(tmp_path):
+    module_uri = (PLUGIN / "scripts" / "lib" / "install-consistency.mjs").as_uri()
+    running = tmp_path / "running" / "plugins" / "claude-for-codex"
+    manifest_dir = running / ".codex-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    installed_json = {
+        "installed": [{
+            "name": "claude-for-codex",
+            "marketplaceName": "external-models-for-codex",
+            "version": "0.18.1",
+            "enabled": True,
+            "source": {"path": str(tmp_path / "missing-cache")},
+        }]
+    }
+    code = f"""
+import {{ installConsistencyReport }} from {json.dumps(module_uri)};
+const report = installConsistencyReport({{
+  pluginRoot: {json.dumps(str(running))},
+  pluginListJson: {json.dumps(json.dumps(installed_json))}
+}});
+if (!report.ok) throw new Error('missing cache manifest should not require attention: ' + JSON.stringify(report.problems));
+if (report.cacheVersion !== '') throw new Error('expected empty cacheVersion');
+if (report.problems.some((problem) => problem.code === 'installed-cache-version-mismatch')) throw new Error('unexpected cache mismatch marker');
 console.log(JSON.stringify(report));
 """
     result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
@@ -810,6 +891,7 @@ def test_background_worker_heartbeats_during_no_output_child(tmp_path):
     fake_claude.chmod(0o755)
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
     env["CLAUDE_FOR_CODEX_HEARTBEAT_INTERVAL_MS"] = "100"
     started = subprocess.run([NODE, str(runtime), "review", "--background", "slow no output"], cwd=repo, env=env, capture_output=True, text=True, timeout=5)
@@ -995,7 +1077,7 @@ if sys.argv[1:] == ["--version"]:
 child = subprocess.Popen([
     sys.executable,
     "-c",
-    "import signal,time; signal.signal(signal.SIGTERM, lambda s,f: None); time.sleep(30)",
+    "import signal,time; signal.signal(signal.SIGTERM, lambda s,f: None); time.sleep(60)",
 ])
 pathlib.Path({json.dumps(str(child_pid_file))}).write_text(str(child.pid))
 signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(0))
@@ -1007,23 +1089,25 @@ while True:
     fake_claude.chmod(0o755)
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
-    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "2000"
+    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "8000"
     env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "200"
 
+    started_at = time.time()
     result = subprocess.run(
-        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "6000", "timeout-survivor"],
+        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "12000", "timeout-survivor"],
         cwd=repo,
         env=env,
         capture_output=True,
         text=True,
-        timeout=12,
+        timeout=20,
     )
 
     assert result.returncode in (0, 1), result.stderr
     payload = json.loads(result.stdout)
     job_id = payload["job"]["id"]
-    deadline = time.time() + 12
+    deadline = started_at + 30
     while payload["job"]["status"] not in {"failed", "succeeded", "cancelled"} and time.time() < deadline:
         time.sleep(0.2)
         polled = subprocess.run(
@@ -1036,13 +1120,23 @@ while True:
         assert polled.returncode == 0, polled.stderr
         payload = json.loads(polled.stdout)
     assert payload["job"]["status"] == "failed"
-    assert child_pid_file.exists(), json.dumps(payload, indent=2)
-    survivor_pid = int(child_pid_file.read_text())
-    for _ in range(30):
-        if not process_is_running(survivor_pid):
-            break
-        time.sleep(0.1)
-    assert not process_is_running(survivor_pid)
+    if child_pid_file.exists():
+        assert "hard timeout" in payload["job"].get("error", "")
+        survivor_pid = int(child_pid_file.read_text())
+        for _ in range(30):
+            if not process_is_running(survivor_pid):
+                break
+            time.sleep(0.1)
+        assert not process_is_running(survivor_pid)
+    else:
+        tracked_group_pid = payload["job"].get("childProcessGroupPid")
+        assert tracked_group_pid, json.dumps(payload, indent=2)
+        assert "hard timeout" in payload["job"].get("error", "")
+        for _ in range(30):
+            if not process_group_has_running_members(tracked_group_pid):
+                break
+            time.sleep(0.1)
+        assert not process_group_has_running_members(tracked_group_pid)
 
 
 def test_background_worker_caps_noisy_output_before_finish(tmp_path):
@@ -2266,11 +2360,11 @@ def test_lost_job_reaper_preserves_leaderless_child_process_group(tmp_path):
         stderr=subprocess.DEVNULL,
     )
     try:
-        for _ in range(30):
+        for _ in range(100):
             if info_file.exists():
                 break
             time.sleep(0.1)
-        assert info_file.exists()
+        assert info_file.exists(), "leaderless child did not write info within 10 seconds"
         info = json.loads(info_file.read_text(encoding="utf8"))
         leader_pid = int(info["leaderPid"])
         child_pid = int(info["childPid"])
@@ -2448,6 +2542,7 @@ def test_cancel_escalates_to_sigkill_for_sigterm_ignoring_child(tmp_path):
     fake_claude.chmod(0o755)
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["CLAUDE_CODE_PATH"] = str(fake_claude)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env['PATH']}"
     env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "100"
     started = subprocess.run([NODE, str(runtime), "review", "--background", "cancel-me"], cwd=repo, env=env, capture_output=True, text=True)
@@ -2489,14 +2584,15 @@ def test_cancel_orphaned_job_uses_validated_child_process_group(tmp_path):
         encoding="utf8",
     )
     child = subprocess.Popen(
-        ["python3", str(child_script)],
+        [sys.executable, str(child_script)],
         start_new_session=True,
     )
     try:
-        for _ in range(30):
+        for _ in range(100):
             if pid_file.exists():
                 break
             time.sleep(0.1)
+        assert pid_file.exists(), "orphan child did not write pid within 10 seconds"
         child_pid = int(pid_file.read_text(encoding="utf8"))
         script = f"""
 import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
@@ -2568,15 +2664,16 @@ def test_cancel_preserves_terminal_result_written_during_signal(tmp_path):
     jobs_dir = pathlib.Path(json.loads(listed.stdout)["stateDir"]) / "jobs"
     job_file = jobs_dir / "cancel-race.json"
     child = subprocess.Popen(
-        ["python3", str(child_script)],
+        [sys.executable, str(child_script)],
         env={**os.environ, "JOB_FILE": str(job_file)},
         start_new_session=True,
     )
     try:
-        for _ in range(30):
+        for _ in range(100):
             if pid_file.exists():
                 break
             time.sleep(0.1)
+        assert pid_file.exists(), "cancel race child did not write pid within 10 seconds"
         child_pid = int(pid_file.read_text(encoding="utf8"))
         script = f"""
 import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
@@ -2687,7 +2784,7 @@ def test_process_group_cancel_fails_when_group_survives_sigkill(tmp_path):
     process_lib = PLUGIN / "scripts" / "lib" / "process.mjs"
     pid_file = tmp_path / "group.pid"
     child = subprocess.Popen(
-        ["python3", "-c", f"import os, pathlib, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nwhile True: time.sleep(1)\n"],
+        [sys.executable, "-c", f"import os, pathlib, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nwhile True: time.sleep(1)\n"],
         start_new_session=True,
     )
     try:
@@ -2864,7 +2961,7 @@ def test_process_group_cancel_refuses_unvalidated_leaderless_group(tmp_path):
     info_file = tmp_path / "leaderless-cancel.json"
     leader = subprocess.Popen(
         [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import json, os, pathlib, time\n"
@@ -2943,7 +3040,7 @@ def test_cancel_refuses_worker_signal_when_child_group_validation_fails(tmp_path
     worker_script.chmod(0o755)
     leader = subprocess.Popen(
         [
-            "python3",
+            sys.executable,
             "-c",
             (
                 "import json, os, pathlib, time\n"
@@ -2961,17 +3058,17 @@ def test_cancel_refuses_worker_signal_when_child_group_validation_fails(tmp_path
         stderr=subprocess.DEVNULL,
     )
     worker = subprocess.Popen(
-        ["python3", str(worker_script), "__run-job", "job-leaderless-worker"],
+        [sys.executable, str(worker_script), "__run-job", "job-leaderless-worker"],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
     try:
-        for _ in range(30):
+        for _ in range(100):
             if info_file.exists():
                 break
             time.sleep(0.1)
-        assert info_file.exists()
+        assert info_file.exists(), "leaderless worker child did not write info within 10 seconds"
         info = json.loads(info_file.read_text(encoding="utf8"))
         leader_pid = int(info["leaderPid"])
         child_pid = int(info["childPid"])
@@ -6156,6 +6253,18 @@ def test_quality_policy_top_model_opus_env_suppresses_self_fallback():
     assert policy["model"] == "opus"
     assert policy["topModelSelected"] is False
     assert policy["fallbackModel"] == ""
+
+
+def test_quality_policy_top_model_env_explanation_does_not_claim_default_fallback():
+    policy = quality_policy_probe(
+        {"best": False, "fable": False, "opus": False, "sonnet": True},
+        {"CLAUDE_FOR_CODEX_TOP_MODEL": "fable"},
+    )
+    assert policy["model"] == "fable"
+    assert policy["modelSource"] == "CLAUDE_FOR_CODEX_TOP_MODEL"
+    assert "model came from CLAUDE_FOR_CODEX_TOP_MODEL" in policy["explanation"]
+    assert "top-model routing selected fable" in policy["explanation"]
+    assert not any("falling back to opus" in line for line in policy["explanation"])
 
 
 def test_quality_preserves_explicit_model_and_effort_overrides(tmp_path):

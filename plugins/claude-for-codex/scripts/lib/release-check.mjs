@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { renderWorkflow, validateWorkflow } from "./github-actions.mjs";
+import { installedEntry as installedClaudePluginEntry } from "./install-consistency.mjs";
 import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
@@ -141,19 +142,6 @@ function commandExists(name) {
   return check.status === 0;
 }
 
-function claudePluginFromCodexList(parsed) {
-  const installed = Array.isArray(parsed?.installed) ? parsed.installed : [];
-  return installed.find((plugin) => {
-    if (!plugin || typeof plugin !== "object") {
-      return false;
-    }
-    if (plugin.pluginId === "claude-for-codex@external-models-for-codex") {
-      return true;
-    }
-    return plugin.name === "claude-for-codex" && plugin.marketplaceName === "external-models-for-codex";
-  });
-}
-
 function validateCodexInstalledClaudePlugin(listStdout) {
   let parsed;
   try {
@@ -161,7 +149,7 @@ function validateCodexInstalledClaudePlugin(listStdout) {
   } catch (error) {
     return { ok: false, detail: `plugin list JSON parse failed: ${error.message}` };
   }
-  const plugin = claudePluginFromCodexList(parsed);
+  const plugin = installedClaudePluginEntry(parsed);
   if (!plugin) {
     return { ok: false, detail: "claude-for-codex@external-models-for-codex missing from codex plugin list" };
   }
