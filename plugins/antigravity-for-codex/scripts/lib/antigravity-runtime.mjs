@@ -24,6 +24,155 @@ export const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 const MAX_BUFFER = 20 * 1024 * 1024;
 const LOG_DIAGNOSTIC_BYTES = 128 * 1024;
+const WINDOWS_TREE_CLEANUP_TIMEOUT_MS = 5000;
+const POSIX_SYNC_SUPERVISOR_GRACE_MS = 5000;
+const FORCE_WINDOWS_TREE_CLEANUP_ENV = "ANTIGRAVITY_FOR_CODEX_TEST_FORCE_WINDOWS_TREE_CLEANUP";
+const POSIX_SYNC_SUPERVISOR = `
+const { spawn } = require("node:child_process");
+const fs = require("node:fs");
+
+function write(payload) {
+  process.stdout.write(JSON.stringify(payload));
+}
+
+function appendCapped(chunks, state, chunk, maxBuffer) {
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+  state.total += buffer.length;
+  if (state.kept >= maxBuffer) return;
+  const available = maxBuffer - state.kept;
+  const next = buffer.length > available ? buffer.subarray(0, available) : buffer;
+  chunks.push(next);
+  state.kept += next.length;
+}
+
+let payload;
+try {
+  payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
+} catch (error) {
+  write({ status: 1, stdout: "", stderr: "", error: error.message || String(error), errorCode: "EBADPAYLOAD" });
+  process.exit(0);
+}
+
+const maxBuffer = Number.isFinite(payload.maxBuffer) && payload.maxBuffer > 0 ? payload.maxBuffer : 20 * 1024 * 1024;
+const stdoutChunks = [];
+const stderrChunks = [];
+const stdoutState = { kept: 0, total: 0 };
+const stderrState = { kept: 0, total: 0 };
+let spawnError = null;
+let timedOut = false;
+let settled = false;
+let timeoutTimer = null;
+let killTimer = null;
+let signalExitTimer = null;
+let parentMonitor = null;
+
+const child = spawn(String(payload.command || ""), Array.isArray(payload.args) ? payload.args.map(String) : [], {
+  cwd: payload.cwd || process.cwd(),
+  env: payload.env && typeof payload.env === "object" ? payload.env : process.env,
+  detached: true,
+  stdio: ["pipe", "pipe", "pipe"]
+});
+
+function killTree(signal) {
+  if (child.pid) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall through to direct child kill when process-group signaling is unavailable.
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // The close/error path resolves the result.
+  }
+}
+
+function exitAfterSignal(signal) {
+  timedOut = timedOut || signal === "SIGTERM";
+  killTree("SIGTERM");
+  setTimeout(() => {
+    killTree("SIGKILL");
+  }, 25);
+  signalExitTimer = setTimeout(() => {
+    process.exit(1);
+  }, 1000);
+}
+
+for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(signal, () => exitAfterSignal(signal));
+}
+
+const parentPid = Number(payload.parentPid);
+if (Number.isInteger(parentPid) && parentPid > 0) {
+  parentMonitor = setInterval(() => {
+    try {
+      process.kill(parentPid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") {
+        exitAfterSignal("SIGTERM");
+      }
+    }
+  }, 100);
+  parentMonitor.unref?.();
+}
+
+function finish(result) {
+  if (settled) return;
+  settled = true;
+  if (timeoutTimer) clearTimeout(timeoutTimer);
+  if (killTimer) clearTimeout(killTimer);
+  if (signalExitTimer) clearTimeout(signalExitTimer);
+  if (parentMonitor) clearInterval(parentMonitor);
+  write(result);
+}
+
+const timeout = Number.isFinite(payload.timeout) && payload.timeout > 0 ? payload.timeout : 15 * 60 * 1000;
+timeoutTimer = setTimeout(() => {
+  timedOut = true;
+  killTree("SIGTERM");
+  killTimer = setTimeout(() => {
+    killTree("SIGKILL");
+  }, 1000);
+  killTimer.unref?.();
+}, timeout);
+timeoutTimer.unref?.();
+
+child.stdout.on("data", (chunk) => appendCapped(stdoutChunks, stdoutState, chunk, maxBuffer));
+child.stderr.on("data", (chunk) => appendCapped(stderrChunks, stderrState, chunk, maxBuffer));
+child.on("error", (error) => {
+  spawnError = error;
+});
+child.on("close", (code, signal) => {
+  const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+  const stderr = Buffer.concat(stderrChunks).toString("utf8");
+  if (timedOut || signal) {
+    killTree("SIGKILL");
+  }
+  finish({
+    status: code ?? (spawnError ? 1 : (signal ? 1 : 0)),
+    stdout,
+    stderr,
+    error: spawnError ? String(spawnError.message || spawnError) : (timedOut ? "ETIMEDOUT" : ""),
+    errorCode: spawnError?.code ? String(spawnError.code) : (timedOut ? "ETIMEDOUT" : ""),
+    signal: signal || "",
+    timedOut,
+    stdoutBytes: stdoutState.total,
+    stderrBytes: stderrState.total
+  });
+});
+
+try {
+  if (payload.inputBase64) {
+    child.stdin.end(Buffer.from(String(payload.inputBase64), "base64"));
+  } else {
+    child.stdin.end();
+  }
+} catch {
+  // Spawn/close errors carry the failure.
+}
+`;
 
 function isExecutable(filePath) {
   try {
@@ -41,6 +190,120 @@ function findOnPath(commandName, env = process.env) {
     if (isExecutable(candidate)) return candidate;
   }
   return "";
+}
+
+function shouldUseWindowsTreeCleanup(env = process.env) {
+  return process.platform === "win32" || env[FORCE_WINDOWS_TREE_CLEANUP_ENV] === "1";
+}
+
+export function cleanupWindowsDescendantsByParentPid(parentPid, env = process.env) {
+  const numericPid = Number(parentPid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0 || !shouldUseWindowsTreeCleanup(env)) {
+    return { ok: true, skipped: true };
+  }
+  const script = [
+    "$ErrorActionPreference = 'SilentlyContinue'",
+    "$seen = @{}",
+    "function Stop-Children([int]$parent) {",
+    "  Get-CimInstance Win32_Process -Filter \"ParentProcessId = $parent\" | ForEach-Object {",
+    "    $childPid = [int]$_.ProcessId",
+    "    if (-not $seen.ContainsKey($childPid)) {",
+    "      $seen[$childPid] = $true",
+    "      Stop-Children $childPid",
+    "      Stop-Process -Id $childPid -Force -ErrorAction SilentlyContinue",
+    "    }",
+    "  }",
+    "}",
+    `Stop-Children ${numericPid}`
+  ].join("; ");
+  const result = spawnSync("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script], {
+    encoding: "utf8",
+    env,
+    timeout: WINDOWS_TREE_CLEANUP_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    maxBuffer: MAX_BUFFER
+  });
+  return {
+    ok: !result.error && !result.signal && result.status === 0,
+    status: result.status ?? 1,
+    error: result.error ? String(result.error.message || result.error) : "",
+    stderr: String(result.stderr || ""),
+    stdout: String(result.stdout || "")
+  };
+}
+
+function cleanupWindowsProcessTree(parentPid, env = process.env) {
+  const numericPid = Number(parentPid);
+  if (!Number.isInteger(numericPid) || numericPid <= 0 || !shouldUseWindowsTreeCleanup(env)) {
+    return;
+  }
+  try {
+    spawnSync("taskkill.exe", ["/PID", String(numericPid), "/T", "/F"], {
+      encoding: "utf8",
+      env,
+      timeout: WINDOWS_TREE_CLEANUP_TIMEOUT_MS,
+      killSignal: "SIGKILL",
+      maxBuffer: MAX_BUFFER
+    });
+  } catch {
+    // Parent-PID descendant cleanup below does not require taskkill to succeed.
+  }
+  cleanupWindowsDescendantsByParentPid(numericPid, env);
+}
+
+function inputBase64(input) {
+  if (input === undefined || input === null) return "";
+  return Buffer.isBuffer(input)
+    ? input.toString("base64")
+    : Buffer.from(String(input), "utf8").toString("base64");
+}
+
+function runCommandWithPosixSupervisor(command, args, options = {}, env = process.env) {
+  const timeout = options.timeout || DEFAULT_TIMEOUT_MS;
+  const result = spawnSync(process.execPath, ["-e", POSIX_SYNC_SUPERVISOR], {
+    cwd: options.cwd || process.cwd(),
+    env,
+    encoding: "utf8",
+    input: JSON.stringify({
+      command,
+      args,
+      cwd: options.cwd || process.cwd(),
+      env,
+      parentPid: process.pid,
+      inputBase64: inputBase64(options.input),
+      maxBuffer: MAX_BUFFER,
+      timeout
+    }),
+    maxBuffer: MAX_BUFFER,
+    timeout: timeout + POSIX_SYNC_SUPERVISOR_GRACE_MS,
+    killSignal: "SIGKILL",
+    detached: true
+  });
+  if (result.status === 0 && result.stdout) {
+    try {
+      const payload = JSON.parse(result.stdout);
+      return {
+        status: payload.status ?? 1,
+        stdout: payload.stdout ?? "",
+        stderr: payload.stderr ?? "",
+        error: payload.error ?? "",
+        errorCode: payload.errorCode ?? "",
+        signal: payload.signal ?? "",
+        timedOut: Boolean(payload.timedOut)
+      };
+    } catch {
+      // Fall through to the wrapper-failure result.
+    }
+  }
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error ? String(result.error.message || result.error) : "",
+    errorCode: result.error?.code ? String(result.error.code) : "",
+    signal: result.signal || "",
+    timedOut: result.error?.code === "ETIMEDOUT"
+  };
 }
 
 function expandExecutableCandidates(pattern) {
@@ -134,15 +397,22 @@ export function agyCommand(env = process.env) {
 }
 
 export function runCommand(command, args, options = {}) {
+  const env = options.env || process.env;
+  if (process.platform !== "win32" && !shouldUseWindowsTreeCleanup(env)) {
+    return runCommandWithPosixSupervisor(command, args, options, env);
+  }
   const result = spawnSync(command, args, {
     cwd: options.cwd || process.cwd(),
-    env: options.env || process.env,
+    env,
     encoding: "utf8",
     input: options.input,
     maxBuffer: MAX_BUFFER,
     timeout: options.timeout || DEFAULT_TIMEOUT_MS,
     killSignal: options.killSignal || "SIGKILL"
   });
+  if (result.error?.code === "ETIMEDOUT" || result.signal) {
+    cleanupWindowsProcessTree(result.pid, env);
+  }
   return {
     status: result.status ?? 1,
     stdout: result.stdout ?? "",
@@ -431,6 +701,7 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
     };
 
     const killChild = (signal) => {
+      cleanupWindowsProcessTree(child.pid, env);
       if (detached && child.pid) {
         try {
           process.kill(-child.pid, signal);

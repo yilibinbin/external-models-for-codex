@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { stateDirForCwd } from "./state.mjs";
-import { hasTrustedExpectedIdentity, terminateValidatedJobWorker } from "./process.mjs";
+import { hasTrustedExpectedIdentity, terminateValidatedCompanionChild, terminateValidatedJobWorker } from "./process.mjs";
 import { classifyJobLiveness } from "./job-lifecycle.mjs";
 
 export const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled", "cancel_failed"]);
@@ -171,6 +171,18 @@ function workerPidIdentityMismatchResult(workerPid, expected) {
   };
 }
 
+function terminateRecordedTrustedWorker(worker, env = process.env, terminator = terminateValidatedJobWorker) {
+  if (!worker) return null;
+  const expected = worker.identity;
+  const workerPid = positiveIntegerOrNull(worker.pid) ?? positiveIntegerOrNull(expected?.pid);
+  if (!workerPid) return null;
+  const expectedPid = positiveIntegerOrNull(expected?.pid);
+  if (expectedPid && workerPid !== expectedPid) {
+    return workerPidIdentityMismatchResult(workerPid, expected);
+  }
+  return terminator(workerPid, expected, env);
+}
+
 export function createJob({ command, args = [], cwd = process.cwd() }, env = process.env) {
   const createdAt = now();
   const job = {
@@ -243,12 +255,15 @@ export function markJobMetadataPersistenceFailed(jobId, message, cwd = process.c
   });
 }
 
-export function reserveJob({ command, args = [], cwd = process.cwd() }, env = process.env) {
+export function reserveJob({ command, args = [], cwd = process.cwd(), timeout = null }, env = process.env) {
   if (!RESERVABLE_COMMANDS.has(command)) {
     throw new Error(`Command "${command}" cannot be reserved.`);
   }
   const job = createJob({ command, args, cwd }, env);
   job.status = "reserved";
+  if (Number.isFinite(timeout) && timeout > 0) {
+    job.timeout = timeout;
+  }
   job.updatedAt = now();
   return writeJob(job, cwd, env);
 }
@@ -346,6 +361,7 @@ export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
       return refreshed;
     }
 
+    const supervisedTermination = terminateRecordedTrustedWorker(refreshed.supervisedWorker, env, terminateValidatedCompanionChild);
     let termination;
     if (isMetadataOnlyCancellable(refreshed)) {
       termination = { status: "not_running" };
@@ -362,14 +378,17 @@ export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
         termination = terminateValidatedJobWorker(workerPid, expectedIdentity, env);
       }
     }
-    if (termination.status === "failed") {
+    const failedTermination = [supervisedTermination, termination]
+      .filter(Boolean)
+      .find((item) => item.status === "failed");
+    if (failedTermination) {
       refreshed.status = "cancel_failed";
-      refreshed.error = capText(termination.error || "Failed to cancel job.");
+      refreshed.error = capText(failedTermination.error || "Failed to cancel job.");
     } else {
       refreshed.status = "cancelled";
     }
     refreshed.submissionState = "finished";
-    refreshed.cancel = termination;
+    refreshed.cancel = supervisedTermination ? { worker: termination, supervisedWorker: supervisedTermination } : termination;
     refreshed.endedAt = now();
     refreshed.updatedAt = refreshed.endedAt;
     return writeJob(refreshed, cwd, env);

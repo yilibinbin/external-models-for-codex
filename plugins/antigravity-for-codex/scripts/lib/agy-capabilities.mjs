@@ -113,10 +113,11 @@ export function selectAgyModel({ provider = "gemini", explicitModel = "", env = 
       source: "env-provider"
     };
   }
-  const catalogModel = models && normalizedProvider === "claude"
-    ? models.claude?.[0]
-    : models?.gemini?.[0];
   const fallback = normalizedProvider === "claude" ? DEFAULT_CLAUDE_MODEL : DEFAULT_GEMINI_MODEL;
+  const catalogModels = normalizedProvider === "claude" ? models?.claude : models?.gemini;
+  const catalogModel = Array.isArray(catalogModels)
+    ? (catalogModels.find((model) => model === fallback) || catalogModels[0])
+    : "";
   return {
     modelProvider: normalizedProvider,
     model: validateAgyModelForProvider(catalogModel || fallback, normalizedProvider),

@@ -27,6 +27,7 @@ import {
   markJobRunning,
   markJobViewed,
   readJob,
+  RESERVABLE_COMMANDS,
   reserveJob,
   updateJob,
   withWorkspaceJobLock
@@ -116,13 +117,30 @@ const REVIEW_GATE_TIMEOUT_ENV = "ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS";
 const REVIEW_GATE_DEFAULT_TIMEOUT_MS = 14 * 60 * 1000;
 const REVIEW_GATE_WRAPPER_TIMEOUT_MS = 870 * 1000;
 const REVIEW_GATE_WRAPPER_GRACE_MS = 30 * 1000;
-const BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS = 1000;
+const BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS = 5 * 1000;
 const CHILD_OUTPUT_MAX_BUFFER = 20 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 30 * 1000;
 const GIT_MAX_BUFFER = 2 * 1024 * 1024;
 const GIT_OUTPUT_EXCERPT_BYTES = 64 * 1024;
 const UNTRACKED_FILE_LIMIT = 10;
 const UNTRACKED_BYTES_PER_FILE = 16 * 1024;
+const GIT_REPOSITORY_ENV_KEYS = new Set([
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+  "GIT_CEILING_DIRECTORIES",
+  "GIT_COMMON_DIR",
+  "GIT_CONFIG",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_CONFIG_NOSYSTEM",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_SYSTEM",
+  "GIT_DIR",
+  "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_INDEX_FILE",
+  "GIT_NAMESPACE",
+  "GIT_OBJECT_DIRECTORY",
+  "GIT_WORK_TREE"
+]);
 
 function usage(command = "") {
   if (command === "review") {
@@ -421,8 +439,9 @@ function boundedGitOutput(stdout, args, forceMarker = false) {
 }
 
 function runGit(args, options = {}) {
-  const result = spawnSync("git", args, {
+  const result = spawnSync("git", reviewGateGitArgs(args), {
     cwd: options.cwd || process.cwd(),
+    env: reviewGateGitEnv(options.env ?? process.env),
     encoding: "utf8",
     maxBuffer: GIT_MAX_BUFFER,
     timeout: GIT_TIMEOUT_MS,
@@ -438,8 +457,9 @@ function runGit(args, options = {}) {
 }
 
 function runGitOk(args, options = {}) {
-  const result = spawnSync("git", args, {
+  const result = spawnSync("git", reviewGateGitArgs(args), {
     cwd: options.cwd || process.cwd(),
+    env: reviewGateGitEnv(options.env ?? process.env),
     encoding: "utf8",
     maxBuffer: GIT_MAX_BUFFER,
     timeout: GIT_TIMEOUT_MS,
@@ -479,6 +499,27 @@ function reviewGateRemainingMs(deadline) {
   return Math.max(0, Math.ceil((deadline?.expiresAt || 0) - Date.now()));
 }
 
+function reviewGateGitEnv(sourceEnv = process.env) {
+  const env = { ...(sourceEnv ?? process.env) };
+  for (const key of Object.keys(env)) {
+    if (GIT_REPOSITORY_ENV_KEYS.has(key) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key)) {
+      delete env[key];
+    }
+  }
+  env.NO_COLOR = "1";
+  return env;
+}
+
+function reviewGateGitArgs(args) {
+  return [
+    "-c", "color.ui=false",
+    "-c", "color.status=false",
+    "-c", "color.diff=false",
+    "-c", "core.fsmonitor=false",
+    ...args
+  ];
+}
+
 function reviewGateGitCommand(args, options = {}) {
   const remaining = reviewGateRemainingMs(options.deadline);
   if (remaining <= 0) {
@@ -491,8 +532,9 @@ function reviewGateGitCommand(args, options = {}) {
       timedOut: true
     };
   }
-  const result = spawnSync("git", args, {
+  const result = spawnSync("git", reviewGateGitArgs(args), {
     cwd: options.cwd || process.cwd(),
+    env: reviewGateGitEnv(options.env ?? process.env),
     encoding: "utf8",
     maxBuffer: GIT_MAX_BUFFER,
     timeout: Math.max(1, Math.min(GIT_TIMEOUT_MS, remaining)),
@@ -554,6 +596,14 @@ function isSafeRelativePath(relativePath) {
     && !relativePath.split(/[\\/]+/).includes("..");
 }
 
+function openReadOnlyNoFollow(filePath) {
+  const noFollow = fs.constants?.O_NOFOLLOW;
+  if (Number.isInteger(noFollow)) {
+    return fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+  }
+  return fs.openSync(filePath, "r");
+}
+
 function textExcerptForFile(root, relativePath) {
   if (!isSafeRelativePath(relativePath)) {
     return `Untracked file: ${relativePath}\n[skipped unsafe path]`;
@@ -561,18 +611,31 @@ function textExcerptForFile(root, relativePath) {
   const filePath = path.join(root, relativePath);
   let stat;
   try {
-    stat = fs.statSync(filePath);
+    stat = fs.lstatSync(filePath);
   } catch {
     return `Untracked file: ${relativePath}\n[skipped unreadable file]`;
+  }
+  if (stat.isSymbolicLink()) {
+    return `Untracked file: ${relativePath}\n[skipped symlink]`;
   }
   if (!stat.isFile()) {
     return `Untracked file: ${relativePath}\n[skipped non-file]`;
   }
   let fd;
   let buffer;
+  let fdStat;
   try {
-    fd = fs.openSync(filePath, "r");
-    buffer = Buffer.alloc(Math.min(stat.size, UNTRACKED_BYTES_PER_FILE + 1));
+    fd = openReadOnlyNoFollow(filePath);
+    fdStat = fs.fstatSync(fd);
+    if (!fdStat.isFile()) {
+      return `Untracked file: ${relativePath}\n[skipped non-file]`;
+    }
+    if (Number.isFinite(stat.dev) && Number.isFinite(stat.ino)
+      && Number.isFinite(fdStat.dev) && Number.isFinite(fdStat.ino)
+      && (stat.dev !== fdStat.dev || stat.ino !== fdStat.ino)) {
+      return `Untracked file: ${relativePath}\n[skipped changed file]`;
+    }
+    buffer = Buffer.alloc(Math.min(fdStat.size, UNTRACKED_BYTES_PER_FILE + 1));
     const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
     buffer = buffer.subarray(0, bytesRead);
   } catch {
@@ -588,7 +651,7 @@ function textExcerptForFile(root, relativePath) {
     return `Untracked file: ${relativePath}\n[skipped binary file]`;
   }
   const excerpt = buffer.subarray(0, UNTRACKED_BYTES_PER_FILE).toString("utf8");
-  const truncated = stat.size > UNTRACKED_BYTES_PER_FILE ? "\n[untracked file excerpt truncated]" : "";
+  const truncated = fdStat.size > UNTRACKED_BYTES_PER_FILE ? "\n[untracked file excerpt truncated]" : "";
   return `Untracked file: ${relativePath}\n${excerpt}${truncated}`;
 }
 
@@ -642,10 +705,10 @@ function gitContext() {
     return "No git repository was detected. Review only the user's explicit focus text.";
   }
   const status = runGit(["status", "--short"], { cwd: root });
-  const stagedStat = runGit(["diff", "--cached", "--stat"], { cwd: root });
-  const workingStat = runGit(["diff", "--stat"], { cwd: root });
-  const stagedDiff = runGit(["diff", "--cached", "--", "."], { cwd: root });
-  const workingDiff = runGit(["diff", "--", "."], { cwd: root });
+  const stagedStat = runGit(["diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"], { cwd: root });
+  const workingStat = runGit(["diff", "--no-ext-diff", "--no-textconv", "--stat"], { cwd: root });
+  const stagedDiff = runGit(["diff", "--no-ext-diff", "--no-textconv", "--cached", "--", "."], { cwd: root });
+  const workingDiff = runGit(["diff", "--no-ext-diff", "--no-textconv", "--", "."], { cwd: root });
   const untracked = untrackedContext(root);
   return [
     `Repository: ${root}`,
@@ -670,9 +733,10 @@ function reviewGateGitContext({ deadline } = {}) {
       && /not a git repository|not a git repo|outside repository/i.test(rootResult.stderr || "")
     ) {
       return {
-        trusted: false,
+        trusted: true,
+        reviewable: false,
         reason: "no git repository was detected",
-        context: "No git repository was detected. Review only the user's explicit focus text."
+        context: ""
       };
     }
     const detail = [
@@ -691,38 +755,51 @@ function reviewGateGitContext({ deadline } = {}) {
   if (!status.ok) {
     return {
       trusted: false,
+      reviewable: false,
       reason: reviewGateGitFailureReason("git status failed", status),
       context: ""
     };
   }
-  const stagedStat = reviewGateGitResult(["diff", "--no-ext-diff", "--cached", "--stat"], { cwd: root, deadline });
+  if (!status.stdout.trim()) {
+    return {
+      trusted: true,
+      reviewable: false,
+      reason: "no git changes",
+      context: ""
+    };
+  }
+  const stagedStat = reviewGateGitResult(["diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"], { cwd: root, deadline });
   if (!stagedStat.ok) {
     return {
       trusted: false,
+      reviewable: false,
       reason: reviewGateGitFailureReason("git staged diff stat failed", stagedStat),
       context: ""
     };
   }
-  const workingStat = reviewGateGitResult(["diff", "--no-ext-diff", "--stat"], { cwd: root, deadline });
+  const workingStat = reviewGateGitResult(["diff", "--no-ext-diff", "--no-textconv", "--stat"], { cwd: root, deadline });
   if (!workingStat.ok) {
     return {
       trusted: false,
+      reviewable: false,
       reason: reviewGateGitFailureReason("git working diff stat failed", workingStat),
       context: ""
     };
   }
-  const stagedDiff = reviewGateGitResult(["diff", "--no-ext-diff", "--cached", "--", "."], { cwd: root, deadline });
+  const stagedDiff = reviewGateGitResult(["diff", "--no-ext-diff", "--no-textconv", "--cached", "--", "."], { cwd: root, deadline });
   if (!stagedDiff.ok) {
     return {
       trusted: false,
+      reviewable: false,
       reason: reviewGateGitFailureReason("git staged diff failed", stagedDiff),
       context: ""
     };
   }
-  const workingDiff = reviewGateGitResult(["diff", "--no-ext-diff", "--", "."], { cwd: root, deadline });
+  const workingDiff = reviewGateGitResult(["diff", "--no-ext-diff", "--no-textconv", "--", "."], { cwd: root, deadline });
   if (!workingDiff.ok) {
     return {
       trusted: false,
+      reviewable: false,
       reason: reviewGateGitFailureReason("git working diff failed", workingDiff),
       context: ""
     };
@@ -734,6 +811,7 @@ function reviewGateGitContext({ deadline } = {}) {
   if (reviewGateRemainingMs(deadline) <= 0) {
     return {
       trusted: false,
+      reviewable: false,
       reason: "review gate timeout budget exhausted after git context",
       context: ""
     };
@@ -747,7 +825,7 @@ function reviewGateGitContext({ deadline } = {}) {
     workingDiff.output ? `Working diff:\n${workingDiff.output}` : "",
     untracked.context ? `Untracked files:\n${untracked.context}` : ""
   ].filter(Boolean).join("\n\n");
-  return { trusted: true, reason: "", context };
+  return { trusted: true, reviewable: true, reason: "", context };
 }
 
 function focusBlock(args) {
@@ -844,6 +922,17 @@ function jobResultPayload(job) {
   };
 }
 
+function activeBackgroundJobs(cwd = process.cwd(), env = process.env, { excludeJobId = "" } = {}) {
+  return listJobs(cwd, env)
+    .filter((job) => !excludeJobId || job.id !== excludeJobId)
+    .map((job) => ({ job, liveness: classifyJobLiveness(job, { now: Date.now(), env }) }))
+    .filter(({ liveness }) => ["queued", "healthy", "suspect"].includes(liveness.state));
+}
+
+function activeCapFailure(verb, cap) {
+  return `Refusing to ${verb} background job: maximum active background jobs (${cap}) reached.\n`;
+}
+
 function writeJson(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
@@ -900,14 +989,12 @@ function queueBackgroundJob(command, rawArgs) {
       }
     }
 
-    const activeJobs = listJobs(cwd, process.env)
-      .map((job) => ({ job, liveness: classifyJobLiveness(job, { now: Date.now(), env: process.env }) }))
-      .filter(({ liveness }) => ["queued", "healthy", "suspect"].includes(liveness.state));
+    const activeJobs = activeBackgroundJobs(cwd, process.env);
     const cap = maxActiveJobs(process.env);
     if (activeJobs.length >= cap) {
       return {
         exitCode: 2,
-        stderr: `Refusing to queue background job: maximum active background jobs (${cap}) reached.\n`
+        stderr: activeCapFailure("queue", cap)
       };
     }
 
@@ -1332,24 +1419,117 @@ function runReserveJob(rawArgs) {
     process.exit(rawArgs.length < 1 ? 2 : 0);
   }
   const [command, ...commandArgs] = rawArgs;
-  try {
-    const job = reserveJob({ command, args: commandArgs, cwd: process.cwd() }, process.env);
-    writeJson({ status: "reserved", jobId: job.id });
-  } catch (error) {
-    process.stderr.write(`${error.message || String(error)}\n`);
+  const cwd = process.cwd();
+  const outcome = withWorkspaceJobLock(cwd, process.env, () => {
+    if (!RESERVABLE_COMMANDS.has(command)) {
+      return { exitCode: 2, stderr: `Command "${command}" cannot be reserved.\n` };
+    }
+    let args;
+    try {
+      args = parseArgs(commandArgs);
+    } catch (error) {
+      return { exitCode: 2, stderr: `${error.message || String(error)}\n` };
+    }
+    const cleanArgs = commandArgs.map(String);
+    const timeout = commandArgs.some((arg) => arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds="))
+      ? args.timeout
+      : null;
+    const fingerprint = worktreeFingerprint(cwd, { env: process.env });
+    const preflight = antigravityPreflight(process.env, args);
+    if (!preflight.ok) {
+      return {
+        exitCode: 2,
+        stderr: `${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`
+      };
+    }
+    const executionControls = {
+      provider: preflight.modelProvider,
+      model: preflight.model,
+      sandbox: process.env.ANTIGRAVITY_FOR_CODEX_SANDBOX || "",
+      timeout: String(args.timeout || "")
+    };
+    const idempotencyKey = deriveJobIdempotencyKey({
+      command,
+      args: cleanArgs,
+      cwd,
+      workspaceFingerprint: fingerprint.fingerprint,
+      executionControls
+    });
+    if (fingerprint.status === "trusted") {
+      const reusable = findReusableJob({ command, args: cleanArgs, cwd, idempotencyKey }, process.env);
+      if (reusable) {
+        return { payload: { status: reusable.status, jobId: reusable.id, reused: true } };
+      }
+    }
+    const cap = maxActiveJobs(process.env);
+    if (activeBackgroundJobs(cwd, process.env).length >= cap) {
+      return {
+        exitCode: 2,
+        stderr: activeCapFailure("reserve", cap)
+      };
+    }
+    const job = reserveJob({ command, args: cleanArgs, cwd, timeout }, process.env);
+    const stamped = updateJob(job.id, (draft) => {
+      const updatedAt = new Date().toISOString();
+      draft.idempotencyKey = idempotencyKey;
+      draft.workspaceFingerprint = fingerprint.fingerprint;
+      draft.executionControls = executionControls;
+      draft.submissionState = "reserved";
+      draft.updatedAt = updatedAt;
+      return draft;
+    }, cwd, process.env);
+    if (!stamped) {
+      const message = "Metadata persistence failed before reserved job start.";
+      markJobMetadataPersistenceFailed(job.id, message, cwd, process.env);
+      return {
+        exitCode: 2,
+        stderr: `Failed to reserve background job: ${message}\n`
+      };
+    }
+    return { payload: { status: "reserved", jobId: stamped.id, reused: false } };
+  });
+  if (!outcome) {
+    process.stderr.write("Failed to reserve background job: workspace job lock is busy.\n");
     process.exit(2);
   }
+  if (outcome.stderr) {
+    process.stderr.write(outcome.stderr);
+    process.exit(outcome.exitCode || 2);
+  }
+  writeJson(outcome.payload);
 }
 
 function runReservedJob(rawArgs) {
   const jobId = requireJobId(rawArgs, "run-reserved-job");
-  const job = claimReservedJob(process.cwd(), jobId, process.env);
-  if (!job) {
-    process.stderr.write(`Job "${jobId}" is not reserved.\n`);
+  const cwd = process.cwd();
+  const outcome = withWorkspaceJobLock(cwd, process.env, () => {
+    const current = readJob(jobId, cwd, process.env);
+    if (!current || current.status !== "reserved") {
+      return { exitCode: 2, stderr: `Job "${jobId}" is not reserved.\n` };
+    }
+    const cap = maxActiveJobs(process.env);
+    if (activeBackgroundJobs(cwd, process.env, { excludeJobId: jobId }).length >= cap) {
+      return {
+        exitCode: 2,
+        stderr: activeCapFailure("start reserved", cap)
+      };
+    }
+    const job = claimReservedJob(cwd, jobId, process.env);
+    if (!job) {
+      return { exitCode: 2, stderr: `Job "${jobId}" is not reserved.\n` };
+    }
+    return { job };
+  });
+  if (!outcome) {
+    process.stderr.write("Failed to start reserved background job: workspace job lock is busy.\n");
     process.exit(2);
   }
-  spawnStoredJobWorker(job);
-  writeJson({ status: "queued", jobId: job.id });
+  if (outcome.stderr) {
+    process.stderr.write(outcome.stderr);
+    process.exit(outcome.exitCode || 2);
+  }
+  spawnStoredJobWorker(outcome.job);
+  writeJson({ status: "queued", jobId: outcome.job.id });
 }
 
 function appendCapped(chunks, state, chunk) {
@@ -1364,6 +1544,21 @@ function appendCapped(chunks, state, chunk) {
   state.kept += next.length;
 }
 
+function childResultNeedsTreeCleanup(result) {
+  if (result.timedOut || result.signal || result.errorCode === "ETIMEDOUT") {
+    return true;
+  }
+  const failed = result.status !== 0 || Boolean(result.error);
+  if (!failed) {
+    return false;
+  }
+  return /\b(?:ETIMEDOUT|timed out|timeout|terminated by SIG(?:TERM|KILL)|Antigravity timeout)\b/i.test([
+    result.stdout,
+    result.stderr,
+    result.error
+  ].filter(Boolean).join("\n"));
+}
+
 function runChildProcessAsync(command, args, options = {}) {
   return new Promise((resolve) => {
     const stdoutChunks = [];
@@ -1374,18 +1569,54 @@ function runChildProcessAsync(command, args, options = {}) {
     let timedOut = false;
     let settled = false;
     let killTimer = null;
+    const detached = process.platform !== "win32";
     const child = spawn(command, args, {
       cwd: options.cwd || process.cwd(),
       env: options.env || process.env,
+      detached,
       stdio: ["ignore", "pipe", "pipe"]
     });
+    if (typeof options.onSpawn === "function") {
+      try {
+        options.onSpawn(child);
+      } catch {
+        // Spawn callbacks are best-effort metadata; process supervision still runs.
+      }
+    }
+    const killChildTree = (signal) => {
+      if (detached && child.pid) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall through to direct child kill when process-group signaling is unavailable.
+        }
+      }
+      if (process.platform === "win32" && child.pid) {
+        try {
+          spawnSync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
+            encoding: "utf8",
+            timeout: 5000,
+            windowsHide: true
+          });
+          return;
+        } catch {
+          // Fall through to direct child kill when taskkill is unavailable.
+        }
+      }
+      try {
+        child.kill(signal);
+      } catch {
+        // The close/error handlers will finish the result.
+      }
+    };
 
     const timeoutTimer = Number.isFinite(options.timeout) && options.timeout > 0
       ? setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
+        killChildTree("SIGTERM");
         killTimer = setTimeout(() => {
-          child.kill("SIGKILL");
+          killChildTree("SIGKILL");
         }, 2000);
         killTimer.unref?.();
       }, options.timeout)
@@ -1404,7 +1635,7 @@ function runChildProcessAsync(command, args, options = {}) {
       if (killTimer) clearTimeout(killTimer);
       const stdout = Buffer.concat(stdoutChunks).toString("utf8");
       const stderr = Buffer.concat(stderrChunks).toString("utf8");
-      resolve({
+      const result = {
         status: code ?? (spawnError ? 1 : (signal ? 1 : 0)),
         stdout,
         stderr,
@@ -1416,17 +1647,32 @@ function runChildProcessAsync(command, args, options = {}) {
         timedOut,
         stdoutBytes: stdoutState.total,
         stderrBytes: stderrState.total
-      });
+      };
+      if (childResultNeedsTreeCleanup(result)) {
+        killChildTree("SIGKILL");
+      }
+      resolve(result);
     });
   });
 }
 
 function backgroundSupervisorTimeoutMs(job) {
   const timeout = Number(job?.timeout);
-  if (!Number.isFinite(timeout) || timeout <= 0) {
-    return DEFAULT_TIMEOUT_MS;
+  if (Number.isFinite(timeout) && timeout > 0) {
+    return (timeout * 2) + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS;
   }
-  return timeout + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS;
+  try {
+    const args = Array.isArray(job?.args) ? job.args.map(String) : [];
+    if (args.some((arg) => arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds="))) {
+      const parsed = parseArgs(args);
+      if (Number.isFinite(parsed.timeout) && parsed.timeout > 0) {
+        return (parsed.timeout * 2) + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS;
+      }
+    }
+  } catch {
+    // Invalid stored arguments will fail in the child command; keep the supervisor bounded.
+  }
+  return (DEFAULT_TIMEOUT_MS * 2) + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS;
 }
 
 async function runStoredJob(rawArgs) {
@@ -1469,7 +1715,20 @@ async function runStoredJob(rawArgs) {
     const result = await runChildProcessAsync(process.execPath, [COMPANION_PATH, running.command, ...running.args], {
       cwd: running.cwd,
       env: process.env,
-      timeout: backgroundSupervisorTimeoutMs(running)
+      timeout: backgroundSupervisorTimeoutMs(running),
+      onSpawn: (child) => {
+        updateJob(jobId, (job) => {
+          if (isTerminalJobStatus(job.status)) {
+            return job;
+          }
+          job.supervisedWorker = {
+            pid: child.pid,
+            identity: captureProcessIdentity(child.pid)
+          };
+          job.updatedAt = new Date().toISOString();
+          return job;
+        }, running.cwd, process.env);
+      }
     });
     finishJob(jobId, {
       status: result.status ?? 1,
@@ -1495,6 +1754,14 @@ function runReviewGate(rawArgs) {
 
   let result;
   try {
+    const context = reviewGateGitContext({ deadline });
+    if (!context.trusted) {
+      warnReviewGate(`${context.reason || "repository context unavailable"}; allowing stop`);
+      return;
+    }
+    if (!context.reviewable) {
+      return;
+    }
     const preflightBudget = reviewGateRemainingMs(deadline);
     if (preflightBudget <= 0) {
       warnReviewGate("timeout budget exhausted before preflight; allowing stop");
@@ -1507,11 +1774,6 @@ function runReviewGate(rawArgs) {
     }
     if (!preflight.ok) {
       warnReviewGate(`runtime unavailable; allowing stop: ${preflight.error || `missing ${preflight.missing.join(", ")}`}`);
-      return;
-    }
-    const context = reviewGateGitContext({ deadline });
-    if (!context.trusted) {
-      warnReviewGate(`${context.reason || "repository context unavailable"}; allowing stop`);
       return;
     }
     const remaining = reviewGateRemainingMs(deadline);
@@ -1696,6 +1958,7 @@ function runReleaseCheck(rawArgs) {
   const githubActions = readText("scripts/lib/github-actions.mjs");
   const jobs = readText("scripts/lib/jobs.mjs");
   const reports = readText("scripts/lib/reports.mjs");
+  const state = readText("scripts/lib/state.mjs");
   const mailbox = readText("scripts/lib/mailbox.mjs");
   const leases = readText("scripts/lib/leases.mjs");
   const readme = readText("README.md");
@@ -1744,6 +2007,17 @@ function runReleaseCheck(rawArgs) {
     }
     return text.slice(bodyStart, end);
   };
+  const sourceSlice = (text, startMarker, endMarker) => {
+    const start = text.indexOf(startMarker);
+    if (start === -1) {
+      return "";
+    }
+    const end = text.indexOf(endMarker, start + startMarker.length);
+    if (end === -1) {
+      return "";
+    }
+    return text.slice(start, end);
+  };
   const routedSkillUserExamplesHideInternalFlags = routedSkillDocs.every(({ text }) => {
     const routingStart = text.indexOf("## Natural-Language Model Routing");
     if (routingStart === -1) {
@@ -1783,7 +2057,122 @@ function runReleaseCheck(rawArgs) {
   const matureCommands = expectedPublicCommands();
   const manifestCapabilities = Array.isArray(manifest.interface?.capabilities) ? manifest.interface.capabilities : [];
   const printHotPath = runtime.match(/export function antigravityPrintArgs[\s\S]*?export function antigravityPrint\(/)?.[0] || "";
+  const untrackedExcerptHotPath = sourceSlice(companion, "function openReadOnlyNoFollow", "function untrackedContext");
+  const normalGitHotPath = sourceSlice(companion, "function runGit", "function reviewGateTimeoutBudgetMs");
+  const normalGitContextHotPath = sourceSlice(companion, "function gitContext", "function reviewGateGitContext");
+  const reviewGateGitHotPath = sourceSlice(companion, "function reviewGateGitEnv", "function isSafeRelativePath");
+  const reviewGateContextHotPath = sourceSlice(companion, "function reviewGateGitContext", "function reviewGateEnabled");
+  const reviewGateRuntimeHotPath = sourceSlice(companion, "function runReviewGate", "async function runMultiReview");
+  const reserveJobHotPath = sourceSlice(companion, "function runReserveJob", "function appendCapped");
+  const activeJobsHotPath = sourceSlice(companion, "function activeBackgroundJobs", "function spawnStoredJobWorker");
+  const backgroundSupervisorHotPath = sourceSlice(companion, "function childResultNeedsTreeCleanup", "function runReviewGate");
+  const untrackedSymlinkSafeOk = [
+    "fs.constants?.O_NOFOLLOW",
+    "fs.lstatSync(filePath)",
+    "openReadOnlyNoFollow(filePath)",
+    "fs.fstatSync(fd)",
+    "stat.isSymbolicLink()",
+    "[skipped symlink]",
+    "[skipped changed file]"
+  ].every((needle) => untrackedExcerptHotPath.includes(needle));
+  const normalGitContextHardeningOk = [
+    'spawnSync("git", reviewGateGitArgs(args)',
+    "env: reviewGateGitEnv(options.env ?? process.env)",
+    '"diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"',
+    '"diff", "--no-ext-diff", "--no-textconv", "--stat"',
+    '"diff", "--no-ext-diff", "--no-textconv", "--cached", "--", "."',
+    '"diff", "--no-ext-diff", "--no-textconv", "--", "."'
+  ].every((needle) => normalGitHotPath.includes(needle) || normalGitContextHotPath.includes(needle));
+  const reviewGateGitHardeningOk = [
+    "GIT_REPOSITORY_ENV_KEYS.has(key)",
+    "GIT_CONFIG_(KEY|VALUE)",
+    'env.NO_COLOR = "1"',
+    '"color.ui=false"',
+    '"color.status=false"',
+    '"color.diff=false"',
+    '"core.fsmonitor=false"',
+    'spawnSync("git", reviewGateGitArgs(args)',
+    "env: reviewGateGitEnv(options.env ?? process.env)"
+  ].every((needle) => reviewGateGitHotPath.includes(needle))
+    && [
+      '["diff", "--no-ext-diff", "--no-textconv", "--cached", "--stat"]',
+      '["diff", "--no-ext-diff", "--no-textconv", "--stat"]',
+      '["diff", "--no-ext-diff", "--no-textconv", "--cached", "--", "."]',
+      '["diff", "--no-ext-diff", "--no-textconv", "--", "."]'
+    ].every((needle) => reviewGateContextHotPath.includes(needle));
+  const reviewGateReviewableFirstOk = [
+    "reviewable: false",
+    "reason: \"no git changes\"",
+    "const context = reviewGateGitContext({ deadline });",
+    "if (!context.reviewable)",
+    "const preflight = antigravityPreflight"
+  ].every((needle) => reviewGateContextHotPath.includes(needle) || reviewGateRuntimeHotPath.includes(needle))
+    && reviewGateRuntimeHotPath.indexOf("const context = reviewGateGitContext({ deadline });") >= 0
+    && reviewGateRuntimeHotPath.indexOf("const context = reviewGateGitContext({ deadline });") < reviewGateRuntimeHotPath.indexOf("const preflight = antigravityPreflight");
+  const stateGitHardeningOk = [
+    "function sanitizedGitEnv",
+    "GIT_REPOSITORY_ENV_KEYS.has(key)",
+    "GIT_CONFIG_(KEY|VALUE)",
+    "env.NO_COLOR = \"1\"",
+    "function hardenedGitArgs",
+    "\"core.fsmonitor=false\"",
+    "spawnSync(\"git\", hardenedGitArgs",
+    "env: sanitizedGitEnv(env)",
+    "gitSignalTimeoutMs(env)",
+    "killSignal: \"SIGKILL\""
+  ].every((needle) => state.includes(needle));
+  const backgroundSupervisorHardeningOk = [
+    "function childResultNeedsTreeCleanup",
+    "childResultNeedsTreeCleanup(result)",
+    'killChildTree("SIGKILL")',
+    'const detached = process.platform !== "win32";',
+    "detached,",
+    "process.kill(-child.pid, signal)",
+    '"taskkill.exe"',
+    "job.supervisedWorker =",
+    "(timeout * 2) + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS",
+    "(DEFAULT_TIMEOUT_MS * 2) + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS"
+  ].every((needle) => backgroundSupervisorHotPath.includes(needle));
+  const windowsDescendantCleanupOk = [
+    "cleanupWindowsDescendantsByParentPid",
+    "ParentProcessId = $parent",
+    "Stop-Process -Id $childPid",
+    "cleanupWindowsProcessTree(result.pid",
+    "cleanupWindowsProcessTree(child.pid"
+  ].every((needle) => runtime.includes(needle));
+  const posixSyncSupervisorOk = [
+    "const POSIX_SYNC_SUPERVISOR",
+    "function runCommandWithPosixSupervisor",
+    "detached: true",
+    "process.kill(-child.pid, signal)",
+    "parentPid: process.pid",
+    "parentMonitor",
+    "return runCommandWithPosixSupervisor(command, args, options, env)"
+  ].every((needle) => runtime.includes(needle));
+  const reservedJobResourceGuardOk = [
+    "RESERVABLE_COMMANDS.has(command)",
+    "withWorkspaceJobLock(cwd, process.env",
+    "worktreeFingerprint(cwd",
+    "antigravityPreflight(process.env, args)",
+    "deriveJobIdempotencyKey",
+    "findReusableJob",
+    "activeBackgroundJobs(cwd, process.env).length >= cap",
+    "reserveJob({ command, args: cleanArgs, cwd, timeout }",
+    "excludeJobId: jobId",
+    "claimReservedJob(cwd, jobId"
+  ].every((needle) => reserveJobHotPath.includes(needle))
+    && [
+      "function activeBackgroundJobs",
+      "classifyJobLiveness",
+      "[\"queued\", \"healthy\", \"suspect\"]",
+      "excludeJobId"
+    ].every((needle) => activeJobsHotPath.includes(needle));
   const shippedTexts = shippedPluginTexts();
+  const userFacingTexts = shippedPluginTexts(["README.md", "CHANGELOG.md", "skills", "assets"]);
+  const unsupportedReviewGateSetupPatterns = [
+    /setup --enable-review-gate/i,
+    /--review-gate-mode/i
+  ];
   const executableTexts = shippedPluginTexts([
     "scripts",
     "hooks",
@@ -1818,7 +2207,7 @@ function runReleaseCheck(rawArgs) {
     /\/Users\/[A-Za-z0-9._/-]+/,
     /\/home\/[A-Za-z0-9._/-]+/,
     /\/private\/var\/folders\//,
-    /[A-Za-z]:\\Users\\/
+    /[A-Za-z]:(?:\\{1,2}|\/)Users(?:\\{1,2}|\/)/
   ];
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
@@ -1849,6 +2238,16 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(String(manifest.interface?.logo || "").startsWith("./assets/"), "manifest-logo-relative"),
     releaseCheckResult((manifest.interface?.screenshots || []).every((item) => String(item).startsWith("./assets/")), "manifest-screenshots-relative"),
     releaseCheckResult(companion.includes("ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"), "review-gate-timeout-env"),
+    releaseCheckResult(normalGitContextHardeningOk, "normal-git-context-hardening"),
+    releaseCheckResult(reviewGateGitHardeningOk, "review-gate-git-hardening"),
+    releaseCheckResult(reviewGateReviewableFirstOk, "review-gate-reviewable-first"),
+    releaseCheckResult(stateGitHardeningOk, "state-git-hardening"),
+    releaseCheckResult(untrackedSymlinkSafeOk, "untracked-symlink-safe"),
+    releaseCheckResult(backgroundSupervisorHardeningOk, "background-supervisor-hardening"),
+    releaseCheckResult(windowsDescendantCleanupOk, "windows-descendant-cleanup"),
+    releaseCheckResult(posixSyncSupervisorOk, "posix-sync-timeout-cleanup"),
+    releaseCheckResult(reservedJobResourceGuardOk, "reserved-job-resource-guard"),
+    releaseCheckResult(textScanPasses(userFacingTexts, unsupportedReviewGateSetupPatterns), "no-unsupported-review-gate-setup-command"),
     releaseCheckResult(companion.includes("deriveJobIdempotencyKey") && companion.includes("worktreeFingerprint"), "background-idempotency-fingerprint"),
     releaseCheckResult(githubActionsForbiddenPluginPathsExist, "skills-natural-language-routing-paths"),
     releaseCheckResult(

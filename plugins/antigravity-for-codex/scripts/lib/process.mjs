@@ -307,6 +307,16 @@ export function hasTrustedExpectedIdentity(expected) {
     && expectedCommand.includes("__run-job");
 }
 
+export function hasTrustedCompanionChildIdentity(expected) {
+  const expectedPid = Number(expected?.pid);
+  const expectedCommand = String(expected?.command || "");
+  return Number.isInteger(expectedPid)
+    && expectedPid > 0
+    && expectedCommand.includes("antigravity-companion.mjs")
+    && /\b(review|adversarial-review|multi-review|plan|rescue)\b/.test(expectedCommand)
+    && !expectedCommand.includes("__run-job");
+}
+
 function failedProbeResult(phase, probe) {
   return {
     status: "failed",
@@ -365,12 +375,12 @@ function signalWorkerTree(pid, signal, env = process.env) {
   }
 }
 
-export function terminateValidatedJobWorker(pid, expectedIdentity = {}, env = process.env) {
+function terminateValidatedProcess(pid, expectedIdentity = {}, env = process.env, trustFn = hasTrustedExpectedIdentity, trustError = "missing trusted worker identity") {
   const numericPid = Number(pid);
-  if (!hasTrustedExpectedIdentity(expectedIdentity)) {
+  if (!trustFn(expectedIdentity)) {
     return {
       status: "failed",
-      error: "missing trusted worker identity",
+      error: trustError,
       phase: "initial",
       diagnostic: { expected: expectedIdentity || null }
     };
@@ -477,4 +487,12 @@ export function terminateValidatedJobWorker(pid, expectedIdentity = {}, env = pr
     current: finalProbe.identity || initialProbe.identity,
     expected: expectedIdentity
   };
+}
+
+export function terminateValidatedJobWorker(pid, expectedIdentity = {}, env = process.env) {
+  return terminateValidatedProcess(pid, expectedIdentity, env, hasTrustedExpectedIdentity, "missing trusted worker identity");
+}
+
+export function terminateValidatedCompanionChild(pid, expectedIdentity = {}, env = process.env) {
+  return terminateValidatedProcess(pid, expectedIdentity, env, hasTrustedCompanionChildIdentity, "missing trusted supervised worker identity");
 }

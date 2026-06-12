@@ -25,6 +25,6 @@
   <path d="M806 361h28" stroke="#4F46E5" stroke-width="8" stroke-linecap="round"/>
   <path d="M822 339l26 22-26 22" fill="none" stroke="#4F46E5" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
   <rect x="112" y="540" width="1054" height="68" rx="12" fill="#111827"/>
-  <text x="144" y="572" font-family="SFMono-Regular, Consolas, monospace" font-size="17" fill="#E5E7EB">setup --enable-review-gate --review-gate-mode multi-role</text>
+  <text x="144" y="572" font-family="SFMono-Regular, Consolas, monospace" font-size="17" fill="#E5E7EB">ANTIGRAVITY_FOR_CODEX_REVIEW_GATE=on enables the gate</text>
   <text x="144" y="598" font-family="SFMono-Regular, Consolas, monospace" font-size="17" fill="#E5E7EB">ANTIGRAVITY_FOR_CODEX_REVIEW_GATE=off disables the gate immediately</text>
 </svg>
