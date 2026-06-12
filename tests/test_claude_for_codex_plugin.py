@@ -263,7 +263,7 @@ def test_install_consistency_detects_stale_installed_version(tmp_path):
     plugin = marketplace / "plugins" / "claude-for-codex"
     manifest_dir = plugin / ".codex-plugin"
     manifest_dir.mkdir(parents=True)
-    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.2"}', encoding="utf8")
     installed_json = {
         "installed": [{
             "pluginId": "claude-for-codex@external-models-for-codex",
@@ -282,7 +282,7 @@ const report = installConsistencyReport({{
 }});
 if (report.ok) throw new Error('expected stale install to be attention');
 if (report.installedVersion !== '0.17.0') throw new Error('bad installedVersion');
-if (report.runningVersion !== '0.18.1') throw new Error('bad runningVersion');
+if (report.runningVersion !== '0.18.2') throw new Error('bad runningVersion');
 if (!report.problems.some((problem) => problem.code === 'stale-installed-version')) throw new Error('missing stale problem');
 if (!report.recommendedCommands.includes('codex plugin marketplace upgrade external-models-for-codex')) throw new Error('missing marketplace upgrade command');
 if (!report.recommendedCommands.includes('codex plugin add claude-for-codex@external-models-for-codex')) throw new Error('missing plugin add command');
@@ -298,12 +298,12 @@ def test_install_consistency_matches_name_marketplace_shape(tmp_path):
     plugin = marketplace / "plugins" / "claude-for-codex"
     manifest_dir = plugin / ".codex-plugin"
     manifest_dir.mkdir(parents=True)
-    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.2"}', encoding="utf8")
     installed_json = {
         "installed": [{
             "name": "claude-for-codex",
             "marketplaceName": "external-models-for-codex",
-            "version": "0.18.1",
+            "version": "0.18.2",
             "enabled": True,
             "source": {"path": str(plugin)},
         }]
@@ -317,7 +317,7 @@ const report = installConsistencyReport({{
 }});
 if (!report.ok) throw new Error('expected installed plugin to be ok: ' + JSON.stringify(report.problems));
 if (report.status !== 'ok') throw new Error('expected ok status');
-if (report.cacheVersion !== '0.18.1') throw new Error('expected cacheVersion from source manifest');
+if (report.cacheVersion !== '0.18.2') throw new Error('expected cacheVersion from source manifest');
 console.log(JSON.stringify(report));
 """
     result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
@@ -331,13 +331,13 @@ def test_install_consistency_detects_installed_cache_version_mismatch(tmp_path):
     for root in (running, installed):
         manifest_dir = root / ".codex-plugin"
         manifest_dir.mkdir(parents=True)
-    (running / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (running / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.2"}', encoding="utf8")
     (installed / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.17.0"}', encoding="utf8")
     installed_json = {
         "installed": [{
             "name": "claude-for-codex",
             "marketplaceName": "external-models-for-codex",
-            "version": "0.18.1",
+            "version": "0.18.2",
             "enabled": True,
             "source": {"path": str(installed)},
         }]
@@ -350,7 +350,7 @@ const report = installConsistencyReport({{
 }});
 if (report.ok) throw new Error('cache mismatch should require attention');
 if (report.status !== 'attention') throw new Error('expected attention status, got ' + report.status);
-if (report.installedVersion !== '0.18.1') throw new Error('bad installedVersion');
+if (report.installedVersion !== '0.18.2') throw new Error('bad installedVersion');
 if (report.cacheVersion !== '0.17.0') throw new Error('bad cacheVersion');
 if (!report.problems.some((problem) => problem.code === 'installed-cache-version-mismatch')) throw new Error('missing cache mismatch marker');
 console.log(JSON.stringify(report));
@@ -364,12 +364,12 @@ def test_install_consistency_skips_cache_mismatch_when_source_manifest_unavailab
     running = tmp_path / "running" / "plugins" / "claude-for-codex"
     manifest_dir = running / ".codex-plugin"
     manifest_dir.mkdir(parents=True)
-    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.2"}', encoding="utf8")
     installed_json = {
         "installed": [{
             "name": "claude-for-codex",
             "marketplaceName": "external-models-for-codex",
-            "version": "0.18.1",
+            "version": "0.18.2",
             "enabled": True,
             "source": {"path": str(tmp_path / "missing-cache")},
         }]
@@ -396,7 +396,7 @@ def test_install_consistency_unknown_when_installed_version_missing(tmp_path):
     for root in (running, installed):
         manifest_dir = root / ".codex-plugin"
         manifest_dir.mkdir(parents=True)
-    (running / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (running / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.2"}', encoding="utf8")
     (installed / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.17.0"}', encoding="utf8")
     installed_json = {
         "installed": [{
@@ -4493,7 +4493,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.18.1"
+    assert data["version"] == "0.18.2"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -4508,12 +4508,12 @@ def test_plugin_manifest_is_valid():
 
 def test_claude_manifest_version_is_0160():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.18.1"
+    assert manifest["version"] == "0.18.2"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.18.1"
+    assert manifest["version"] == "0.18.2"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -8721,7 +8721,7 @@ def test_release_check_knows_claude_0160_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.18.1"
+    assert checks["manifest-version"]["detail"] == "version=0.18.2"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -8912,7 +8912,7 @@ def test_release_check_remote_install_uses_requested_immutable_ref(tmp_path):
     installed_runtime.write_text("#!/usr/bin/env node\n", encoding="utf8")
     fake_codex = fake_bin / "codex"
     fake_codex.write_text(
-        f"""#!/usr/bin/env python3
+        f"""#!{sys.executable}
 import json
 import pathlib
 import sys
@@ -8947,7 +8947,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.18.1"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.18.2"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -8956,11 +8956,11 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.18.1"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.18.2"] in calls
     assert ["plugin", "list", "--json"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.18.1"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.18.2"
     assert checks["remote-install-plugin-list-schema"]["ok"] is True
     assert checks["remote-install-plugin-list-schema"]["detail"] == f"installed root={installed_plugin}"
 
@@ -8971,7 +8971,7 @@ def test_release_check_required_remote_install_fails_without_installed_source_pa
     fake_bin.mkdir()
     fake_codex = fake_bin / "codex"
     fake_codex.write_text(
-        """#!/usr/bin/env python3
+        f"""#!{sys.executable}
 import json
 import sys
 
@@ -8983,17 +8983,17 @@ if sys.argv[1:3] == ["plugin", "marketplace"] and "--ref" in sys.argv:
 if sys.argv[1:3] == ["plugin", "add"]:
     raise SystemExit(0)
 if sys.argv[1:] == ["plugin", "list", "--json"]:
-    print(json.dumps({
+    print(json.dumps({{
         "installed": [
-            {
+            {{
                 "pluginId": "claude-for-codex@external-models-for-codex",
                 "name": "claude-for-codex",
                 "marketplaceName": "external-models-for-codex",
-                "source": {"source": "git"},
-            }
+                "source": {{"source": "git"}},
+            }}
         ],
         "available": [],
-    }))
+    }}))
     raise SystemExit(0)
 raise SystemExit(1)
 """,
@@ -9004,7 +9004,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.18.1"],
+        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.18.2"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -9040,7 +9040,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.1" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "codex plugin list --json" in text
     assert "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" in text
@@ -9311,7 +9311,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.18.1" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.18.2" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -9399,7 +9399,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.18.1", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.18.2", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -9509,7 +9509,7 @@ def test_release_check_ci_simulate_passes():
     assert checks["quality-policy-assets"]["ok"] is True
     assert checks["quality-top-model-policy"]["ok"] is True
     assert checks["quality-no-concrete-model-defaults"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.18.1"
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.18.2"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
