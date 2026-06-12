@@ -47,6 +47,7 @@ import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
 import { doctorReport, renderDoctorText } from "./lib/doctor.mjs";
 import { hookCompatibilityReport } from "./lib/hook-compat.mjs";
+import { installConsistencyReport } from "./lib/install-consistency.mjs";
 import { latestReport, listReports, reportFromResult, safeWriteReport } from "./lib/reports.mjs";
 import { runReleaseCheck } from "./lib/release-check.mjs";
 import {
@@ -2316,6 +2317,15 @@ function pluginRoot() {
   return path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 }
 
+function collectInstallConsistency(pluginRootPath = pluginRoot()) {
+  const list = run("codex", ["plugin", "list", "--json"], { timeout: 5000 });
+  return installConsistencyReport({
+    pluginRoot: pluginRootPath,
+    pluginListJson: list.status === 0 ? list.stdout : "",
+    pluginListAvailable: list.status === 0
+  });
+}
+
 function hookEventsFromManifest(manifest) {
   const hooks = manifest && typeof manifest === "object" && manifest.hooks && typeof manifest.hooks === "object"
     ? manifest.hooks
@@ -2486,7 +2496,8 @@ function printStatus() {
   }
   process.stdout.write(`${JSON.stringify({
     claudeAgents: agents,
-    reviewGate: buildSetupReport().reviewGate
+    reviewGate: buildSetupReport().reviewGate,
+    installConsistency: collectInstallConsistency()
   }, null, 2)}\n`);
 }
 
@@ -2510,6 +2521,9 @@ function printDoctor(rawArgs) {
     capabilities: buildCapabilitiesReport(),
     state: {
       reviewGate: reviewGateDiagnostics(cwd)
+    },
+    installConsistency: {
+      report: collectInstallConsistency()
     }
   });
   process.stdout.write(jsonOutput ? `${JSON.stringify(report, null, 2)}\n` : `${renderDoctorText(report)}\n`);

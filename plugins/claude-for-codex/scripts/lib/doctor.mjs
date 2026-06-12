@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { backendCapabilities } from "./claude-backend.mjs";
 import { hookCompatibilityReport } from "./hook-compat.mjs";
+import { installConsistencyReport } from "./install-consistency.mjs";
 import { semanticCapabilities } from "./semantic-context.mjs";
 
 function hookFiles(pluginRoot = "") {
@@ -25,7 +26,8 @@ export function doctorReport({
   env = process.env,
   capabilities = {},
   state = {},
-  release = {}
+  release = {},
+  installConsistency = {}
 } = {}) {
   const claude = capabilities.claude ?? {};
   const hookEvents = capabilities.hooks?.events ?? [];
@@ -41,6 +43,11 @@ export function doctorReport({
     hookFiles: hookFiles(pluginRoot),
     reviewGate: state.reviewGate ?? {},
     semanticProviders: capabilities.semanticContext ?? semanticCapabilities(cwd, env),
+    installConsistency: installConsistency.report ?? installConsistencyReport({
+      pluginRoot,
+      pluginListJson: installConsistency.pluginListJson ?? "",
+      pluginListAvailable: installConsistency.pluginListAvailable ?? Boolean(installConsistency.pluginListJson)
+    }),
     release
   };
   const report = {
@@ -65,6 +72,7 @@ export function renderDoctorText(report) {
     `model aliases: ${aliases || "unknown"}`,
     `sdk: ${report.checks.backend?.claudeSdk?.available ? "available" : "missing"}`,
     `hooks: ${(report.checks.hooks.installedEvents ?? []).join(", ")}`,
-    `review gate: ${report.checks.reviewGate.enabled ? "enabled" : "disabled"}`
+    `review gate: ${report.checks.reviewGate.enabled ? "enabled" : "disabled"}`,
+    `install: ${report.checks.installConsistency?.ok === false ? "attention" : report.checks.installConsistency?.status || "unknown"}`
   ].join("\n");
 }

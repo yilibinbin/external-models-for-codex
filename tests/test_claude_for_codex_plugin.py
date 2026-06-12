@@ -238,6 +238,105 @@ def env_without(*names):
     return env
 
 
+def test_install_consistency_detects_stale_installed_version(tmp_path):
+    module_uri = (PLUGIN / "scripts" / "lib" / "install-consistency.mjs").as_uri()
+    marketplace = tmp_path / "marketplace"
+    plugin = marketplace / "plugins" / "claude-for-codex"
+    manifest_dir = plugin / ".codex-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    installed_json = {
+        "installed": [{
+            "pluginId": "claude-for-codex@external-models-for-codex",
+            "version": "0.17.0",
+            "enabled": True,
+            "source": {"path": str(plugin)},
+            "marketplaceSource": {"source": "https://github.com/yilibinbin/external-models-for-codex.git"},
+        }]
+    }
+    code = f"""
+import {{ installConsistencyReport }} from {json.dumps(module_uri)};
+const report = installConsistencyReport({{
+  pluginRoot: {json.dumps(str(plugin))},
+  pluginListJson: {json.dumps(json.dumps(installed_json))},
+  pluginId: 'claude-for-codex@external-models-for-codex'
+}});
+if (report.ok) throw new Error('expected stale install to be attention');
+if (report.installedVersion !== '0.17.0') throw new Error('bad installedVersion');
+if (report.runningVersion !== '0.18.1') throw new Error('bad runningVersion');
+if (!report.problems.some((problem) => problem.code === 'stale-installed-version')) throw new Error('missing stale problem');
+if (!report.recommendedCommands.includes('codex plugin marketplace upgrade external-models-for-codex')) throw new Error('missing marketplace upgrade command');
+if (!report.recommendedCommands.includes('codex plugin add claude-for-codex@external-models-for-codex')) throw new Error('missing plugin add command');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_install_consistency_matches_name_marketplace_shape(tmp_path):
+    module_uri = (PLUGIN / "scripts" / "lib" / "install-consistency.mjs").as_uri()
+    marketplace = tmp_path / "marketplace"
+    plugin = marketplace / "plugins" / "claude-for-codex"
+    manifest_dir = plugin / ".codex-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    installed_json = {
+        "installed": [{
+            "name": "claude-for-codex",
+            "marketplaceName": "external-models-for-codex",
+            "version": "0.18.1",
+            "enabled": True,
+            "source": {"path": str(plugin)},
+        }]
+    }
+    code = f"""
+import {{ installConsistencyReport }} from {json.dumps(module_uri)};
+const report = installConsistencyReport({{
+  pluginRoot: {json.dumps(str(plugin))},
+  pluginListJson: {json.dumps(json.dumps(installed_json))}
+}});
+if (!report.ok) throw new Error('expected installed plugin to be ok: ' + JSON.stringify(report.problems));
+if (report.status !== 'ok') throw new Error('expected ok status');
+if (report.cacheVersion !== '0.18.1') throw new Error('expected cacheVersion from source manifest');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_install_consistency_unknown_when_installed_version_missing(tmp_path):
+    module_uri = (PLUGIN / "scripts" / "lib" / "install-consistency.mjs").as_uri()
+    running = tmp_path / "running" / "plugins" / "claude-for-codex"
+    installed = tmp_path / "installed" / "plugins" / "claude-for-codex"
+    for root in (running, installed):
+        manifest_dir = root / ".codex-plugin"
+        manifest_dir.mkdir(parents=True)
+    (running / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.18.1"}', encoding="utf8")
+    (installed / ".codex-plugin" / "plugin.json").write_text('{"name":"claude-for-codex","version":"0.17.0"}', encoding="utf8")
+    installed_json = {
+        "installed": [{
+            "name": "claude-for-codex",
+            "marketplaceName": "external-models-for-codex",
+            "enabled": True,
+            "source": {"path": str(installed)},
+        }]
+    }
+    code = f"""
+import {{ installConsistencyReport }} from {json.dumps(module_uri)};
+const report = installConsistencyReport({{
+  pluginRoot: {json.dumps(str(running))},
+  pluginListJson: {json.dumps(json.dumps(installed_json))}
+}});
+if (!report.ok) throw new Error('missing version should be advisory unknown, not attention');
+if (report.status !== 'unknown') throw new Error('expected unknown status, got ' + report.status);
+if (!report.problems.some((problem) => problem.code === 'installed-version-unavailable')) throw new Error('missing version-unavailable marker');
+if (report.cacheVersion !== '0.17.0') throw new Error('expected installed cache manifest signal');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_job_lifecycle_helpers_classify_liveness_and_parse_limits(tmp_path):
     lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
     script = f"""
