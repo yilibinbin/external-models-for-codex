@@ -511,16 +511,80 @@ async function collectSdkOutput(queryResult, options = {}) {
   };
 }
 
+function sdkTimeoutMs(options = {}) {
+  const timeoutMs = Number(options.timeout ?? 0);
+  return Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+}
+
+function sdkTimeoutError(timeoutMs) {
+  const error = new Error(`ETIMEDOUT: Claude SDK timed out after ${timeoutMs}ms.`);
+  error.code = "ETIMEDOUT";
+  error.claudeForCodexDeadline = true;
+  return error;
+}
+
+function isSdkDeadlineError(error) {
+  return error?.claudeForCodexDeadline === true;
+}
+
+async function withSdkTimeout(operation, abortController, timeoutMs, deadline = 0) {
+  if (!timeoutMs) {
+    return await operation;
+  }
+  const remainingMs = deadline ? deadline - Date.now() : timeoutMs;
+  if (remainingMs <= 0) {
+    try {
+      abortController.abort();
+    } catch {
+      // AbortController may already be settled.
+    }
+    throw sdkTimeoutError(timeoutMs);
+  }
+  let timer = null;
+  let timedOut = false;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          try {
+            abortController.abort();
+          } catch {
+            // AbortController may already be settled.
+          }
+          reject(sdkTimeoutError(timeoutMs));
+        }, remainingMs);
+      })
+    ]);
+  } catch (error) {
+    if (timedOut || isSdkDeadlineError(error)) {
+      throw sdkTimeoutError(timeoutMs);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function sdkErrorResult(error, abortController) {
+  const timedOut = isSdkDeadlineError(error);
+  const sanitized = timedOut ? "ETIMEDOUT" : sanitizeError(error);
   return {
-    status: abortController.signal.aborted ? 130 : 1,
+    status: timedOut ? 1 : abortController.signal.aborted ? 130 : 1,
     stdout: "",
-    stderr: sanitizeError(error),
-    error: sanitizeError(error),
-    errorCode: abortController.signal.aborted ? "SDK_ABORTED" : "SDK_ERROR",
+    stderr: sanitized,
+    error: sanitized,
+    errorCode: timedOut ? "ETIMEDOUT" : abortController.signal.aborted ? "SDK_ABORTED" : "SDK_ERROR",
     backend: "sdk",
     metadata: {}
   };
+}
+
+function cleanupMcpConfig(mcpConfig) {
+  if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
+    mcpConfig.cleanup();
+  }
 }
 
 function applySdkReviewOptions(sdkOptions, args = {}, options = {}) {
@@ -558,12 +622,15 @@ function applySdkReviewOptions(sdkOptions, args = {}, options = {}) {
   return sdkOptions;
 }
 
-async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disallowedTools }) {
+async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disallowedTools, onMcpConfig, onMcpConfigCleanup }) {
   let mcpConfig = null;
   try {
     const sdkOptions = args.write
       ? sdkWriteOptions()
       : sdkReadOnlyOptions(mcpConfig = createGitMcpConfig(options.cwd ?? process.cwd(), process.env), { disallowedTools });
+    if (mcpConfig && typeof onMcpConfig === "function") {
+      onMcpConfig(mcpConfig);
+    }
     if (!args.write && (!Array.isArray(sdkOptions.allowedTools) || !Array.isArray(sdkOptions.disallowedTools))) {
       throw new Error("Claude SDK read-only tool restrictions are unavailable.");
     }
@@ -604,8 +671,11 @@ async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disa
       metadata: output.metadata
     };
   } finally {
-    if (mcpConfig && process.env.CLAUDE_FOR_CODEX_KEEP_MCP_CONFIG !== "1") {
-      mcpConfig.cleanup();
+    if (mcpConfig) {
+      cleanupMcpConfig(mcpConfig);
+      if (typeof onMcpConfigCleanup === "function") {
+        onMcpConfigCleanup(mcpConfig);
+      }
     }
   }
 }
@@ -632,6 +702,17 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
   process.removeAllListeners("SIGTERM");
   process.once("SIGINT", signalHandler);
   process.once("SIGTERM", signalHandler);
+  const timeoutMs = sdkTimeoutMs(options);
+  const timeoutDeadline = timeoutMs ? Date.now() + timeoutMs : 0;
+  const activeMcpConfigs = new Set();
+  const trackMcpConfig = (mcpConfig) => activeMcpConfigs.add(mcpConfig);
+  const untrackMcpConfig = (mcpConfig) => activeMcpConfigs.delete(mcpConfig);
+  const cleanupActiveMcpConfigs = () => {
+    for (const mcpConfig of activeMcpConfigs) {
+      cleanupMcpConfig(mcpConfig);
+    }
+    activeMcpConfigs.clear();
+  };
 
   try {
     const sdk = await import(resolved.importPath);
@@ -640,15 +721,37 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
       throw new Error("Claude SDK does not export query().");
     }
     if (args.write) {
-      return await runSdkQueryOnce({ query, prompt, args, options, abortSignal: abortController.signal });
+      return await withSdkTimeout(
+        runSdkQueryOnce({ query, prompt, args, options, abortSignal: abortController.signal }),
+        abortController,
+        timeoutMs,
+        timeoutDeadline
+      );
     }
 
     let denyTools = configuredWriteDenyTools(process.env);
     const omitted = new Set();
     while (true) {
       try {
-        return await runSdkQueryOnce({ query, prompt, args, options, abortSignal: abortController.signal, disallowedTools: denyTools });
+        return await withSdkTimeout(
+          runSdkQueryOnce({
+            query,
+            prompt,
+            args,
+            options,
+            abortSignal: abortController.signal,
+            disallowedTools: denyTools,
+            onMcpConfig: trackMcpConfig,
+            onMcpConfigCleanup: untrackMcpConfig
+          }),
+          abortController,
+          timeoutMs,
+          timeoutDeadline
+        );
       } catch (error) {
+        if (isSdkDeadlineError(error)) {
+          cleanupActiveMcpConfigs();
+        }
         const candidate = parseUnknownDenyToolFailure({ stdout: "", stderr: fullErrorMessage(error) }, denyTools);
         if (!candidate || omitted.has(candidate)) {
           return sdkErrorResult(error, abortController);
@@ -662,6 +765,9 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
       }
     }
   } catch (error) {
+    if (isSdkDeadlineError(error)) {
+      cleanupActiveMcpConfigs();
+    }
     return sdkErrorResult(error, abortController);
   } finally {
     process.removeListener("SIGINT", signalHandler);

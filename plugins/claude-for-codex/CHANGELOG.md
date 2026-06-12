@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.18.1 - 2026-06-12
+
+### Fixed
+
+- Enforce Claude SDK backend prompt timeouts with a shared wall-clock deadline across permission-compatibility retries.
+- Return explicit `ETIMEDOUT` metadata only for plugin-owned SDK deadlines while preserving provider SDK error diagnostics.
+- Best-effort clean active SDK Git MCP config files when the local SDK deadline fires before an uncooperative SDK settles.
+- Keep async CLI permission-compatibility failures wrapped with outcome metadata in the empty-deny-list edge case.
+
+### Tests
+
+- Add fake SDK regressions for read-path timeout abort, write-path timeout abort, provider timeout-text preservation, and shared retry deadline behavior.
+- Add a release-check guard for SDK timeout/abort behavior that avoids exact formatting coupling.
+
 ## 0.18.0 - 2026-06-12
 
 ### Added

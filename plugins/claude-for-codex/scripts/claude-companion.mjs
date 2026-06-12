@@ -1324,7 +1324,7 @@ async function claudePrintAsync(prompt, options) {
     }
     const remainingTools = buildDenyToolsAfterOmission(denyTools, candidate);
     if (remainingTools.length === denyTools.length || remainingTools.length === 0) {
-      return result;
+      return withClaudeOutcome(result);
     }
     omitted.add(candidate);
     denyTools = remainingTools;
