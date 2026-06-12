@@ -20,15 +20,26 @@ import {
   cancelJob,
   claimReservedJob,
   createJob,
+  findReusableJob,
   finishJob,
   listJobs,
+  markJobMetadataPersistenceFailed,
   markJobRunning,
   markJobViewed,
   readJob,
   reserveJob,
-  TERMINAL_JOB_STATUSES
+  updateJob,
+  withWorkspaceJobLock
 } from "./lib/jobs.mjs";
 import { captureProcessIdentity } from "./lib/process.mjs";
+import {
+  classifyJobLiveness,
+  deriveJobIdempotencyKey,
+  isTerminalJobStatus,
+  jobHeartbeatIntervalMs,
+  maxActiveJobs
+} from "./lib/job-lifecycle.mjs";
+import { worktreeFingerprint } from "./lib/worktree-fingerprint.mjs";
 import { antigravityDoctor } from "./lib/doctor.mjs";
 import {
   renderWorkflow,
@@ -102,6 +113,8 @@ const REPO_ROOT_DIR = path.resolve(ROOT_DIR, "..", "..");
 const COMPANION_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 const REVIEW_GATE_INNER_TIMEOUT_MS = 14 * 60 * 1000;
+const BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS = 1000;
+const CHILD_OUTPUT_MAX_BUFFER = 20 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 30 * 1000;
 const GIT_MAX_BUFFER = 2 * 1024 * 1024;
 const GIT_OUTPUT_EXCERPT_BYTES = 64 * 1024;
@@ -501,20 +514,35 @@ function rawArgsWithoutBackground(rawArgs) {
   return rawArgs.filter((arg) => arg !== "--background");
 }
 
+function sanitizeBackgroundArgs(rawArgs) {
+  return rawArgsWithoutBackground(rawArgs);
+}
+
 function jobSummary(job) {
   if (!job) return null;
+  const liveness = classifyJobLiveness(job, { now: Date.now(), env: process.env });
   return {
     id: job.id,
     command: job.command,
     args: job.args,
     cwd: job.cwd,
     status: job.status,
+    liveness,
     viewed: Boolean(job.viewed),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     startedAt: job.startedAt,
     endedAt: job.endedAt,
-    worker: job.worker
+    worker: job.worker,
+    submissionState: job.submissionState || "",
+    timeout: Number.isFinite(job.timeout) ? job.timeout : null,
+    workerPid: job.workerPid ?? job.worker?.pid ?? null,
+    lastHeartbeatAt: job.lastHeartbeatAt || "",
+    lastProgressAt: job.lastProgressAt || "",
+    resultViewedAt: job.resultViewedAt || "",
+    idempotencyKey: job.idempotencyKey || "",
+    error: job.error || "",
+    cancel: job.cancel || null
   };
 }
 
@@ -546,13 +574,86 @@ function spawnStoredJobWorker(job) {
 }
 
 function queueBackgroundJob(command, rawArgs) {
-  const job = createJob({
-    command,
-    args: rawArgsWithoutBackground(rawArgs),
-    cwd: process.cwd()
-  }, process.env);
-  spawnStoredJobWorker(job);
-  writeJson({ status: "queued", jobId: job.id });
+  const cwd = process.cwd();
+  const outcome = withWorkspaceJobLock(cwd, process.env, () => {
+    let args;
+    try {
+      args = parseArgs(rawArgs);
+    } catch (error) {
+      return { exitCode: 2, stderr: `${error.message || String(error)}\n` };
+    }
+    const cleanArgs = sanitizeBackgroundArgs(rawArgs);
+    const fingerprint = worktreeFingerprint(cwd, { env: process.env });
+    const preflight = antigravityPreflight(process.env, args);
+    if (!preflight.ok) {
+      return {
+        exitCode: 2,
+        stderr: `${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`
+      };
+    }
+    const executionControls = {
+      provider: preflight.modelProvider,
+      model: preflight.model,
+      sandbox: process.env.ANTIGRAVITY_FOR_CODEX_SANDBOX || "",
+      timeout: String(args.timeout || "")
+    };
+    const idempotencyKey = deriveJobIdempotencyKey({
+      command,
+      args: cleanArgs,
+      cwd,
+      workspaceFingerprint: fingerprint.fingerprint,
+      executionControls
+    });
+    if (fingerprint.status === "trusted") {
+      const reusable = findReusableJob({ command, args: cleanArgs, cwd, idempotencyKey }, process.env);
+      if (reusable) {
+        return { payload: { status: reusable.status, jobId: reusable.id, reused: true } };
+      }
+    }
+
+    const activeJobs = listJobs(cwd, process.env)
+      .map((job) => ({ job, liveness: classifyJobLiveness(job, { now: Date.now(), env: process.env }) }))
+      .filter(({ liveness }) => ["queued", "healthy", "suspect"].includes(liveness.state));
+    const cap = maxActiveJobs(process.env);
+    if (activeJobs.length >= cap) {
+      return {
+        exitCode: 2,
+        stderr: `Refusing to queue background job: maximum active background jobs (${cap}) reached.\n`
+      };
+    }
+
+    const job = createJob({ command, args: cleanArgs, cwd }, process.env);
+    const stamped = updateJob(job.id, (draft) => {
+      const updatedAt = new Date().toISOString();
+      draft.idempotencyKey = idempotencyKey;
+      draft.workspaceFingerprint = fingerprint.fingerprint;
+      draft.executionControls = executionControls;
+      draft.timeout = args.timeout;
+      draft.submissionState = "queued";
+      draft.updatedAt = updatedAt;
+      return draft;
+    }, cwd, process.env);
+    if (!stamped) {
+      const message = "Metadata persistence failed before worker start.";
+      markJobMetadataPersistenceFailed(job.id, message, cwd, process.env);
+      return {
+        exitCode: 2,
+        stderr: `Failed to queue background job: ${message}\n`
+      };
+    }
+    spawnStoredJobWorker(stamped);
+    return { payload: { status: "queued", jobId: stamped.id, reused: false } };
+  });
+
+  if (!outcome) {
+    process.stderr.write("Failed to queue background job: workspace job lock is busy.\n");
+    process.exit(2);
+  }
+  if (outcome.stderr) {
+    process.stderr.write(outcome.stderr);
+    process.exit(outcome.exitCode || 2);
+  }
+  writeJson(outcome.payload);
 }
 
 function writeReviewOperationReport(kind, args, result, startedAt, endedAt, parsed) {
@@ -960,7 +1061,84 @@ function runReservedJob(rawArgs) {
   writeJson({ status: "queued", jobId: job.id });
 }
 
-function runStoredJob(rawArgs) {
+function appendCapped(chunks, state, chunk) {
+  const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  state.total += buffer.length;
+  if (state.kept >= CHILD_OUTPUT_MAX_BUFFER) {
+    return;
+  }
+  const available = CHILD_OUTPUT_MAX_BUFFER - state.kept;
+  const next = buffer.length > available ? buffer.subarray(0, available) : buffer;
+  chunks.push(next);
+  state.kept += next.length;
+}
+
+function runChildProcessAsync(command, args, options = {}) {
+  return new Promise((resolve) => {
+    const stdoutChunks = [];
+    const stderrChunks = [];
+    const stdoutState = { kept: 0, total: 0 };
+    const stderrState = { kept: 0, total: 0 };
+    let spawnError = null;
+    let timedOut = false;
+    let settled = false;
+    let killTimer = null;
+    const child = spawn(command, args, {
+      cwd: options.cwd || process.cwd(),
+      env: options.env || process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+
+    const timeoutTimer = Number.isFinite(options.timeout) && options.timeout > 0
+      ? setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => {
+          child.kill("SIGKILL");
+        }, 2000);
+        killTimer.unref?.();
+      }, options.timeout)
+      : null;
+    timeoutTimer?.unref?.();
+
+    child.stdout.on("data", (chunk) => appendCapped(stdoutChunks, stdoutState, chunk));
+    child.stderr.on("data", (chunk) => appendCapped(stderrChunks, stderrState, chunk));
+    child.on("error", (error) => {
+      spawnError = error;
+    });
+    child.on("close", (code, signal) => {
+      if (settled) return;
+      settled = true;
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (killTimer) clearTimeout(killTimer);
+      const stdout = Buffer.concat(stdoutChunks).toString("utf8");
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      resolve({
+        status: code ?? (spawnError ? 1 : (signal ? 1 : 0)),
+        stdout,
+        stderr,
+        error: spawnError
+          ? String(spawnError.message || spawnError)
+          : (timedOut ? `Command timed out after ${options.timeout} ms.` : ""),
+        errorCode: spawnError?.code ? String(spawnError.code) : (timedOut ? "ETIMEDOUT" : ""),
+        signal: signal || "",
+        timedOut,
+        stdoutBytes: stdoutState.total,
+        stderrBytes: stderrState.total
+      });
+    });
+  });
+}
+
+function backgroundSupervisorTimeoutMs(job) {
+  const timeout = Number(job?.timeout);
+  if (!Number.isFinite(timeout) || timeout <= 0) {
+    return DEFAULT_TIMEOUT_MS;
+  }
+  return timeout + BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS;
+}
+
+async function runStoredJob(rawArgs) {
   if (process.env.ANTIGRAVITY_INTERNAL_DISPATCH !== "1") {
     process.stderr.write("__run-job requires internal dispatch.\n");
     process.exit(2);
@@ -979,24 +1157,38 @@ function runStoredJob(rawArgs) {
     process.stderr.write(`Unknown job "${jobId}".\n`);
     process.exit(1);
   }
-  if (TERMINAL_JOB_STATUSES.has(running.status)) {
+  if (isTerminalJobStatus(running.status)) {
     process.exit(0);
   }
 
-  const result = spawnSync(process.execPath, [COMPANION_PATH, running.command, ...running.args], {
-    cwd: running.cwd,
-    env: process.env,
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: running.timeout || DEFAULT_TIMEOUT_MS,
-    killSignal: "SIGKILL"
-  });
-  finishJob(jobId, {
-    status: result.status ?? 1,
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
-    error: result.error ? String(result.error.message || result.error) : ""
-  }, running.cwd, process.env);
+  const heartbeat = setInterval(() => {
+    updateJob(jobId, (job) => {
+      if (isTerminalJobStatus(job.status)) {
+        return job;
+      }
+      const timestamp = new Date().toISOString();
+      job.lastHeartbeatAt = timestamp;
+      job.updatedAt = timestamp;
+      return job;
+    }, running.cwd, process.env);
+  }, jobHeartbeatIntervalMs(process.env));
+  heartbeat.unref?.();
+
+  try {
+    const result = await runChildProcessAsync(process.execPath, [COMPANION_PATH, running.command, ...running.args], {
+      cwd: running.cwd,
+      env: process.env,
+      timeout: backgroundSupervisorTimeoutMs(running)
+    });
+    finishJob(jobId, {
+      status: result.status ?? 1,
+      stdout: result.stdout || "",
+      stderr: result.stderr || "",
+      error: result.error || ""
+    }, running.cwd, process.env);
+  } finally {
+    clearInterval(heartbeat);
+  }
 }
 
 function runReviewGate(rawArgs) {

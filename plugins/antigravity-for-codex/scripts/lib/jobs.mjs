@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { stateDirForCwd } from "./state.mjs";
 import { terminateValidatedJobWorker } from "./process.mjs";
+import { classifyJobLiveness } from "./job-lifecycle.mjs";
 
 export const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled", "cancel_failed"]);
 export const RESERVABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "plan", "rescue"]);
@@ -135,11 +136,62 @@ export function createJob({ command, args = [], cwd = process.cwd() }, env = pro
     startedAt: "",
     endedAt: "",
     worker: null,
+    idempotencyKey: "",
+    workspaceFingerprint: "",
+    executionControls: {},
+    timeout: null,
+    workerPid: null,
+    lastHeartbeatAt: "",
+    lastProgressAt: "",
+    resultViewedAt: "",
+    submissionState: "created",
     stdout: "",
     stderr: "",
     error: ""
   };
   return writeJob(job, cwd, env);
+}
+
+export function updateJob(jobId, updater, cwd = process.cwd(), env = process.env) {
+  if (env.ANTIGRAVITY_FOR_CODEX_TEST_UPDATE_JOB_FAILURE === "1") {
+    return null;
+  }
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    const updated = updater(job) || job;
+    return writeJob(updated, cwd, env);
+  });
+}
+
+export function findReusableJob({ command, args = [], cwd = process.cwd(), idempotencyKey = "" }, env = process.env) {
+  if (!idempotencyKey) return null;
+  const expectedArgs = JSON.stringify(args.map(String));
+  return listJobs(cwd, env).find((job) => {
+    const liveness = classifyJobLiveness(job, { now: Date.now(), env });
+    return job.command === command
+      && job.cwd === cwd
+      && job.idempotencyKey === idempotencyKey
+      && JSON.stringify((job.args || []).map(String)) === expectedArgs
+      && (liveness.state === "queued" || liveness.state === "healthy");
+  }) || null;
+}
+
+export function withWorkspaceJobLock(cwd = process.cwd(), env = process.env, callback) {
+  return withJobLock("workspace", cwd, env, callback);
+}
+
+export function markJobMetadataPersistenceFailed(jobId, message, cwd = process.cwd(), env = process.env) {
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    job.status = "failed";
+    job.submissionState = "metadata_failed";
+    job.error = capText(message || "Metadata persistence failed before worker start.");
+    job.endedAt = now();
+    job.updatedAt = job.endedAt;
+    return writeJob(job, cwd, env);
+  });
 }
 
 export function reserveJob({ command, args = [], cwd = process.cwd() }, env = process.env) {
@@ -159,6 +211,7 @@ export function claimReservedJob(cwd = process.cwd(), jobId, env = process.env) 
       return null;
     }
     job.status = "queued";
+    job.submissionState = "queued";
     job.updatedAt = now();
     return writeJob(job, cwd, env);
   });
@@ -194,7 +247,8 @@ export function markJobViewed(jobId, cwd = process.cwd(), env = process.env) {
     const job = readJob(jobId, cwd, env);
     if (!job) return null;
     job.viewed = true;
-    job.updatedAt = now();
+    job.resultViewedAt = now();
+    job.updatedAt = job.resultViewedAt;
     return writeJob(job, cwd, env);
   });
 }
@@ -208,8 +262,11 @@ export function markJobRunning(jobId, worker, cwd = process.cwd(), env = process
     }
     job.status = "running";
     job.worker = worker;
+    job.workerPid = worker?.pid ?? null;
+    job.submissionState = "running";
     job.startedAt = job.startedAt || now();
-    job.updatedAt = now();
+    job.lastHeartbeatAt = job.lastHeartbeatAt || now();
+    job.updatedAt = job.lastHeartbeatAt;
     return writeJob(job, cwd, env);
   });
 }
@@ -225,6 +282,7 @@ export function finishJob(jobId, result, cwd = process.cwd(), env = process.env)
     job.stdout = capText(result.stdout);
     job.stderr = capText(result.stderr);
     job.error = capText(result.error);
+    job.submissionState = "finished";
     job.endedAt = now();
     job.updatedAt = job.endedAt;
     return writeJob(job, cwd, env);
@@ -246,6 +304,7 @@ export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
     } else {
       refreshed.status = "cancelled";
     }
+    refreshed.submissionState = "finished";
     refreshed.cancel = termination;
     refreshed.endedAt = now();
     refreshed.updatedAt = refreshed.endedAt;

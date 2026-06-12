@@ -1976,6 +1976,181 @@ def test_background_job_lifecycle_with_fake_agy(tmp_path):
     assert json.loads(viewed.stdout)["viewed"] is True
 
 
+def test_background_review_reuses_same_idempotency_key_and_changes_on_model(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked.txt").write_text("two\n", encoding="utf8")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="REUSED_OK", delay_ms=1200))
+
+    first = run_companion(["review", "--background", "same request"], repo, env)
+    second = run_companion(["review", "--background", "same request"], repo, env)
+    claude_env = dict(env)
+    claude_env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+    third = run_companion(["review", "--background", "same request"], repo, claude_env)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert third.returncode == 0, third.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    third_payload = json.loads(third.stdout)
+    try:
+        assert first_payload["jobId"] == second_payload["jobId"]
+        assert second_payload["reused"] is True
+        assert third_payload["jobId"] != first_payload["jobId"]
+    finally:
+        run_companion(["cancel", first_payload["jobId"]], repo, env)
+        run_companion(["cancel", third_payload["jobId"]], repo, claude_env)
+
+
+def test_concurrent_background_review_same_key_creates_one_job(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "tracked.txt").write_text("one\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked.txt").write_text("two\n", encoding="utf8")
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="CONCURRENT_OK", delay_ms=1200))
+
+    runs = [
+        subprocess.Popen(
+            [NODE, str(runtime), "review", "--background", "same request"],
+            cwd=repo,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    results = [proc.communicate(timeout=10) + (proc.returncode,) for proc in runs]
+
+    assert all(result[2] == 0 for result in results), results
+    payloads = [json.loads(result[0]) for result in results]
+    assert payloads[0]["jobId"] == payloads[1]["jobId"]
+    try:
+        assert len({payload["jobId"] for payload in payloads}) == 1
+    finally:
+        run_companion(["cancel", payloads[0]["jobId"]], repo, env)
+
+
+def test_background_active_cap_rejects_new_distinct_job(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, never_exit=True))
+    env["ANTIGRAVITY_FOR_CODEX_MAX_ACTIVE_JOBS"] = "1"
+
+    first = run_companion(["review", "--background", "first active"], repo, env)
+    assert first.returncode == 0, first.stderr
+    first_id = json.loads(first.stdout)["jobId"]
+    try:
+        wait_for_job(repo, env, first_id, terminal=False)
+        second = run_companion(["review", "--background", "second distinct"], repo, env)
+
+        assert second.returncode == 2
+        assert "maximum active background jobs" in second.stderr.lower()
+    finally:
+        run_companion(["cancel", first_id], repo, env)
+
+
+def test_background_metadata_persistence_failure_does_not_start_worker(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    agy_pid_file = tmp_path / "agy.pid"
+    env = companion_env(tmp_path, fake_agy(tmp_path, capture_pid=agy_pid_file, delay_ms=500))
+    env["ANTIGRAVITY_FOR_CODEX_TEST_UPDATE_JOB_FAILURE"] = "1"
+
+    result = run_companion(["review", "--background", "metadata failure"], repo, env)
+
+    assert result.returncode == 2
+    assert "metadata persistence" in result.stderr.lower()
+    time.sleep(0.3)
+    assert not agy_pid_file.exists()
+    listing = run_companion(["jobs"], repo, env)
+    assert listing.returncode == 0, listing.stderr
+    jobs = json.loads(listing.stdout)["jobs"]
+    active_jobs = [
+        job for job in jobs
+        if job["status"] in {"queued", "running"} or job["liveness"]["state"] in {"queued", "healthy", "suspect"}
+    ]
+    assert active_jobs == []
+    if jobs:
+        assert jobs[0]["status"] == "failed"
+        assert jobs[0]["submissionState"] == "metadata_failed"
+        assert "Metadata persistence failed" in jobs[0]["error"]
+
+
+def test_result_viewed_state_survives_finish_and_unread_hook(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="VIEWED_DONE", delay_ms=100))
+    hook = PLUGIN / "hooks" / "unread-result.mjs"
+
+    queued = run_companion(["review", "--background", "viewed state"], repo, env)
+    job_id = json.loads(queued.stdout)["jobId"]
+    assert wait_for_job(repo, env, job_id)["status"] == "succeeded"
+
+    first = subprocess.run([NODE, str(hook)], cwd=repo, env=env, capture_output=True, text=True)
+    assert first.returncode == 0
+    assert job_id in first.stderr
+    viewed = run_companion(["result", job_id], repo, env)
+    viewed_payload = json.loads(viewed.stdout)
+    assert viewed.returncode == 0, viewed.stderr
+    assert viewed_payload["viewed"] is True
+    assert viewed_payload["resultViewedAt"]
+    status = run_companion(["status", job_id], repo, env)
+    assert json.loads(status.stdout)["resultViewedAt"] == viewed_payload["resultViewedAt"]
+    second = subprocess.run([NODE, str(hook)], cwd=repo, env=env, capture_output=True, text=True)
+    assert second.returncode == 0
+    assert job_id not in second.stderr
+
+
+def test_background_job_heartbeat_updates_while_agy_is_running(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="HEARTBEAT_OK", delay_ms=1000))
+    env["ANTIGRAVITY_FOR_CODEX_JOB_HEARTBEAT_INTERVAL_MS"] = "100"
+
+    queued = run_companion(["review", "--background", "heartbeat"], repo, env)
+
+    assert queued.returncode == 0, queued.stderr
+    job_id = json.loads(queued.stdout)["jobId"]
+    running = wait_for_job(repo, env, job_id, terminal=False)
+    assert running["status"] == "running"
+    time.sleep(0.35)
+    heartbeat = run_companion(["status", job_id], repo, env)
+    payload = json.loads(heartbeat.stdout)
+    assert payload["lastHeartbeatAt"]
+    assert payload["liveness"]["state"] in {"healthy", "suspect"}
+    assert wait_for_job(repo, env, job_id, timeout=5)["status"] == "succeeded"
+
+
+def test_background_job_persists_custom_timeout(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="TIMEOUT_PERSISTED", delay_ms=100))
+
+    queued = run_companion(["review", "--background", "--timeout-seconds", "1", "custom timeout"], repo, env)
+
+    assert queued.returncode == 0, queued.stderr
+    job_id = json.loads(queued.stdout)["jobId"]
+    status = run_companion(["status", job_id], repo, env)
+    assert status.returncode == 0, status.stderr
+    assert json.loads(status.stdout)["timeout"] == 1000
+    assert wait_for_job(repo, env, job_id, timeout=5)["status"] == "succeeded"
+
+
 def test_internal_run_job_rejects_external_invocation(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
