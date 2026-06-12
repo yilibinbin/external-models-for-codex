@@ -432,6 +432,184 @@ def test_sdk_retry_parses_prefixed_multiline_unknown_deny_error(tmp_path):
     ]
 
 
+def test_sdk_prompt_timeout_aborts_query_and_reports_timeout(tmp_path):
+    fake_sdk = tmp_path / "fake-sdk.mjs"
+    log_file = tmp_path / "sdk-timeout.jsonl"
+    fake_sdk.write_text(
+        textwrap.dedent(
+            f"""\
+            import fs from "node:fs";
+            export function query(input) {{
+              fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify({{
+                hasSignal: Boolean(input.signal),
+                abortedAtStart: Boolean(input.signal?.aborted)
+              }}) + "\\n");
+              return {{
+                async *[Symbol.asyncIterator]() {{
+                  await new Promise((resolve, reject) => {{
+                    input.signal.addEventListener("abort", () => {{
+                      fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify({{
+                        aborted: Boolean(input.signal.aborted)
+                      }}) + "\\n");
+                      reject(new Error("fake sdk observed abort"));
+                    }}, {{ once: true }});
+                  }});
+                }}
+              }};
+            }}
+            """
+        ),
+        encoding="utf8",
+    )
+
+    source = f"""
+      import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
+      const started = Date.now();
+      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 25 }});
+      result.elapsedMs = Date.now() - started;
+      console.log(JSON.stringify(result));
+    """
+    output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
+    assert output["status"] == 1
+    assert output["errorCode"] == "ETIMEDOUT"
+    assert output["stderr"] == "ETIMEDOUT"
+    assert output["elapsedMs"] < 1000
+    invocations = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert invocations[0] == {"hasSignal": True, "abortedAtStart": False}
+    assert invocations[-1] == {"aborted": True}
+
+
+def test_sdk_provider_timeout_text_is_not_reclassified_as_deadline_timeout(tmp_path):
+    fake_sdk = tmp_path / "fake-sdk.mjs"
+    fake_sdk.write_text(
+        textwrap.dedent(
+            """\
+            export function query() {
+              throw new Error("provider request timeout before local deadline");
+            }
+            """
+        ),
+        encoding="utf8",
+    )
+
+    source = f"""
+      import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
+      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 1000 }});
+      console.log(JSON.stringify(result));
+    """
+    output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
+    assert output["status"] == 1
+    assert output["errorCode"] == "SDK_ERROR"
+    assert "provider request timeout before local deadline" in output["stderr"]
+
+
+def test_sdk_write_prompt_timeout_aborts_query_and_reports_timeout(tmp_path):
+    fake_sdk = tmp_path / "fake-sdk.mjs"
+    log_file = tmp_path / "sdk-write-timeout.jsonl"
+    fake_sdk.write_text(
+        textwrap.dedent(
+            f"""\
+            import fs from "node:fs";
+            export function query(input) {{
+              fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify({{
+                permissionMode: input.permissionMode,
+                hasSignal: Boolean(input.signal)
+              }}) + "\\n");
+              return {{
+                async *[Symbol.asyncIterator]() {{
+                  await new Promise((resolve, reject) => {{
+                    input.signal.addEventListener("abort", () => {{
+                      fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify({{
+                        aborted: Boolean(input.signal.aborted)
+                      }}) + "\\n");
+                      reject(new Error("fake write sdk observed abort"));
+                    }}, {{ once: true }});
+                  }});
+                }}
+              }};
+            }}
+            """
+        ),
+        encoding="utf8",
+    )
+
+    source = f"""
+      import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
+      const result = await runSdkPrompt("prompt", {{ write: true }}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 25 }});
+      console.log(JSON.stringify(result));
+    """
+    output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
+    assert output["status"] == 1
+    assert output["errorCode"] == "ETIMEDOUT"
+    invocations = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert invocations[0] == {"permissionMode": "bypassPermissions", "hasSignal": True}
+    assert invocations[-1] == {"aborted": True}
+
+
+def test_sdk_timeout_budget_is_shared_across_deny_tool_retries(tmp_path):
+    fake_sdk = tmp_path / "fake-sdk.mjs"
+    log_file = tmp_path / "sdk-shared-timeout.jsonl"
+    fake_sdk.write_text(
+        textwrap.dedent(
+            f"""\
+            import fs from "node:fs";
+            const started = Date.now();
+            const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            export function query(input) {{
+              const disallowedTools = input.disallowedTools || [];
+              fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify({{
+                event: "query",
+                atMs: Date.now() - started,
+                disallowedTools
+              }}) + "\\n");
+              if (disallowedTools.includes("MultiEdit")) {{
+                return {{
+                  async *[Symbol.asyncIterator]() {{
+                    await delay(200);
+                    throw new Error('Permission deny rule "MultiEdit" matches no known tool — check for typos.');
+                  }}
+                }};
+              }}
+              return {{
+                async *[Symbol.asyncIterator]() {{
+                  await new Promise((resolve, reject) => {{
+                    input.signal.addEventListener("abort", () => {{
+                      fs.appendFileSync({json.dumps(str(log_file))}, JSON.stringify({{
+                        event: "abort",
+                        atMs: Date.now() - started
+                      }}) + "\\n");
+                      reject(new Error("shared budget abort"));
+                    }}, {{ once: true }});
+                  }});
+                }}
+              }};
+            }}
+            """
+        ),
+        encoding="utf8",
+    )
+
+    source = f"""
+      import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
+      const started = Date.now();
+      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 250 }});
+      result.elapsedMs = Date.now() - started;
+      console.log(JSON.stringify(result));
+    """
+    output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
+    assert output["status"] == 1
+    assert output["errorCode"] == "ETIMEDOUT"
+    assert output["elapsedMs"] < 400
+    invocations = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    query_events = [entry for entry in invocations if entry["event"] == "query"]
+    assert len(query_events) == 2
+    assert "MultiEdit" in query_events[0]["disallowedTools"]
+    assert "MultiEdit" not in query_events[1]["disallowedTools"]
+    abort_events = [entry for entry in invocations if entry["event"] == "abort"]
+    assert abort_events
+    assert abort_events[-1]["atMs"] < 400
+
+
 def test_sdk_native_retry_updates_agent_disallowed_tools(tmp_path):
     fake_sdk = tmp_path / "fake-sdk.mjs"
     log_file = tmp_path / "sdk-native-calls.jsonl"

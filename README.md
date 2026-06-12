@@ -23,7 +23,7 @@ External Models for Codex 是一个面向 Codex 的外部模型插件市场，�
 Remote install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.1
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
@@ -93,7 +93,7 @@ These are skills-and-hook plugins, not MCP/app tool plugins. It is expected that
 
 Claude for Codex supports `--quality auto|fast|standard|strong|max`. The policy uses Claude Code aliases (`sonnet`, `opus`, `fable`, `best`) plus valid effort values (`low`, `medium`, `high`, `xhigh`, `max`) instead of concrete model ids, so future Claude Code alias updates do not require a plugin change. Explicit `--model` and `--effort` override quality. `ultracode` is not emitted as an effort value, and `claude-ultrareview` remains explicit-cost only.
 
-Claude for Codex 0.18.0 keeps those aliases in a shared model alias registry used by CLI policy and SDK subagent selection. It also records compact outcome classification metadata for CLI/SDK runs, exposes `doctor --json` as a cheap no-prompt health check, documents SDK subagents as fresh isolated context reviewers, and ships fork-safe repository CI validation.
+Claude for Codex 0.18.1 keeps those aliases in a shared model alias registry used by CLI policy and SDK subagent selection. It also records compact outcome classification metadata for CLI/SDK runs, exposes `doctor --json` as a cheap no-prompt health check, documents SDK subagents as fresh isolated context reviewers, ships fork-safe repository CI validation, and hardens SDK timeout handling across permission-compatibility retries.
 
 ### Fable / top-model routing
 
