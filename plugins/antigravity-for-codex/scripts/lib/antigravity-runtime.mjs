@@ -15,6 +15,7 @@ export const DEFAULT_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
 export const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 const MAX_BUFFER = 20 * 1024 * 1024;
+const LOG_DIAGNOSTIC_BYTES = 128 * 1024;
 
 function isExecutable(filePath) {
   try {
@@ -211,9 +212,100 @@ function capabilitiesFromHelp(help) {
     printTimeout: text.includes("--print-timeout"),
     sandbox: text.includes("--sandbox"),
     addDir: text.includes("--add-dir"),
+    logFile: text.includes("--log-file"),
     modelsCommand: /\bmodels\b/.test(text),
     pluginCommand: /\bplugin\b/.test(text)
   };
+}
+
+function createAgyLogFile() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-for-codex-"));
+  return path.join(dir, "agy.log");
+}
+
+function cleanupAgyLogFile(logFile) {
+  if (!logFile) return;
+  try {
+    fs.rmSync(path.dirname(logFile), { recursive: true, force: true });
+  } catch {
+    // Best-effort cleanup only; diagnostics must not mask the model result.
+  }
+}
+
+function tailText(text, maxBytes = LOG_DIAGNOSTIC_BYTES) {
+  const buffer = Buffer.from(String(text || ""), "utf8");
+  if (buffer.length <= maxBytes) return buffer.toString("utf8");
+  return buffer.subarray(buffer.length - maxBytes).toString("utf8");
+}
+
+function collapseRepeatedDiagnostic(text) {
+  const diagnostic = String(text || "").trim();
+  const markers = ["RESOURCE_EXHAUSTED", "UNAUTHENTICATED", "PERMISSION_DENIED"];
+  for (const marker of markers) {
+    const first = diagnostic.indexOf(marker);
+    const second = first >= 0 ? diagnostic.indexOf(marker, first + marker.length) : -1;
+    if (first < 0 || second < 0) continue;
+
+    const chunks = [];
+    let offset = first;
+    while (offset >= 0) {
+      const next = diagnostic.indexOf(marker, offset + marker.length);
+      const chunk = diagnostic.slice(offset, next >= 0 ? next : undefined)
+        .replace(/^[\s:;.-]+|[\s:;.-]+$/g, "");
+      if (chunk && !chunks.includes(chunk)) {
+        chunks.push(chunk);
+      }
+      offset = next;
+    }
+    if (chunks.length === 1) return chunks[0];
+    if (chunks.length > 1) return chunks.join(" | ");
+  }
+  return diagnostic;
+}
+
+function sanitizeDiagnostic(text) {
+  const redacted = String(text || "")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+    .replace(/\s+/g, " ")
+    .trim();
+  return collapseRepeatedDiagnostic(redacted);
+}
+
+export function antigravityLogDiagnostic(logText) {
+  const text = tailText(logText);
+  if (!text) return "";
+  const resourceMatches = [...text.matchAll(/RESOURCE_EXHAUSTED[^\r\n]*/g)].map((match) => match[0]);
+  if (resourceMatches.length) {
+    return sanitizeDiagnostic(resourceMatches[resourceMatches.length - 1]);
+  }
+  const executorMatches = [...text.matchAll(/agent executor error:\s*([^\r\n]+)/g)].map((match) => match[1]);
+  if (executorMatches.length) {
+    return sanitizeDiagnostic(executorMatches[executorMatches.length - 1]);
+  }
+  if (/You are not logged into Antigravity/i.test(text) && !/authenticated successfully/i.test(text)) {
+    return "Antigravity authentication failed: You are not logged into Antigravity.";
+  }
+  const deniedMatches = [...text.matchAll(/(?:UNAUTHENTICATED|PERMISSION_DENIED|permission denied)[^\r\n]*/gi)].map((match) => match[0]);
+  if (deniedMatches.length) {
+    return sanitizeDiagnostic(deniedMatches[deniedMatches.length - 1]);
+  }
+  return "";
+}
+
+function readAgyLogDiagnostic(logFile) {
+  if (!logFile) return "";
+  try {
+    return antigravityLogDiagnostic(fs.readFileSync(logFile, "utf8"));
+  } catch {
+    return "";
+  }
+}
+
+function emptyOutputError(invocation) {
+  const diagnostic = readAgyLogDiagnostic(invocation?.logFile);
+  return diagnostic
+    ? `Antigravity CLI returned empty output. Last log diagnostic: ${diagnostic}`
+    : "Antigravity CLI returned empty output.";
 }
 
 export function antigravityPreflight(env = process.env, options = {}) {
@@ -289,6 +381,7 @@ export function antigravityPrintArgs(prompt, options = {}, env = process.env) {
   if (!preflight.ok) {
     throw new Error(preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`);
   }
+  const shouldCaptureLog = preflight.capabilities.logFile && env.ANTIGRAVITY_FOR_CODEX_DISABLE_LOG_CAPTURE !== "1";
   const args = [
     "--model",
     preflight.model,
@@ -306,13 +399,17 @@ export function antigravityPrintArgs(prompt, options = {}, env = process.env) {
       args.push("--add-dir", includeDirectory);
     }
   }
+  const logFile = shouldCaptureLog ? createAgyLogFile() : "";
+  if (logFile) {
+    args.push("--log-file", logFile);
+  }
   // Current agy treats --prompt as the noninteractive print prompt; combining
   // --print with --prompt can ignore the supplied prompt and produce a greeting.
   args.push("--prompt", String(prompt));
   if (args.includes("--dangerously-skip-permissions")) {
     throw new Error("Internal error: unsafe Antigravity permission flag is forbidden.");
   }
-  return { command: preflight.command, args, preflight };
+  return { command: preflight.command, args, preflight, logFile };
 }
 
 export function antigravityPrint(prompt, options = {}, env = process.env) {
@@ -329,13 +426,17 @@ export function antigravityPrint(prompt, options = {}, env = process.env) {
   });
   const output = String(result.stdout || "").trim();
   if (result.status === 0 && !output) {
+    const stderr = emptyOutputError(invocation);
+    cleanupAgyLogFile(invocation.logFile);
     return {
       ...result,
       status: 1,
-      stderr: "Antigravity CLI returned empty output.",
+      stderr,
+      errorCode: "EEMPTYOUTPUT",
       provider: invocation.preflight
     };
   }
+  cleanupAgyLogFile(invocation.logFile);
   return { ...result, stdout: output, provider: invocation.preflight };
 }
 
@@ -413,12 +514,13 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
           settle({
             status: 1,
             stdout: output,
-            stderr: `${stderr}${stderr ? "\n" : ""}terminated by SIGKILL after timeout`,
+            stderr: `${stderr}${stderr ? "\n" : ""}${readAgyLogDiagnostic(invocation.logFile) || "terminated by SIGKILL after timeout"}`,
             error: "ETIMEDOUT",
             errorCode: "ETIMEDOUT",
             timedOut: true,
             provider: invocation.preflight
           });
+          cleanupAgyLogFile(invocation.logFile);
         }, forceResolveGraceMs);
       }, killGraceMs);
     }, timeoutMs);
@@ -439,18 +541,21 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
         timedOut,
         provider: invocation.preflight
       });
+      cleanupAgyLogFile(invocation.logFile);
     });
     child.on("close", (status, signal) => {
       const output = String(stdout || "").trim();
+      const emptyOutput = status === 0 && !output;
       settle({
-        status: status ?? 1,
+        status: emptyOutput ? 1 : status ?? 1,
         stdout: output,
-        stderr: signal ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal}` : stderr,
+        stderr: emptyOutput ? emptyOutputError(invocation) : (signal ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal}` : stderr),
         error: timedOut ? "ETIMEDOUT" : "",
-        errorCode: timedOut ? "ETIMEDOUT" : "",
+        errorCode: timedOut ? "ETIMEDOUT" : (emptyOutput ? "EEMPTYOUTPUT" : ""),
         timedOut,
         provider: invocation.preflight
       });
+      cleanupAgyLogFile(invocation.logFile);
     });
   });
 }

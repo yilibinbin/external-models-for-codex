@@ -224,6 +224,7 @@ def test_antigravity_hooks_use_antigravity_env_names():
 FAKE_AGY_HELP = (
     "Usage of agy:\n"
     "  --add-dir\n"
+    "  --log-file\n"
     "  --model\n"
     "  --print\n"
     "  --print-timeout\n"
@@ -293,6 +294,8 @@ def write_fake_agy(
         f"if (argv.join(' ') === 'models') {{ process.stdout.write({json.dumps(models_text)}); process.exit(0); }}\n"
         f"{capture}"
         f"{pid_capture}"
+        "const logFileIndex = argv.indexOf('--log-file');\n"
+        "if (logFileIndex >= 0 && process.env.FAKE_AGY_LOG) { fs.writeFileSync(argv[logFileIndex + 1], process.env.FAKE_AGY_LOG); }\n"
         "if (!argv.includes('--prompt')) { console.error('missing prompt'); process.exit(9); }\n"
         "if (!argv.includes('--model')) { console.error('missing model'); process.exit(8); }\n"
         "if (argv.includes('--dangerously-skip-permissions')) { console.error('unsafe permissions'); process.exit(7); }\n"
@@ -486,6 +489,66 @@ def test_runtime_async_timeout_kills_agy_that_ignores_sigterm(tmp_path):
     assert payload["error"] == "ETIMEDOUT"
     assert payload["errorCode"] == "ETIMEDOUT"
     assert payload["elapsedMs"] < 1500
+
+
+def test_runtime_log_diagnostic_collapses_duplicate_resource_errors():
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const log = 'E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. "
+        "Resets in 38h51m45s.: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 38h51m45s.\\n';"
+        "process.stdout.write(r.antigravityLogDiagnostic(log));"
+    )
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 38h51m45s"
+    assert result.stdout.count("RESOURCE_EXHAUSTED") == 1
+
+
+def test_runtime_empty_output_surfaces_agy_log_diagnostic(tmp_path):
+    argv_file = tmp_path / "agy-argv.json"
+    agy = fake_agy(tmp_path, response="", capture_argv=argv_file)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    env["FAKE_AGY_LOG"] = (
+        "I0611 print mode started\n"
+        "E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. "
+        "Resets in 38h51m45s.\n"
+    )
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const result = r.antigravityPrint('empty check', {}, process.env);"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == 1
+    assert payload["errorCode"] == "EEMPTYOUTPUT"
+    assert "RESOURCE_EXHAUSTED (code 429)" in payload["stderr"]
+    assert "Individual quota reached" in payload["stderr"]
+    capture = json.loads(argv_file.read_text())
+    assert "--log-file" in capture["argv"]
+
+
+def test_runtime_async_empty_output_surfaces_agy_log_diagnostic(tmp_path):
+    agy = fake_agy(tmp_path, response="")
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    env["FAKE_AGY_LOG"] = (
+        "E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. "
+        "Resets in 38h51m45s.\n"
+    )
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const result = await r.antigravityPrintAsync('empty check', {timeout: 1000}, process.env);"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == 1
+    assert payload["errorCode"] == "EEMPTYOUTPUT"
+    assert "RESOURCE_EXHAUSTED (code 429)" in payload["stderr"]
 
 
 def init_git_repo(repo):

@@ -1187,6 +1187,7 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(!USER_VISIBLE_COMMANDS.includes("__run-job"), "capabilities-hide-internal"),
     releaseCheckResult(runtime.includes("GPT/OpenAI") && runtime.includes("/\\b(gpt|openai)\\b/i"), "model-policy-rejects-openai"),
     releaseCheckResult(runtime.includes("--prompt") && runtime.includes("--print-timeout"), "agy-prompt-timeout-argv"),
+    releaseCheckResult(runtime.includes("--log-file") && runtime.includes("antigravityLogDiagnostic") && runtime.includes("EEMPTYOUTPUT"), "agy-empty-output-log-diagnostics"),
     releaseCheckResult(!/args\.push\(\s*["']--print["']/.test(runtime), "no-print-argv"),
     releaseCheckResult(!runtime.includes("--dangerously-skip-permissions") || runtime.includes("forbidden"), "dangerous-permission-guard"),
     releaseCheckResult(hooks.includes("ANTIGRAVITY_PLUGIN_ROOT") && hooks.includes("antigravity-review-gate.mjs"), "hooks-discovery"),
