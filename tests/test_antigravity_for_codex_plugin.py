@@ -129,6 +129,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "antigravity-runtime.mjs",
         "doctor.mjs",
         "github-actions.mjs",
+        "job-lifecycle.mjs",
         "jobs.mjs",
         "leases.mjs",
         "mailbox.mjs",
@@ -140,6 +141,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "state.mjs",
         "structured-output.mjs",
         "version.mjs",
+        "worktree-fingerprint.mjs",
     }
     actual_libs = {path.name for path in (PLUGIN / "scripts" / "lib").glob("*.mjs")}
     assert actual_libs == expected_libs
@@ -791,6 +793,564 @@ def init_git_repo(repo):
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def test_antigravity_job_lifecycle_key_changes_with_provider_model_and_fingerprint(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "a.txt").write_text("one\n", encoding="utf8")
+    subprocess.run(["git", "add", "a.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "a.txt").write_text("two\n", encoding="utf8")
+    source = f"""
+import {{ deriveJobIdempotencyKey }} from './plugins/antigravity-for-codex/scripts/lib/job-lifecycle.mjs';
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+const cwd = {json.dumps(str(repo))};
+const fp = worktreeFingerprint(cwd, {{ env: process.env }});
+if (!fp.fingerprint || !fp.status) throw new Error('missing fingerprint');
+const one = deriveJobIdempotencyKey({{
+  command: 'review',
+  args: ['review current diff'],
+  cwd,
+  workspaceFingerprint: fp.fingerprint,
+  executionControls: {{ provider: 'gemini', model: 'Gemini 3.1 Pro (High)' }}
+}});
+const two = deriveJobIdempotencyKey({{
+  command: 'review',
+  args: ['review current diff'],
+  cwd,
+  workspaceFingerprint: fp.fingerprint,
+  executionControls: {{ provider: 'claude', model: 'Claude Sonnet 4.6 (Thinking)' }}
+}});
+const fingerprintOne = deriveJobIdempotencyKey({{
+  command: 'review',
+  args: ['review current diff'],
+  cwd,
+  workspaceFingerprint: 'fingerprint-one',
+  executionControls: {{ provider: 'gemini', model: 'Gemini 3.1 Pro (High)' }}
+}});
+const fingerprintTwo = deriveJobIdempotencyKey({{
+  command: 'review',
+  args: ['review current diff'],
+  cwd,
+  workspaceFingerprint: 'fingerprint-two',
+  executionControls: {{ provider: 'gemini', model: 'Gemini 3.1 Pro (High)' }}
+}});
+if (one === two) throw new Error('provider/model did not affect idempotency');
+if (fingerprintOne === fingerprintTwo) throw new Error('workspace fingerprint did not affect idempotency');
+console.log(JSON.stringify({{ one, two, status: fp.status }}));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_lifecycle_classifies_queued_running_lost_terminal():
+    source = """
+import { classifyJobLiveness } from './plugins/antigravity-for-codex/scripts/lib/job-lifecycle.mjs';
+const now = Date.parse('2026-06-12T00:00:00.000Z');
+const queued = classifyJobLiveness({ status: 'queued', createdAt: '2026-06-11T23:59:55.000Z' }, { now });
+const lost = classifyJobLiveness({ status: 'running', startedAt: '2026-06-11T23:00:00.000Z', lastHeartbeatAt: '2026-06-11T23:00:00.000Z' }, { now });
+const done = classifyJobLiveness({ status: 'succeeded' }, { now });
+if (queued.state !== 'queued') throw new Error('queued wrong');
+if (lost.state !== 'lost') throw new Error('lost wrong');
+if (done.state !== 'terminal') throw new Error('terminal wrong');
+console.log('ok');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_lifecycle_running_without_signals_uses_created_at_for_loss():
+    source = """
+import { classifyJobLiveness } from './plugins/antigravity-for-codex/scripts/lib/job-lifecycle.mjs';
+const now = Date.parse('2026-06-12T00:00:00.000Z');
+const lost = classifyJobLiveness({
+  status: 'running',
+  createdAt: '2026-06-11T23:30:00.000Z',
+  startedAt: '',
+  lastHeartbeatAt: '',
+  lastProgressAt: ''
+}, { now });
+if (lost.state !== 'lost') throw new Error(JSON.stringify(lost));
+if (lost.staleForMs !== 30 * 60 * 1000) throw new Error(JSON.stringify(lost));
+console.log('ok');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_lifecycle_job_heartbeat_interval_uses_planned_env_name():
+    source = """
+import { JOB_HEARTBEAT_INTERVAL_MS, jobHeartbeatIntervalMs } from './plugins/antigravity-for-codex/scripts/lib/job-lifecycle.mjs';
+if (jobHeartbeatIntervalMs({ ANTIGRAVITY_FOR_CODEX_JOB_HEARTBEAT_INTERVAL_MS: '100' }) !== 100) {
+  throw new Error('planned heartbeat env was ignored');
+}
+if (jobHeartbeatIntervalMs({ ANTIGRAVITY_FOR_CODEX_HEARTBEAT_INTERVAL_MS: '100' }) !== JOB_HEARTBEAT_INTERVAL_MS) {
+  throw new Error('legacy heartbeat env should not control job heartbeat interval');
+}
+console.log('ok');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_lifecycle_helpers_parse_and_cap_env_values():
+    source = """
+import {
+  JOB_HEARTBEAT_INTERVAL_MS,
+  TERMINAL_JOB_STATUSES,
+  gitSignalTimeoutMs,
+  isTerminalJobStatus,
+  jobHeartbeatIntervalMs,
+  maxActiveJobs,
+  parsePositiveInteger
+} from './plugins/antigravity-for-codex/scripts/lib/job-lifecycle.mjs';
+if (parsePositiveInteger('7.9', 1) !== 7) throw new Error('expected truncation');
+if (parsePositiveInteger('bad', 11) !== 11) throw new Error('expected invalid fallback');
+if (parsePositiveInteger('0', 11, { min: 1 }) !== 11) throw new Error('expected min fallback');
+if (parsePositiveInteger('999', 11, { max: 32 }) !== 32) throw new Error('expected max cap');
+if (gitSignalTimeoutMs({ ANTIGRAVITY_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: '99' }) !== 10000) {
+  throw new Error('git timeout below min should fall back');
+}
+if (gitSignalTimeoutMs({ ANTIGRAVITY_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS: '999999' }) !== 60000) {
+  throw new Error('git timeout should cap');
+}
+if (jobHeartbeatIntervalMs({ ANTIGRAVITY_FOR_CODEX_JOB_HEARTBEAT_INTERVAL_MS: '99' }) !== JOB_HEARTBEAT_INTERVAL_MS) {
+  throw new Error('heartbeat below min should fall back');
+}
+if (jobHeartbeatIntervalMs({ ANTIGRAVITY_FOR_CODEX_JOB_HEARTBEAT_INTERVAL_MS: '999999' }) !== 5 * 60 * 1000) {
+  throw new Error('heartbeat should cap');
+}
+if (maxActiveJobs({}) !== 3) throw new Error('maxActiveJobs default wrong');
+if (maxActiveJobs({ ANTIGRAVITY_FOR_CODEX_MAX_ACTIVE_JOBS: '9' }) !== 9) throw new Error('maxActiveJobs env wrong');
+if (maxActiveJobs({ ANTIGRAVITY_FOR_CODEX_MAX_ACTIVE_JOBS: '99' }) !== 32) throw new Error('maxActiveJobs cap wrong');
+if (!Object.isFrozen(TERMINAL_JOB_STATUSES)) throw new Error('terminal statuses should be frozen');
+if (!TERMINAL_JOB_STATUSES.includes('succeeded') || !TERMINAL_JOB_STATUSES.includes('cancel_failed')) {
+  throw new Error('terminal status exports missing expected values');
+}
+if (!TERMINAL_JOB_STATUSES.every(isTerminalJobStatus)) throw new Error('exported terminal status not recognized');
+if (isTerminalJobStatus('running') || isTerminalJobStatus('')) throw new Error('non-terminal status recognized');
+console.log('ok');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_worktree_fingerprint_changes_for_same_stat_tracked_edits(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    target = repo / "same.txt"
+    target.write_text("aa\n", encoding="utf8")
+    subprocess.run(["git", "add", "same.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    target.write_text("bb\n", encoding="utf8")
+    source_one = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    first = run_node_eval(source_one)
+    assert first.returncode == 0, first.stderr
+    target.write_text("cc\n", encoding="utf8")
+    second = run_node_eval(source_one)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(first.stdout)["fingerprint"] != json.loads(second.stdout)["fingerprint"]
+
+
+def test_antigravity_worktree_fingerprint_changes_for_same_stat_staged_edits(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    target = repo / "same.txt"
+    target.write_text("aa\n", encoding="utf8")
+    subprocess.run(["git", "add", "same.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    target.write_text("bb\n", encoding="utf8")
+    subprocess.run(["git", "add", "same.txt"], cwd=repo, check=True)
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    first = run_node_eval(source)
+    assert first.returncode == 0, first.stderr
+    target.write_text("cc\n", encoding="utf8")
+    subprocess.run(["git", "add", "same.txt"], cwd=repo, check=True)
+    second = run_node_eval(source)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(first.stdout)["fingerprint"] != json.loads(second.stdout)["fingerprint"]
+
+
+def test_antigravity_worktree_fingerprint_non_git_is_not_trusted(tmp_path):
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(tmp_path))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["nonGit"] is True
+    assert payload["status"] != "trusted"
+
+
+def test_antigravity_worktree_fingerprint_non_timeout_git_failure_is_inconclusive(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    real_git = shutil.which("git")
+    assert real_git
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        "for arg in \"$@\"; do\n"
+        "  if [ \"$arg\" = \"status\" ]; then\n"
+        "    echo 'forced status failure' >&2\n"
+        "    exit 42\n"
+        "  fi\n"
+        "done\n"
+        f"exec {real_git!r} \"$@\"\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    env = sanitized_env()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "inconclusive"
+    assert payload["untrusted"] is True
+    assert payload["failureKind"] == "inconclusive"
+    assert "forced status failure" in payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_disables_git_color_output(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    target = repo / "colored.txt"
+    target.write_text("one\n", encoding="utf8")
+    subprocess.run(["git", "add", "colored.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "color.ui", "always"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "color.status", "always"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "color.diff", "always"], cwd=repo, check=True)
+    target.write_text("two\n", encoding="utf8")
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert "\x1b[" not in payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_disables_textconv_filters(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    marker = tmp_path / "textconv-was-run"
+    textconv = tmp_path / "textconv.sh"
+    textconv.write_text(
+        "#!/bin/sh\n"
+        f"printf textconv > {str(marker)!r}\n"
+        "cat \"$1\"\n",
+        encoding="utf8",
+    )
+    textconv.chmod(0o755)
+    (repo / ".gitattributes").write_text("*.spy diff=spy\n", encoding="utf8")
+    target = repo / "secret.spy"
+    target.write_text("one\n", encoding="utf8")
+    subprocess.run(["git", "config", "diff.spy.textconv", str(textconv)], cwd=repo, check=True)
+    subprocess.run(["git", "add", ".gitattributes", "secret.spy"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    target.write_text("two\n", encoding="utf8")
+    subprocess.run(["git", "add", "secret.spy"], cwd=repo, check=True)
+    target.write_text("three\n", encoding="utf8")
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["fingerprint"]
+    assert payload["hash"] == payload["fingerprint"]
+    assert payload["status"] in {"trusted", "inconclusive"}
+    assert "git diff --no-color --no-ext-diff --no-textconv --stat" in payload["text"]
+    assert not marker.exists()
+
+
+def test_antigravity_worktree_fingerprint_disables_fsmonitor_helper(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    marker = tmp_path / "fsmonitor-was-run"
+    fsmonitor = tmp_path / "fsmonitor.sh"
+    fsmonitor.write_text(
+        "#!/bin/sh\n"
+        f"printf fsmonitor > {str(marker)!r}\n"
+        "exit 1\n",
+        encoding="utf8",
+    )
+    fsmonitor.chmod(0o755)
+    target = repo / "tracked.txt"
+    target.write_text("one\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "config", "core.fsmonitor", str(fsmonitor)], cwd=repo, check=True)
+    target.write_text("two\n", encoding="utf8")
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["fingerprint"]
+    assert payload["hash"] == payload["fingerprint"]
+    assert payload["status"] in {"trusted", "inconclusive"}
+    assert not marker.exists()
+
+
+def test_antigravity_worktree_fingerprint_ignores_ambient_git_repository_env(tmp_path):
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    repo_a.mkdir()
+    repo_b.mkdir()
+    init_git_repo(repo_a)
+    init_git_repo(repo_b)
+    (repo_a / "repo-a-unique.txt").write_text("repo a base\n", encoding="utf8")
+    (repo_b / "repo-b-unique.txt").write_text("repo b base\n", encoding="utf8")
+    subprocess.run(["git", "add", "repo-a-unique.txt"], cwd=repo_a, check=True)
+    subprocess.run(["git", "commit", "-m", "repo a base"], cwd=repo_a, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "add", "repo-b-unique.txt"], cwd=repo_b, check=True)
+    subprocess.run(["git", "commit", "-m", "repo b base"], cwd=repo_b, check=True, capture_output=True, text=True)
+    (repo_a / "repo-a-unique.txt").write_text("repo a changed\n", encoding="utf8")
+    (repo_b / "repo-b-unique.txt").write_text("repo b changed\n", encoding="utf8")
+    repo_a_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_a, check=True, capture_output=True, text=True).stdout.strip()
+    repo_b_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo_b, check=True, capture_output=True, text=True).stdout.strip()
+    env = sanitized_env()
+    env.update({
+        "GIT_DIR": str(repo_b / ".git"),
+        "GIT_WORK_TREE": str(repo_b),
+        "GIT_INDEX_FILE": str(repo_b / ".git" / "index"),
+        "GIT_COMMON_DIR": str(repo_b / ".git"),
+        "GIT_OBJECT_DIRECTORY": str(repo_b / ".git" / "objects"),
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES": str(repo_b / ".git" / "objects"),
+        "GIT_NAMESPACE": "poison",
+        "GIT_CEILING_DIRECTORIES": str(tmp_path),
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM": "false",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": str(repo_b / ".gitconfig"),
+        "GIT_CONFIG_SYSTEM": str(repo_b / ".gitconfig-system"),
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "core.worktree",
+        "GIT_CONFIG_VALUE_0": str(repo_b),
+    })
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo_a))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "trusted"
+    assert repo_a_head in payload["text"]
+    assert repo_b_head not in payload["text"]
+    assert "repo-a-unique.txt" in payload["text"]
+    assert "repo-b-unique.txt" not in payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_untracked_file_count_budget_is_inconclusive(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "one.txt").write_text("one\n", encoding="utf8")
+    (repo / "two.txt").write_text("two\n", encoding="utf8")
+    env = sanitized_env()
+    env["ANTIGRAVITY_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_FILES"] = "1"
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "inconclusive"
+    assert payload["untrusted"] is True
+    assert payload["budgetExceeded"] is True
+    assert "UNTRACKED_FINGERPRINT_BUDGET_EXCEEDED" in payload["text"]
+    assert "files=2 maxFiles=1" in payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_untracked_byte_budget_is_inconclusive(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "tracked.txt").write_text("tracked\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "large-untracked.txt").write_text("abcdef\n", encoding="utf8")
+    env = sanitized_env()
+    env["ANTIGRAVITY_FOR_CODEX_MAX_UNTRACKED_FINGERPRINT_BYTES"] = "3"
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "inconclusive"
+    assert payload["untrusted"] is True
+    assert payload["budgetExceeded"] is True
+    assert "UNTRACKED_FINGERPRINT_BUDGET_EXCEEDED" in payload["text"]
+    assert "file=large-untracked.txt" in payload["text"]
+    assert "remainingBytes=3" in payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_sigkills_term_ignoring_git(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        "trap '' TERM\n"
+        "sleep 3\n"
+        "echo 'fake git should have been killed' >&2\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = sanitized_env()
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env.get('PATH', '')}"
+    env["ANTIGRAVITY_FOR_CODEX_GIT_SIGNAL_TIMEOUT_MS"] = "100"
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(tmp_path))}, {{ env: process.env }})));
+"""
+    started = time.monotonic()
+    result = run_node_eval(source, env)
+    elapsed = time.monotonic() - started
+    assert result.returncode == 0, result.stderr
+    assert elapsed < 2
+    payload = json.loads(result.stdout)
+    assert payload["timedOut"] is True
+    assert payload["status"] == "inconclusive"
+    assert payload["failureKind"] == "timeout"
+
+
+def test_antigravity_worktree_fingerprint_hashes_repo_root_untracked_from_subdir(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    subdir = repo / "subdir"
+    subdir.mkdir()
+    (subdir / "tracked.txt").write_text("tracked\n", encoding="utf8")
+    subprocess.run(["git", "add", "subdir/tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    root_untracked = repo / "root.txt"
+    root_untracked.write_text("one\n", encoding="utf8")
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(subdir))}, {{ env: process.env }})));
+"""
+    first = run_node_eval(source)
+    assert first.returncode == 0, first.stderr
+    root_untracked.write_text("two\n", encoding="utf8")
+    second = run_node_eval(source)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["status"] != "trusted" or first_payload["fingerprint"] != second_payload["fingerprint"]
+
+
+def test_antigravity_worktree_fingerprint_changes_for_untracked_executable_mode(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("tracked\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    target = repo / "script.sh"
+    target.write_text("#!/bin/sh\necho same\n", encoding="utf8")
+    target.chmod(0o644)
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }})));
+"""
+    first = run_node_eval(source)
+    assert first.returncode == 0, first.stderr
+    target.chmod(0o755)
+    second = run_node_eval(source)
+    assert second.returncode == 0, second.stderr
+    first_payload = json.loads(first.stdout)
+    second_payload = json.loads(second.stdout)
+    assert first_payload["fingerprint"] != second_payload["fingerprint"]
+    assert '"mode":"100644"' in first_payload["text"]
+    assert '"mode":"100755"' in second_payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_is_invariant_from_subdir(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    subdir = repo / "subdir"
+    subdir.mkdir()
+    (repo / "tracked-root.txt").write_text("tracked\n", encoding="utf8")
+    (subdir / "tracked-subdir.txt").write_text("subdir\n", encoding="utf8")
+    subprocess.run(["git", "add", "tracked-root.txt", "subdir/tracked-subdir.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "tracked-root.txt").write_text("tracked changed\n", encoding="utf8")
+    (repo / "untracked-root.txt").write_text("untracked\n", encoding="utf8")
+    source = f"""
+import {{ worktreeFingerprint }} from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+const root = worktreeFingerprint({json.dumps(str(repo))}, {{ env: process.env }});
+const subdir = worktreeFingerprint({json.dumps(str(subdir))}, {{ env: process.env }});
+process.stdout.write(JSON.stringify({{ root, subdir }}));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["root"]["fingerprint"] == payload["subdir"]["fingerprint"]
+    assert payload["root"]["status"] == payload["subdir"]["status"]
+    assert payload["root"]["text"] == payload["subdir"]["text"]
+
+
+def test_antigravity_untracked_fingerprint_trust_is_content_based():
+    source = """
+import { isTrustedUntrackedFingerprint } from './plugins/antigravity-for-codex/scripts/lib/worktree-fingerprint.mjs';
+const trusted = [
+  { type: 'file', size: 3, mode: '100644', sha256: 'abc' },
+  { type: 'file', size: 3, mode: '100755', sha256: 'abc' }
+];
+const untrusted = [
+  { type: 'file', size: 3, sha256: 'abc' },
+  { type: 'file', size: 3, mode: '100600', sha256: 'abc' },
+  { type: 'symlink', target: '../target' },
+  { type: 'budget-exceeded', size: 2, remainingBytes: 1 },
+  { type: 'file-large', size: 1048577, mtimeMs: 1 },
+  { type: 'error', errorCode: 'EACCES' },
+  { type: 'outside-workspace' },
+  { type: 'other', size: 0, mtimeMs: 1 }
+];
+if (!trusted.every(isTrustedUntrackedFingerprint)) throw new Error('expected trusted content fingerprints');
+if (untrusted.some(isTrustedUntrackedFingerprint)) throw new Error('expected skipped fingerprints to be untrusted');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
 
 
 def test_structured_review_outputs_valid_json_and_report(tmp_path):
