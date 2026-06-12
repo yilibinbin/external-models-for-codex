@@ -10,6 +10,7 @@ import {
   selectAgyModel,
   validateAgyModelForProvider
 } from "./agy-capabilities.mjs";
+import { classifyAgyOutcome, outcomeStderr } from "./agy-outcome.mjs";
 
 export const AGY_CLI_PATH_ENV = "AGY_CLI_PATH";
 export const ANTIGRAVITY_CLI_PATH_ENV = "ANTIGRAVITY_CLI_PATH";
@@ -252,13 +253,6 @@ function readAgyLogDiagnostic(logFile) {
   }
 }
 
-function emptyOutputError(invocation) {
-  const diagnostic = readAgyLogDiagnostic(invocation?.logFile);
-  return diagnostic
-    ? `Antigravity CLI returned empty output. Last log diagnostic: ${diagnostic}`
-    : "Antigravity CLI returned empty output.";
-}
-
 export function antigravityPreflight(env = process.env, options = {}) {
   const command = agyCommand(env);
   const result = runCommand(command, ["--help"], { env });
@@ -368,7 +362,8 @@ export function antigravityPrint(prompt, options = {}, env = process.env) {
   try {
     invocation = antigravityPrintArgs(prompt, options, env);
   } catch (error) {
-    return { status: 2, stdout: "", stderr: error.message || String(error), error: "", errorCode: "" };
+    const normalized = { status: 2, stdout: "", stderr: error.message || String(error), error: "", errorCode: "" };
+    return { ...normalized, outcome: classifyAgyOutcome(normalized) };
   }
   const result = runCommand(invocation.command, invocation.args, {
     cwd: options.cwd,
@@ -377,18 +372,22 @@ export function antigravityPrint(prompt, options = {}, env = process.env) {
   });
   const output = String(result.stdout || "").trim();
   if (result.status === 0 && !output) {
-    const stderr = emptyOutputError(invocation);
+    const logDiagnostic = readAgyLogDiagnostic(invocation.logFile);
+    const outcome = classifyAgyOutcome(result, { logDiagnostic });
+    const stderr = outcomeStderr(result, { logDiagnostic });
     cleanupAgyLogFile(invocation.logFile);
     return {
       ...result,
       status: 1,
       stderr,
       errorCode: "EEMPTYOUTPUT",
+      outcome,
       provider: invocation.preflight
     };
   }
   cleanupAgyLogFile(invocation.logFile);
-  return { ...result, stdout: output, provider: invocation.preflight };
+  const normalized = { ...result, stdout: output, provider: invocation.preflight };
+  return { ...normalized, outcome: classifyAgyOutcome(normalized) };
 }
 
 export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
@@ -396,13 +395,14 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
   try {
     invocation = antigravityPrintArgs(prompt, options, env);
   } catch (error) {
-    return Promise.resolve({
+    const normalized = {
       status: 2,
       stdout: "",
       stderr: error.message || String(error),
       error: "",
       errorCode: ""
-    });
+    };
+    return Promise.resolve({ ...normalized, outcome: classifyAgyOutcome(normalized) });
   }
   return new Promise((resolve) => {
     const detached = process.platform !== "win32";
@@ -462,7 +462,7 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
         killChild("SIGKILL");
         forceResolveTimer = setTimeout(() => {
           const output = String(stdout || "").trim();
-          settle({
+          const normalized = {
             status: 1,
             stdout: output,
             stderr: `${stderr}${stderr ? "\n" : ""}${readAgyLogDiagnostic(invocation.logFile) || "terminated by SIGKILL after timeout"}`,
@@ -470,7 +470,8 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
             errorCode: "ETIMEDOUT",
             timedOut: true,
             provider: invocation.preflight
-          });
+          };
+          settle({ ...normalized, outcome: classifyAgyOutcome(normalized) });
           cleanupAgyLogFile(invocation.logFile);
         }, forceResolveGraceMs);
       }, killGraceMs);
@@ -483,7 +484,7 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
     });
     child.stdin.end();
     child.on("error", (error) => {
-      settle({
+      const normalized = {
         status: 1,
         stdout,
         stderr,
@@ -491,21 +492,32 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
         errorCode: timedOut ? "ETIMEDOUT" : String(error.code || ""),
         timedOut,
         provider: invocation.preflight
-      });
+      };
+      settle({ ...normalized, outcome: classifyAgyOutcome(normalized) });
       cleanupAgyLogFile(invocation.logFile);
     });
     child.on("close", (status, signal) => {
       const output = String(stdout || "").trim();
-      const emptyOutput = status === 0 && !output;
-      settle({
-        status: emptyOutput ? 1 : status ?? 1,
+      const emptyOutput = !timedOut && status === 0 && !output;
+      const logDiagnostic = emptyOutput ? readAgyLogDiagnostic(invocation.logFile) : "";
+      const timedOutStderr = signal
+        ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal} after timeout`
+        : `${stderr}${stderr ? "\n" : ""}Antigravity timeout.`;
+      const normalized = {
+        status: timedOut || emptyOutput ? 1 : status ?? 1,
         stdout: output,
-        stderr: emptyOutput ? emptyOutputError(invocation) : (signal ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal}` : stderr),
+        stderr: timedOut
+          ? timedOutStderr
+          : (emptyOutput ? outcomeStderr({ status, stdout: output, stderr, errorCode: "" }, { logDiagnostic }) : (signal ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal}` : stderr)),
         error: timedOut ? "ETIMEDOUT" : "",
         errorCode: timedOut ? "ETIMEDOUT" : (emptyOutput ? "EEMPTYOUTPUT" : ""),
         timedOut,
         provider: invocation.preflight
-      });
+      };
+      const outcome = emptyOutput
+        ? classifyAgyOutcome({ status, stdout: output, stderr, errorCode: "" }, { logDiagnostic })
+        : classifyAgyOutcome(normalized);
+      settle({ ...normalized, outcome });
       cleanupAgyLogFile(invocation.logFile);
     });
   });

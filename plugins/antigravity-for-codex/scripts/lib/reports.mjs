@@ -42,6 +42,8 @@ export function operationReport({ command, args = {}, result, startedAt, endedAt
     startedAt,
     endedAt,
     durationMs: Number.isFinite(startMs) && Number.isFinite(endMs) ? Math.max(0, endMs - startMs) : undefined,
+    outcome: result?.outcome?.kind || "",
+    retryable: Boolean(result?.outcome?.retryable),
     stdoutBytes: byteLength(result?.stdout),
     stderrBytes: byteLength(result?.stderr),
     errorCode: result?.errorCode ?? "",

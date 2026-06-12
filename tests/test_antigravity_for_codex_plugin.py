@@ -95,6 +95,7 @@ def test_antigravity_package_does_not_ship_copied_gemini_plugin_residue():
 def test_antigravity_package_only_ships_wired_runtime_files():
     expected_libs = {
         "agy-capabilities.mjs",
+        "agy-outcome.mjs",
         "antigravity-runtime.mjs",
         "github-actions.mjs",
         "jobs.mjs",
@@ -572,6 +573,42 @@ def test_runtime_requires_print_timeout_support(tmp_path):
     assert "--print-timeout" in payload["missing"]
 
 
+def test_runtime_preflight_error_result_includes_outcome(tmp_path):
+    help_without_print_timeout = FAKE_AGY_HELP.replace("  --print-timeout\n", "")
+    agy = fake_agy(tmp_path, help_text=help_without_print_timeout)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const result = r.antigravityPrint('preflight check', {}, process.env);"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == 2
+    assert payload["outcome"]["kind"] == "provider-error"
+    assert payload["outcome"]["ok"] is False
+
+
+def test_runtime_async_preflight_error_result_includes_outcome(tmp_path):
+    help_without_print_timeout = FAKE_AGY_HELP.replace("  --print-timeout\n", "")
+    agy = fake_agy(tmp_path, help_text=help_without_print_timeout)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const result = await r.antigravityPrintAsync('preflight check', {}, process.env);"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == 2
+    assert payload["outcome"]["kind"] == "provider-error"
+    assert payload["outcome"]["ok"] is False
+
+
 def test_runtime_async_timeout_kills_agy_that_ignores_sigterm(tmp_path):
     agy = fake_agy(tmp_path, ignore_sigterm=True, never_exit=True)
     env = os.environ.copy()
@@ -593,6 +630,36 @@ def test_runtime_async_timeout_kills_agy_that_ignores_sigterm(tmp_path):
     assert payload["elapsedMs"] < 1500
 
 
+def test_runtime_async_timeout_close_handler_keeps_timeout_outcome(tmp_path):
+    agy = tmp_path / "agy"
+    agy.write_text(
+        "#!/usr/bin/env node\n"
+        "const argv = process.argv.slice(2);\n"
+        "if (argv.join(' ') === '--help') { process.stdout.write(`Usage of agy:\\n  --log-file\\n  --model\\n  --print-timeout\\n  --prompt\\n`); process.exit(0); }\n"
+        "if (argv.join(' ') === 'models') { process.stdout.write('Gemini 3.1 Pro (High)\\nClaude Sonnet 4.6 (Thinking)\\n'); process.exit(0); }\n"
+        "process.on('SIGTERM', () => { process.exit(0); });\n"
+        "setInterval(() => {}, 1000);\n",
+        encoding="utf8",
+    )
+    agy.chmod(0o755)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const result = await r.antigravityPrintAsync('timeout check', "
+        "{timeout: 100, timeoutKillGraceMs: 1000, timeoutForceResolveGraceMs: 1000}, process.env);"
+        "process.stdout.write(JSON.stringify(result));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["timedOut"] is True
+    assert payload["errorCode"] == "ETIMEDOUT"
+    assert payload["outcome"]["kind"] == "timeout"
+    assert "timeout" in payload["stderr"].lower()
+    assert "empty-output" not in payload["stderr"]
+
+
 def test_runtime_log_diagnostic_collapses_duplicate_resource_errors():
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -604,6 +671,32 @@ def test_runtime_log_diagnostic_collapses_duplicate_resource_errors():
     assert result.returncode == 0, result.stderr
     assert result.stdout == "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 38h51m45s"
     assert result.stdout.count("RESOURCE_EXHAUSTED") == 1
+
+
+def test_agy_outcome_classifier_covers_quota_auth_invalid_stream_and_success():
+    source = """
+import { classifyAgyOutcome } from './plugins/antigravity-for-codex/scripts/lib/agy-outcome.mjs';
+const cases = [
+  [{ status: 0, stdout: 'ALLOW: ok', stderr: '', errorCode: '' }, '', 'success'],
+  [{ status: 0, stdout: 'ALLOW: ok', stderr: 'warning: quota something', errorCode: '' }, '', 'success'],
+  [{ status: 0, stdout: 'ALLOW: ok', stderr: 'warning: previous stream timed out but recovered', errorCode: '' }, '', 'success'],
+  [{ status: 0, stdout: 'ALLOW: ok', stderr: '', errorCode: 'ETIMEDOUT' }, '', 'timeout'],
+  [{ status: 0, stdout: '', stderr: '', errorCode: '' }, 'RESOURCE_EXHAUSTED (code 429): Individual quota reached.', 'quota'],
+  [{ status: 0, stdout: '', stderr: 'Invalid stream: malformed tool call', errorCode: '' }, '', 'malformed-output'],
+  [{ status: 0, stdout: '', stderr: 'Invalid stream: empty response', errorCode: '' }, '', 'invalid-stream'],
+  [{ status: 1, stdout: '', stderr: 'You are not logged into Antigravity', errorCode: '' }, '', 'auth'],
+  [{ status: 1, stdout: '', stderr: '', error: 'spawn ETIMEDOUT', errorCode: 'ETIMEDOUT' }, '', 'timeout']
+];
+for (const [result, logDiagnostic, kind] of cases) {
+  const classified = classifyAgyOutcome(result, { logDiagnostic });
+  if (classified.kind !== kind) {
+    throw new Error(`expected ${kind}, got ${classified.kind}: ${JSON.stringify(classified)}`);
+  }
+}
+console.log('ok');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
 
 
 def test_runtime_empty_output_surfaces_agy_log_diagnostic(tmp_path):
@@ -685,6 +778,12 @@ def test_structured_review_outputs_valid_json_and_report(tmp_path):
     report_payload = json.loads(report.stdout)
     assert report_payload["command"] == "review"
     assert report_payload["status"] == 0
+    assert report_payload["outcome"] == "success"
+    assert report_payload["retryable"] is False
+    assert report_payload["stdoutBytes"] > 0
+    assert report_payload["stderrBytes"] == 0
+    assert "stdout" not in report_payload
+    assert "stderr" not in report_payload
     assert "rawOutput" not in report_payload
 
     argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
@@ -694,6 +793,162 @@ def test_structured_review_outputs_valid_json_and_report(tmp_path):
     assert "approve" in prompt
     assert "Git context:" in prompt
     assert "Do not edit files" in prompt
+
+
+def test_failed_review_writes_latest_sanitized_report(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
+
+    success = subprocess.run([NODE, str(runtime), "review", "first"], cwd=repo, env=env, capture_output=True, text=True)
+    assert success.returncode == 0, success.stderr
+    first_report = subprocess.run([NODE, str(runtime), "report", "--latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert first_report.returncode == 0, first_report.stderr
+    assert json.loads(first_report.stdout)["outcome"] == "success"
+
+    time.sleep(0.02)
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "failure", response=""))
+    env["FAKE_AGY_LOG"] = (
+        "E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. "
+        "Resets in 38h51m45s.\n"
+    )
+    failed = subprocess.run([NODE, str(runtime), "review", "second"], cwd=repo, env=env, capture_output=True, text=True)
+    assert failed.returncode == 1
+    assert "RESOURCE_EXHAUSTED (code 429)" in failed.stderr
+
+    latest = subprocess.run([NODE, str(runtime), "report", "--latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert latest.returncode == 0, latest.stderr
+    report_payload = json.loads(latest.stdout)
+    assert report_payload["command"] == "review"
+    assert report_payload["status"] == 1
+    assert report_payload["outcome"] == "quota"
+    assert report_payload["retryable"] is True
+    assert report_payload["stdoutBytes"] == 0
+    assert report_payload["stderrBytes"] > 0
+    assert "stdout" not in report_payload
+    assert "stderr" not in report_payload
+    assert "rawOutput" not in report_payload
+
+
+def test_preflight_failed_review_writes_latest_sanitized_report(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
+
+    success = subprocess.run([NODE, str(runtime), "review", "first"], cwd=repo, env=env, capture_output=True, text=True)
+    assert success.returncode == 0, success.stderr
+    assert json.loads(subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    ).stdout)["outcome"] == "success"
+
+    time.sleep(0.02)
+    help_without_print_timeout = FAKE_AGY_HELP.replace("  --print-timeout\n", "")
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "preflight-failure", help_text=help_without_print_timeout))
+    failed = subprocess.run([NODE, str(runtime), "review", "second"], cwd=repo, env=env, capture_output=True, text=True)
+    assert failed.returncode == 2
+    assert "--print-timeout" in failed.stderr
+
+    latest = subprocess.run([NODE, str(runtime), "report", "--latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert latest.returncode == 0, latest.stderr
+    report_payload = json.loads(latest.stdout)
+    assert report_payload["command"] == "review"
+    assert report_payload["status"] == 2
+    assert report_payload["outcome"] == "provider-error"
+    assert report_payload["retryable"] is False
+    assert report_payload["stdoutBytes"] == 0
+    assert report_payload["stderrBytes"] > 0
+    assert "stdout" not in report_payload
+    assert "stderr" not in report_payload
+    assert "rawOutput" not in report_payload
+
+
+def test_parse_failed_review_writes_latest_sanitized_report(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
+
+    success = subprocess.run([NODE, str(runtime), "review", "first"], cwd=repo, env=env, capture_output=True, text=True)
+    assert success.returncode == 0, success.stderr
+    assert json.loads(subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    ).stdout)["outcome"] == "success"
+
+    time.sleep(0.02)
+    failed = subprocess.run([NODE, str(runtime), "review", "--model-provider", "bad", "second"], cwd=repo, env=env, capture_output=True, text=True)
+    assert failed.returncode == 2
+    assert "Invalid --model-provider" in failed.stderr
+
+    latest = subprocess.run([NODE, str(runtime), "report", "--latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert latest.returncode == 0, latest.stderr
+    report_payload = json.loads(latest.stdout)
+    assert report_payload["command"] == "review"
+    assert report_payload["status"] == 2
+    assert report_payload["outcome"] == "provider-error"
+    assert report_payload["retryable"] is False
+    assert report_payload["stdoutBytes"] == 0
+    assert report_payload["stderrBytes"] > 0
+    assert "stdout" not in report_payload
+    assert "stderr" not in report_payload
+    assert "rawOutput" not in report_payload
+
+
+def test_structured_failed_review_writes_latest_sanitized_report(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = os.environ.copy()
+    env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
+
+    success = subprocess.run([NODE, str(runtime), "review", "first"], cwd=repo, env=env, capture_output=True, text=True)
+    assert success.returncode == 0, success.stderr
+    assert json.loads(subprocess.run(
+        [NODE, str(runtime), "report", "--latest"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    ).stdout)["outcome"] == "success"
+
+    time.sleep(0.02)
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "structured-failure", response="not json"))
+    failed = subprocess.run([NODE, str(runtime), "review", "--structured", "second"], cwd=repo, env=env, capture_output=True, text=True)
+    assert failed.returncode == 1
+    assert "Structured review output invalid" in failed.stderr
+
+    latest = subprocess.run([NODE, str(runtime), "report", "--latest"], cwd=repo, env=env, capture_output=True, text=True)
+    assert latest.returncode == 0, latest.stderr
+    report_payload = json.loads(latest.stdout)
+    assert report_payload["command"] == "review"
+    assert report_payload["status"] == 1
+    assert report_payload["outcome"] == "malformed-output"
+    assert report_payload["retryable"] is True
+    assert report_payload["stdoutBytes"] > 0
+    assert report_payload["stderrBytes"] > 0
+    assert "stdout" not in report_payload
+    assert "stderr" not in report_payload
+    assert "rawOutput" not in report_payload
 
 
 def test_review_json_implies_structured_output(tmp_path):

@@ -15,6 +15,7 @@ import {
   normalizedModelProvider,
   selectedModel
 } from "./lib/antigravity-runtime.mjs";
+import { classifyAgyOutcome } from "./lib/agy-outcome.mjs";
 import {
   cancelJob,
   claimReservedJob,
@@ -549,6 +550,14 @@ function queueBackgroundJob(command, rawArgs) {
   writeJson({ status: "queued", jobId: job.id });
 }
 
+function writeReviewOperationReport(kind, args, result, startedAt, endedAt, parsed) {
+  try {
+    writeOperationReport(process.cwd(), operationReport({ command: kind, args, result, startedAt, endedAt, parsed }), process.env);
+  } catch {
+    // Report writes are best-effort and must not mask review output or failures.
+  }
+}
+
 function runSetupOrCapabilities(command, rawArgs) {
   const args = parseArgsOrExit(rawArgs);
   if (args.help) {
@@ -566,7 +575,17 @@ function runSetupOrCapabilities(command, rawArgs) {
 }
 
 function runReview(kind, rawArgs) {
-  const args = parseArgsOrExit(rawArgs);
+  const startedAt = new Date().toISOString();
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+  } catch (error) {
+    const stderr = error.message || String(error);
+    const result = { status: 2, stdout: "", stderr, error: "", errorCode: "" };
+    writeReviewOperationReport(kind, {}, { ...result, outcome: classifyAgyOutcome(result) }, startedAt, new Date().toISOString());
+    process.stderr.write(`${stderr}\n`);
+    process.exit(2);
+  }
   if (args.help) {
     process.stdout.write(usage(kind));
     return;
@@ -576,10 +595,13 @@ function runReview(kind, rawArgs) {
   }
   const preflight = antigravityPreflight(process.env, args);
   if (!preflight.ok) {
-    process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
+    const stderr = preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`;
+    const result = { status: 2, stdout: "", stderr, error: "", errorCode: "" };
+    const endedAt = new Date().toISOString();
+    writeReviewOperationReport(kind, args, { ...result, outcome: classifyAgyOutcome(result) }, startedAt, endedAt);
+    process.stderr.write(`${stderr}\n`);
     process.exit(2);
   }
-  const startedAt = new Date().toISOString();
   let prompt = templatePromptFor(kind, args, preflight);
   if (args.structured || args.json) {
     prompt = appendStructuredReviewInstructions(prompt);
@@ -587,6 +609,7 @@ function runReview(kind, rawArgs) {
   const result = antigravityPrint(prompt, { ...args, preflight }, process.env);
   const endedAt = new Date().toISOString();
   if (result.status !== 0) {
+    writeReviewOperationReport(kind, args, result, startedAt, endedAt);
     process.stderr.write(`${result.stderr || result.error || "Antigravity review failed."}\n`);
     process.exit(result.status);
   }
@@ -595,15 +618,20 @@ function runReview(kind, rawArgs) {
     try {
       parsed = validateStructuredReview(extractJsonObject(result.stdout));
     } catch (error) {
-      process.stderr.write(`Structured review output invalid: ${error.message || String(error)}\n`);
+      const stderr = `Structured review output invalid: ${error.message || String(error)}`;
+      const failedResult = {
+        ...result,
+        status: 1,
+        stderr,
+        errorCode: "ESTRUCTUREDOUTPUT",
+        outcome: { kind: "malformed-output", ok: false, retryable: true, message: stderr }
+      };
+      writeReviewOperationReport(kind, args, failedResult, startedAt, new Date().toISOString());
+      process.stderr.write(`${stderr}\n`);
       process.exit(1);
     }
   }
-  try {
-    writeOperationReport(process.cwd(), operationReport({ command: kind, args, result, startedAt, endedAt, parsed }), process.env);
-  } catch {
-    // Report writes are best-effort and must not mask successful CLI output.
-  }
+  writeReviewOperationReport(kind, args, result, startedAt, endedAt, parsed);
   if (args.json) {
     process.stdout.write(`${JSON.stringify(parsed)}\n`);
     return;
