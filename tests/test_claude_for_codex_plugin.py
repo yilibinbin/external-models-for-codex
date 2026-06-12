@@ -337,6 +337,21 @@ console.log(JSON.stringify(report));
     assert result.returncode == 0, result.stderr
 
 
+def test_quality_policy_explains_max_fallback_without_top_alias():
+    module_uri = (PLUGIN / "scripts" / "lib" / "quality-policy.mjs").as_uri()
+    code = f"""
+import {{ resolveQualityPolicy }} from {json.dumps(module_uri)};
+const policy = resolveQualityPolicy('review', {{ quality: 'max' }}, {{}}, {{}}, {{ modelAliases: {{ opus: false, fable: false, best: false }} }});
+if (policy.model !== 'opus') throw new Error('expected opus fallback, got ' + policy.model);
+if (!Array.isArray(policy.explanation)) throw new Error('missing explanation array');
+if (!policy.explanation.some((line) => line.includes('requested quality max'))) throw new Error('missing requested quality explanation');
+if (!policy.explanation.some((line) => line.includes('top aliases were not advertised'))) throw new Error('missing top alias fallback explanation');
+console.log(JSON.stringify(policy));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
 def test_job_lifecycle_helpers_classify_liveness_and_parse_limits(tmp_path):
     lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
     script = f"""
@@ -6575,6 +6590,21 @@ def test_capabilities_reports_quality_policy_metadata(tmp_path):
     assert "fallbackModelList" in policy
     assert policy["ultracodeEffortSupported"] is False
     assert policy["ultrareviewAutomatic"] is False
+
+
+def test_capabilities_reports_quality_policy_explanation_example(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "capabilities", "--json"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    review_max = payload["qualityPolicy"]["examples"]["reviewMax"]
+    assert isinstance(review_max["explanation"], list)
+    assert any("requested quality max" in line for line in review_max["explanation"])
 
 
 def test_setup_reports_hooks_and_mcp_diagnostics(tmp_path):

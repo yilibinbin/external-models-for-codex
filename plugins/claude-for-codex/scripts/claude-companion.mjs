@@ -114,7 +114,8 @@ import {
   applyQualityPolicy,
   assertValidQuality,
   assertSafeModelAliasOrId,
-  assertValidEffort
+  assertValidEffort,
+  resolveQualityPolicy
 } from "./lib/quality-policy.mjs";
 import {
   StateReadError,
@@ -466,6 +467,9 @@ function buildCapabilitiesReport({ probeNativeSubcommands = false } = {}) {
       efforts: VALID_EFFORTS,
       modelAliases: nativeCapabilities.modelAliases,
       fallbackModelList: nativeCapabilities.fallbackModelList,
+      examples: {
+        reviewMax: resolveQualityPolicy("review", { quality: "max" }, process.env, {}, nativeCapabilities)
+      },
       ultracodeEffortSupported: false,
       ultrareviewAutomatic: false
     },
