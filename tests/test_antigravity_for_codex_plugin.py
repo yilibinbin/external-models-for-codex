@@ -94,6 +94,7 @@ def test_antigravity_package_does_not_ship_copied_gemini_plugin_residue():
 
 def test_antigravity_package_only_ships_wired_runtime_files():
     expected_libs = {
+        "agy-capabilities.mjs",
         "antigravity-runtime.mjs",
         "github-actions.mjs",
         "jobs.mjs",
@@ -355,6 +356,90 @@ def process_is_running(pid):
     return result.returncode == 0 and str(pid) in result.stdout
 
 
+def test_agy_capabilities_parse_help_and_model_catalog():
+    source = """
+import {
+  parseAgyHelp,
+  parseAgyModels,
+  selectAgyModel,
+  validateAgyModelForProvider
+} from './plugins/antigravity-for-codex/scripts/lib/agy-capabilities.mjs';
+
+const help = `Usage of agy:
+  --add-dir
+  --log-file
+  --model
+  --print
+  --print-timeout
+  --prompt
+  --sandbox
+Available subcommands:
+  models
+  plugin
+`;
+const capabilities = parseAgyHelp(help);
+const models = parseAgyModels(`Gemini 3.1 Pro (High)
+Claude Sonnet 4.6 (Thinking)
+GPT-OSS 120B (Medium)
+`);
+if (!capabilities.prompt || !capabilities.printTimeout || !capabilities.logFile || !capabilities.modelsCommand) {
+  throw new Error('expected key agy capabilities');
+}
+if (models.gemini[0] !== 'Gemini 3.1 Pro (High)') throw new Error('gemini model missing');
+if (models.claude[0] !== 'Claude Sonnet 4.6 (Thinking)') throw new Error('claude model missing');
+if (models.unsupported[0] !== 'GPT-OSS 120B (Medium)') throw new Error('unsupported model missing');
+const mixedEnv = {
+  ANTIGRAVITY_FOR_CODEX_MODEL: 'Gemini 3.1 Pro (High)',
+  ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL: 'Claude Sonnet 4.6 (Thinking)'
+};
+const explicitProvider = selectAgyModel({ provider: 'claude', env: mixedEnv, models });
+if (explicitProvider.model !== 'Claude Sonnet 4.6 (Thinking)' || explicitProvider.source !== 'env-provider') {
+  throw new Error(`generic env should not block explicit Claude provider: ${JSON.stringify(explicitProvider)}`);
+}
+const catalogFallback = selectAgyModel({
+  provider: 'claude',
+  env: { ANTIGRAVITY_FOR_CODEX_MODEL: 'Gemini 3.1 Pro (High)' },
+  models
+});
+if (catalogFallback.model !== 'Claude Sonnet 4.6 (Thinking)' || catalogFallback.source !== 'catalog') {
+  throw new Error(`generic env mismatch should fall back to provider catalog: ${JSON.stringify(catalogFallback)}`);
+}
+const providerFallback = selectAgyModel({
+  provider: 'gemini',
+  env: {
+    ANTIGRAVITY_FOR_CODEX_MODEL: 'Claude Sonnet 4.6 (Thinking)',
+    ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL: 'Gemini 3.1 Pro (High)'
+  },
+  models
+});
+if (providerFallback.model !== 'Gemini 3.1 Pro (High)' || providerFallback.source !== 'env-provider') {
+  throw new Error(`valid other-provider generic env should fall back to Gemini provider env: ${JSON.stringify(providerFallback)}`);
+}
+if (selectAgyModel({ provider: 'gemini', models }).model !== 'Gemini 3.1 Pro (High)') throw new Error('gemini default wrong');
+if (selectAgyModel({ provider: 'claude', models }).model !== 'Claude Sonnet 4.6 (Thinking)') throw new Error('claude default wrong');
+for (const [provider, model, expected] of [
+  ['gemini', 'Anthropic', 'requires a Gemini model'],
+  ['claude', 'not-a-model', 'requires a Claude/Sonnet/Opus/Haiku model']
+]) {
+  try {
+    selectAgyModel({ provider, env: { ANTIGRAVITY_FOR_CODEX_MODEL: model }, models });
+    throw new Error(`${provider} accepted malformed generic env`);
+  } catch (error) {
+    if (!String(error.message).includes(expected)) throw error;
+  }
+}
+try {
+  validateAgyModelForProvider('GPT-OSS 120B (Medium)', 'gemini');
+  throw new Error('gpt model was accepted');
+} catch (error) {
+  if (!String(error.message).includes('does not support GPT/OpenAI')) throw error;
+}
+console.log(JSON.stringify({ ok: true, capabilities, models }));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
 def test_runtime_defaults_to_gemini_model(tmp_path):
     agy = fake_agy(tmp_path)
     env = os.environ.copy()
@@ -403,21 +488,39 @@ def test_runtime_allows_explicit_claude_provider(tmp_path):
     assert payload["model"] == "Claude Sonnet 4.6 (Thinking)"
 
 
-def test_runtime_rejects_bare_anthropic_as_claude_model(tmp_path):
+def test_runtime_claude_provider_ignores_cross_provider_generic_env(tmp_path):
     agy = fake_agy(tmp_path)
     env = os.environ.copy()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
-    env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "Anthropic"
+    env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "Gemini 3.1 Pro (High)"
+    env["ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL"] = "Claude Sonnet 4.6 (Thinking)"
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
         "process.stdout.write(JSON.stringify(r.antigravityPreflight(process.env)));"
     )
     result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["modelProvider"] == "claude"
+    assert payload["model"] == "Claude Sonnet 4.6 (Thinking)"
+
+
+def test_runtime_rejects_bare_anthropic_as_claude_model(tmp_path):
+    agy = fake_agy(tmp_path)
+    env = os.environ.copy()
+    env["AGY_CLI_PATH"] = str(agy)
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "process.stdout.write(JSON.stringify(r.antigravityPreflight(process.env, {model: 'Anthropic'})));"
+    )
+    result = run_node_eval(source, env)
     assert result.returncode == 0
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
-    assert "requires a Claude/Sonnet/Opus model" in payload["error"]
+    assert "requires a Claude/Sonnet/Opus/Haiku model" in payload["error"]
 
 
 def test_runtime_rejects_cross_provider_model(tmp_path):
@@ -425,10 +528,9 @@ def test_runtime_rejects_cross_provider_model(tmp_path):
     env = os.environ.copy()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "gemini"
-    env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "Claude Sonnet 4.6 (Thinking)"
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
-        "process.stdout.write(JSON.stringify(r.antigravityPreflight(process.env)));"
+        "process.stdout.write(JSON.stringify(r.antigravityPreflight(process.env, {model: 'Claude Sonnet 4.6 (Thinking)'})));"
     )
     result = run_node_eval(source, env)
     assert result.returncode == 0

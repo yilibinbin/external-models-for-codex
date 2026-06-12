@@ -2,6 +2,14 @@ import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  DEFAULT_CLAUDE_MODEL,
+  DEFAULT_GEMINI_MODEL,
+  normalizeAgyProvider,
+  parseAgyHelp,
+  selectAgyModel,
+  validateAgyModelForProvider
+} from "./agy-capabilities.mjs";
 
 export const AGY_CLI_PATH_ENV = "AGY_CLI_PATH";
 export const ANTIGRAVITY_CLI_PATH_ENV = "ANTIGRAVITY_CLI_PATH";
@@ -10,8 +18,7 @@ export const MODEL_ENV = "ANTIGRAVITY_FOR_CODEX_MODEL";
 export const GEMINI_MODEL_ENV = "ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL";
 export const CLAUDE_MODEL_ENV = "ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL";
 
-export const DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
-export const DEFAULT_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
+export { DEFAULT_CLAUDE_MODEL, DEFAULT_GEMINI_MODEL };
 export const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
 
 const MAX_BUFFER = 20 * 1024 * 1024;
@@ -145,77 +152,21 @@ export function runCommand(command, args, options = {}) {
 }
 
 export function normalizedModelProvider(value = process.env[MODEL_PROVIDER_ENV]) {
-  const provider = String(value || "gemini").trim().toLowerCase();
-  if (provider === "gemini" || provider === "claude") return provider;
-  throw new Error(`Invalid ${MODEL_PROVIDER_ENV} "${value}". Valid values: gemini, claude.`);
-}
-
-function assertSafeModelText(value) {
-  const model = String(value || "").trim();
-  if (!model) throw new Error("Missing Antigravity model.");
-  if (model.startsWith("-") || /[\r\n\0$`]/.test(model)) {
-    throw new Error("Invalid Antigravity model value.");
-  }
-  if (/\b(gpt|openai)\b/i.test(model)) {
-    throw new Error(`Antigravity for Codex does not support GPT/OpenAI models; rejected model "${model}".`);
-  }
-  return model;
+  return normalizeAgyProvider(value || "gemini");
 }
 
 export function validateModelForProvider(model, provider) {
-  const value = assertSafeModelText(model);
-  if (provider === "gemini") {
-    if (/\b(claude|sonnet|opus|anthropic)\b/i.test(value)) {
-      throw new Error(`Antigravity Gemini provider requires a Gemini model; rejected model "${value}".`);
-    }
-    if (!/^gemini(?:[\s._-]|$)/i.test(value)) {
-      throw new Error(`Antigravity Gemini provider requires a Gemini model label or id; rejected model "${value}".`);
-    }
-    return value;
-  }
-  if (provider === "claude") {
-    if (/\bgemini\b/i.test(value)) {
-      throw new Error(`Antigravity Claude provider requires a Claude model; rejected model "${value}".`);
-    }
-    if (!/\b(claude|sonnet|opus)\b/i.test(value)) {
-      throw new Error(`Antigravity Claude provider requires a Claude/Sonnet/Opus model; rejected model "${value}".`);
-    }
-    return value;
-  }
-  throw new Error(`Unsupported model provider "${provider}".`);
+  // Model safety policy, including GPT/OpenAI rejection via /\b(gpt|openai)\b/i, lives in agy-capabilities.mjs.
+  return validateAgyModelForProvider(model, provider);
 }
 
 export function selectedModel(env = process.env, options = {}) {
-  const provider = normalizedModelProvider(options.modelProvider || env[MODEL_PROVIDER_ENV]);
-  const explicit = options.model || env[MODEL_ENV];
-  if (explicit) {
-    return { modelProvider: provider, model: validateModelForProvider(explicit, provider) };
-  }
-  if (provider === "claude") {
-    return {
-      modelProvider: provider,
-      model: validateModelForProvider(env[CLAUDE_MODEL_ENV] || DEFAULT_CLAUDE_MODEL, provider)
-    };
-  }
-  return {
-    modelProvider: provider,
-    model: validateModelForProvider(env[GEMINI_MODEL_ENV] || DEFAULT_GEMINI_MODEL, provider)
-  };
-}
-
-function capabilitiesFromHelp(help) {
-  const text = String(help || "");
-  return {
-    prompt: text.includes("--prompt"),
-    model: text.includes("--model"),
-    print: text.includes("--print"),
-    printTimeout: text.includes("--print-timeout"),
-    sandbox: text.includes("--sandbox"),
-    addDir: text.includes("--add-dir"),
-    logFile: text.includes("--log-file"),
-    modelsCommand: /\bmodels\b/.test(text),
-    pluginCommand: /\bplugin\b/.test(text)
-  };
+  const selected = selectAgyModel({
+    provider: options.modelProvider || env[MODEL_PROVIDER_ENV],
+    explicitModel: options.model,
+    env
+  });
+  return { modelProvider: selected.modelProvider, model: selected.model };
 }
 
 function createAgyLogFile() {
@@ -312,7 +263,7 @@ export function antigravityPreflight(env = process.env, options = {}) {
   const command = agyCommand(env);
   const result = runCommand(command, ["--help"], { env });
   const help = result.stdout || result.stderr || "";
-  const capabilities = capabilitiesFromHelp(help);
+  const capabilities = parseAgyHelp(help);
   let selected = { modelProvider: "", model: "" };
   let modelError = "";
   try {
