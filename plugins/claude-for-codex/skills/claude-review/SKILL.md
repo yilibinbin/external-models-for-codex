@@ -81,6 +81,8 @@ Rules:
 - Preserve Claude's file paths, line numbers, uncertainty markers, and residual-risk notes.
 - Preserve evidence boundaries; if Claude marks a claim as inference or uncertainty, keep that distinction.
 - If Claude fails, returns malformed structured output, or reports setup/auth problems, report that failure instead of replacing it with Codex guesses.
+- For setup, PATH, hook, SDK, review-gate, or state-file health questions, run `node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" doctor --json`; it is a cheap no-prompt diagnostic.
+- Preserve compact outcome classification metadata from JSON reports when present, including refusal, fallback, timeout, and permission-compatibility categories.
 - If Claude reports no findings, still report any residual risks it listed.
 - Use `--background` for long reviews through the background routing contract above so Codex can continue working and retrieve results later with `claude-result`.
 - Tiny one-to-two file reviews can run foreground; broader or unclear reviews should use background.

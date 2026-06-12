@@ -46,6 +46,19 @@ function structuredSummary(parsed) {
   };
 }
 
+function outcomeSummary(outcome) {
+  if (!outcome || typeof outcome !== "object") {
+    return undefined;
+  }
+  return {
+    kind: typeof outcome.kind === "string" ? outcome.kind : "unknown",
+    ok: Boolean(outcome.ok),
+    servedByFallback: Boolean(outcome.servedByFallback),
+    refusalCategory: typeof outcome.refusalCategory === "string" ? outcome.refusalCategory : "",
+    stopReason: typeof outcome.stopReason === "string" ? outcome.stopReason : ""
+  };
+}
+
 export function reportFromResult({ command, args = {}, result, startedAt, endedAt, parsed, roleResults = [] }) {
   const startMs = Date.parse(startedAt);
   const endMs = Date.parse(endedAt);
@@ -68,6 +81,7 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
     stderrBytes: byteLength(result?.stderr),
     errorCode: result?.errorCode ?? "",
     errorPresent: Boolean(result?.error),
+    outcome: outcomeSummary(result?.metadata?.outcome),
     sdkMessageCount: typeof result?.metadata?.sdkMessageCount === "number" ? result.metadata.sdkMessageCount : undefined,
     sdkResultSubtype: typeof result?.metadata?.sdkResultSubtype === "string" ? result.metadata.sdkResultSubtype : undefined,
     sdkSessionIdHash: typeof result?.metadata?.sdkSessionIdHash === "string" ? result.metadata.sdkSessionIdHash : undefined,
@@ -113,6 +127,7 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
       stderrBytes: byteLength(roleResult?.stderr),
       errorPresent: Boolean(roleResult?.error),
       backend: roleResult?.backend === "sdk" ? "sdk" : "cli",
+      outcome: outcomeSummary(roleResult?.metadata?.outcome),
       structured: structuredSummary(roleParsed)
     })).filter((entry) => entry.role),
     workspaceId: workspaceId(process.cwd())

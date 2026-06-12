@@ -1,0 +1,71 @@
+name: Claude for Codex CI
+
+on:
+  pull_request:
+    paths:
+      - "plugins/claude-for-codex/**"
+      - "tests/test_claude_for_codex_plugin.py"
+      - "tests/test_claude_permission_compat.py"
+      - ".github/workflows/claude-for-codex-ci.yml"
+      - "README.md"
+      - "docs/README.en.md"
+      - "docs/README.zh-CN.md"
+  push:
+    branches:
+      - main
+    paths:
+      - "plugins/claude-for-codex/**"
+      - "tests/test_claude_for_codex_plugin.py"
+      - "tests/test_claude_permission_compat.py"
+      - ".github/workflows/claude-for-codex-ci.yml"
+      - "README.md"
+      - "docs/README.en.md"
+      - "docs/README.zh-CN.md"
+
+permissions:
+  contents: read
+
+jobs:
+  claude-for-codex:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: JavaScript syntax
+        run: |
+          node --check plugins/claude-for-codex/scripts/claude-companion.mjs
+          node --check plugins/claude-for-codex/scripts/lib/model-registry.mjs
+          node --check plugins/claude-for-codex/scripts/lib/outcome-classifier.mjs
+          node --check plugins/claude-for-codex/scripts/lib/quality-policy.mjs
+          node --check plugins/claude-for-codex/scripts/lib/claude-backend.mjs
+          node --check plugins/claude-for-codex/scripts/lib/claude-native-review.mjs
+          node --check plugins/claude-for-codex/scripts/lib/hook-compat.mjs
+          node --check plugins/claude-for-codex/scripts/lib/doctor.mjs
+          node --check plugins/claude-for-codex/scripts/lib/release-check.mjs
+          node --check plugins/claude-for-codex/hooks/claude-review-gate.mjs
+
+      - name: Release checks
+        run: node plugins/claude-for-codex/scripts/claude-companion.mjs release-check --ci-simulate --json
+
+      - name: Focused tests
+        run: |
+          pytest -q tests/test_claude_permission_compat.py
+          pytest -q tests/test_claude_for_codex_plugin.py -k "release_check or repository_has_fork_safe_claude_for_codex_ci_workflow or runtime_has_required_commands or outcome_classifier or model_registry_accepts_dynamic_aliases_without_dated_defaults or review_accepts_explicit_default_model_alias or invalid_top_model_env or sdk_native_agents_fall_back_to_inherit or doctor_json or hook_compat or setup_state_file_is_outside_repo"
+
+      - name: Whitespace
+        run: git diff --check

@@ -1,10 +1,18 @@
+import {
+  DEFAULT_TOP_MODEL_FALLBACK,
+  MODEL_ALIASES,
+  assertSafeModelAliasOrId,
+  resolveTopModelFromCapabilities
+} from "./model-registry.mjs";
+
 export const QUALITY_ENV = "CLAUDE_FOR_CODEX_QUALITY";
 export const TOP_MODEL_ENV = "CLAUDE_FOR_CODEX_TOP_MODEL";
 export const TOP_MODEL_FALLBACK_ENV = "CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK";
 
 export const VALID_QUALITIES = Object.freeze(["auto", "fast", "standard", "strong", "max"]);
 export const VALID_EFFORTS = Object.freeze(["low", "medium", "high", "xhigh", "max"]);
-export const VALID_MODEL_ALIASES = Object.freeze(["haiku", "sonnet", "opus", "fable", "best", "inherit"]);
+export const VALID_MODEL_ALIASES = MODEL_ALIASES;
+export { DEFAULT_TOP_MODEL_FALLBACK, assertSafeModelAliasOrId };
 
 const QUALITY_PROFILES = Object.freeze({
   fast: Object.freeze({ quality: "fast", model: "sonnet", effort: "low", topModel: false }),
@@ -12,8 +20,6 @@ const QUALITY_PROFILES = Object.freeze({
   strong: Object.freeze({ quality: "strong", model: "opus", effort: "xhigh", topModel: false }),
   max: Object.freeze({ quality: "max", model: "top", effort: "max", topModel: true })
 });
-
-export const DEFAULT_TOP_MODEL_FALLBACK = "opus,sonnet";
 
 const COMMAND_BASE_SCORE = Object.freeze({
   review: 2,
@@ -47,55 +53,8 @@ export function assertValidEffort(value) {
   return effort;
 }
 
-export function assertSafeModelAliasOrId(value) {
-  if (value === undefined || value === "") {
-    return "";
-  }
-  const model = String(value).trim();
-  if (!model || model.startsWith("-") || /[\r\n\0]/.test(model)) {
-    throw new Error("Invalid --model value.");
-  }
-  return model;
-}
-
-function safeModelAliasOrId(value) {
-  try {
-    return assertSafeModelAliasOrId(value);
-  } catch {
-    return "";
-  }
-}
-
-function booleanCapability(value) {
-  return value === true || normalized(value) === "true" || normalized(value) === "1";
-}
-
-function requestedTopModel(env = process.env) {
-  const configured = safeModelAliasOrId(env[TOP_MODEL_ENV]);
-  return configured ? configured.toLowerCase() : "";
-}
-
-function topModelFallback(env = process.env) {
-  return safeModelAliasOrId(env[TOP_MODEL_FALLBACK_ENV]) || DEFAULT_TOP_MODEL_FALLBACK;
-}
-
 export function resolveTopModel(capabilities = {}, env = process.env) {
-  const requested = requestedTopModel(env);
-  if (requested) {
-    return {
-      model: requested,
-      source: TOP_MODEL_ENV,
-      fallbackModel: requested === "opus" ? "" : topModelFallback(env)
-    };
-  }
-  const fallbackModel = topModelFallback(env);
-  if (booleanCapability(capabilities.best)) {
-    return { model: "best", source: "claude-capabilities", fallbackModel };
-  }
-  if (booleanCapability(capabilities.fable)) {
-    return { model: "fable", source: "claude-capabilities", fallbackModel };
-  }
-  return { model: "opus", source: "default", fallbackModel: "" };
+  return resolveTopModelFromCapabilities(capabilities, env);
 }
 
 function roleNames(args = {}) {

@@ -29,6 +29,27 @@ def process_is_running(pid):
     return not stat.startswith("Z")
 
 
+def run_cancel_with_lock_retry(runtime, job_id, *, cwd, env, attempts=20):
+    last = None
+    for _ in range(attempts):
+        last = subprocess.run(
+            [NODE, str(runtime), "cancel", job_id],
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        try:
+            payload = json.loads(last.stdout)
+        except json.JSONDecodeError:
+            return last
+        retryable_statuses = {payload.get("status"), payload.get("job", {}).get("status")}
+        if retryable_statuses.isdisjoint({"locked", "workspace_locked"}):
+            return last
+        time.sleep(0.1)
+    return last
+
+
 def companion_working_tree_fingerprint(repo):
     def git_part(args):
         result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True)
@@ -2263,10 +2284,18 @@ def test_cancel_orphaned_job_uses_validated_child_process_group(tmp_path):
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
     pid_file = tmp_path / "orphan.pid"
+    child_script = tmp_path / "orphan_child.py"
     repo.mkdir()
     data.mkdir()
+    child_script.write_text(
+        f"import os, pathlib, signal, time\n"
+        f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
+        f"signal.signal(signal.SIGTERM, lambda signum, frame: None)\n"
+        f"while True: time.sleep(1)\n",
+        encoding="utf8",
+    )
     child = subprocess.Popen(
-        ["python3", "-c", f"import os, pathlib, signal, time\npathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\nsignal.signal(signal.SIGTERM, lambda signum, frame: None)\nwhile True: time.sleep(1)\n"],
+        ["python3", str(child_script)],
         start_new_session=True,
     )
     try:
@@ -2281,13 +2310,17 @@ import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
 const cwd = {json.dumps(str(repo))};
 const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
 const job = createJob(cwd, {{ command: "review", args: ["orphan"], cwd }}, env);
+const childIdentity = captureProcessIdentity({child_pid});
+if (!childIdentity) throw new Error("child identity missing");
+childIdentity.command = "<redacted-path>orphan_child.py";
+delete childIdentity.commandHash;
 updateJob(cwd, job.id, {{
   status: "running",
   phase: "orphaned",
   workerPid: 999999,
   childPid: {child_pid},
   childProcessGroupPid: {child_pid},
-  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  childProcessGroupIdentity: childIdentity,
   startedAt: new Date().toISOString(),
   lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
 }}, env);
@@ -2319,30 +2352,29 @@ def test_cancel_preserves_terminal_result_written_during_signal(tmp_path):
     repo = tmp_path / "repo"
     data = tmp_path / "plugin-data"
     pid_file = tmp_path / "race.pid"
+    child_script = tmp_path / "cancel_race_child.py"
     repo.mkdir()
     data.mkdir()
+    child_script.write_text(
+        "import json, os, pathlib, signal, sys, time\n"
+        f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
+        "job_file = pathlib.Path(os.environ['JOB_FILE'])\n"
+        "def handler(signum, frame):\n"
+        "    job = json.loads(job_file.read_text())\n"
+        "    job.update({'status': 'succeeded', 'phase': 'succeeded', 'finishedAt': '2026-06-09T00:01:00.000Z', 'exitStatus': 0})\n"
+        "    job_file.write_text(json.dumps(job))\n"
+        "    sys.exit(0)\n"
+        "signal.signal(signal.SIGTERM, handler)\n"
+        "while True: time.sleep(1)\n",
+        encoding="utf8",
+    )
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
     listed = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True, check=True)
     jobs_dir = pathlib.Path(json.loads(listed.stdout)["stateDir"]) / "jobs"
     job_file = jobs_dir / "cancel-race.json"
     child = subprocess.Popen(
-        [
-            "python3",
-            "-c",
-            (
-                "import json, os, pathlib, signal, sys, time\n"
-                f"pathlib.Path({json.dumps(str(pid_file))}).write_text(str(os.getpid()))\n"
-                "job_file = pathlib.Path(os.environ['JOB_FILE'])\n"
-                "def handler(signum, frame):\n"
-                "    job = json.loads(job_file.read_text())\n"
-                "    job.update({'status': 'succeeded', 'phase': 'succeeded', 'finishedAt': '2026-06-09T00:01:00.000Z', 'exitStatus': 0})\n"
-                "    job_file.write_text(json.dumps(job))\n"
-                "    sys.exit(0)\n"
-                "signal.signal(signal.SIGTERM, handler)\n"
-                "while True: time.sleep(1)\n"
-            ),
-        ],
+        ["python3", str(child_script)],
         env={**os.environ, "JOB_FILE": str(job_file)},
         start_new_session=True,
     )
@@ -2357,13 +2389,17 @@ import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
 import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
 const cwd = {json.dumps(str(repo))};
 const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const childIdentity = captureProcessIdentity({child_pid});
+if (!childIdentity) throw new Error("child identity missing");
+childIdentity.command = "<redacted-path>cancel_race_child.py";
+delete childIdentity.commandHash;
 createJob(cwd, {{ id: "cancel-race", command: "review", args: ["race"], cwd }}, env);
 updateJob(cwd, "cancel-race", {{
   status: "running",
   phase: "running",
   childPid: {child_pid},
   childProcessGroupPid: {child_pid},
-  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  childProcessGroupIdentity: childIdentity,
   startedAt: "2026-06-09T00:00:00.000Z",
   lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
 }}, env);
@@ -2872,7 +2908,7 @@ def test_release_check_knows_long_running_lifecycle_guards():
         "child-process-identity-required",
         "unvalidated-child-no-negative-pgid",
         "process-identity-no-prefix-match",
-        "cancel-child-and-worker",
+        "cancel-child-worker-deferred",
         "cancel-queued-lock-reread",
         "cancel-queued-worker-terminated",
         "cancel-requires-delivered-signal",
@@ -4166,7 +4202,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.17.0"
+    assert data["version"] == "0.18.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -4181,12 +4217,12 @@ def test_plugin_manifest_is_valid():
 
 def test_claude_manifest_version_is_0160():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.17.0"
+    assert manifest["version"] == "0.18.0"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.17.0"
+    assert manifest["version"] == "0.18.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -4222,6 +4258,11 @@ def test_version_and_docs_describe_forwarding_and_mcp():
         assert "--stream-progress" in text
         assert "--confirm-cost" in text
         assert "ultrareview" in text
+        assert "model alias registry" in text
+        assert "outcome classification" in text
+        assert "doctor --json" in text
+        assert "fork-safe CI dogfood" in text
+        assert "fresh isolated context" in text
 
     assert "转发" in zh
     assert "MCP" in zh
@@ -4252,7 +4293,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job", "subagent-command"]:
+    for command in ["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "reserve-job", "run-reserved-job", "subagent-command"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -5601,6 +5642,16 @@ def test_review_quality_max_preserves_user_fallback_model(tmp_path):
     assert argv.count("--fallback-model") == 1
 
 
+def test_review_accepts_explicit_default_model_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--model", "default", "--scope", "working-tree"],
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "default"
+
+
 def test_quality_max_preserves_user_fallback_model(tmp_path):
     result, _prompts, argvs = run_fake_claude_multi_review(
         tmp_path,
@@ -5649,6 +5700,18 @@ def test_quality_max_uses_custom_comma_native_fallback_when_configured(tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert argv[argv.index("--fallback-model") + 1] == "sonnet,opus"
+
+
+def test_quality_max_invalid_top_model_env_falls_back_to_detected_alias(tmp_path):
+    result, _prompt, argv = run_fake_claude_review(
+        tmp_path,
+        ["--quality", "max", "--scope", "working-tree"],
+        extra_env={"CLAUDE_FOR_CODEX_TOP_MODEL": "-inject"},
+        extra_help="--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert argv[argv.index("--model") + 1] == "fable"
 
 
 def test_quality_max_uses_single_native_fallback_when_help_lacks_comma_support(tmp_path):
@@ -5706,6 +5769,153 @@ console.log(JSON.stringify(policy));
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def test_model_registry_accepts_dynamic_aliases_without_dated_defaults():
+    module_uri = (PLUGIN / "scripts" / "lib" / "model-registry.mjs").as_uri()
+    code = f"""
+import {{
+  normalizeModelSelection,
+  resolveTopModelFromCapabilities,
+  MODEL_ALIAS_REGISTRY
+}} from {json.dumps(module_uri)};
+
+const aliases = ['default', 'best', 'fable', 'opus', 'sonnet', 'haiku', 'opusplan', 'opus[1m]', 'sonnet[1m]', 'inherit'];
+for (const alias of aliases) {{
+  const resolved = normalizeModelSelection(alias);
+  if (!resolved.valid) throw new Error(alias + ' rejected');
+}}
+const top = resolveTopModelFromCapabilities({{ modelAliases: {{ best: true, fable: true, opus: true }} }}, {{}});
+if (top.model !== 'best') throw new Error('expected best top model, got ' + top.model);
+const invalidEnvFallback = resolveTopModelFromCapabilities({{ modelAliases: {{ fable: true, opus: true }} }}, {{ CLAUDE_FOR_CODEX_TOP_MODEL: '-inject' }});
+if (invalidEnvFallback.model !== 'fable') throw new Error('invalid TOP_MODEL should fall back, got ' + invalidEnvFallback.model);
+const defaultEnv = resolveTopModelFromCapabilities({{ modelAliases: {{ fable: true, opus: true }} }}, {{ CLAUDE_FOR_CODEX_TOP_MODEL: 'default' }});
+if (defaultEnv.model !== 'default' || defaultEnv.fallbackModel !== '') throw new Error('default TOP_MODEL not preserved: ' + JSON.stringify(defaultEnv));
+if (MODEL_ALIAS_REGISTRY.some((entry) => /claude-(opus|sonnet|haiku|fable)-\\d/.test(entry.alias))) {{
+  throw new Error('registry contains dated model alias');
+}}
+console.log(JSON.stringify({{ ok: true, top, invalidEnvFallback, defaultEnv }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["top"]["model"] == "best"
+
+
+def test_quality_policy_accepts_one_million_context_alias_and_opusplan_override():
+    module_uri = (PLUGIN / "scripts" / "lib" / "quality-policy.mjs").as_uri()
+    code = f"""
+import {{ resolveQualityPolicy }} from {json.dumps(module_uri)};
+const oneMillion = resolveQualityPolicy('review', {{ model: 'opus[1m]' }}, {{}}, {{}}, {{}});
+const opusPlan = resolveQualityPolicy('plan', {{ model: 'opusplan', effort: 'max' }}, {{}}, {{}}, {{}});
+if (oneMillion.model !== 'opus[1m]') throw new Error('opus[1m] override lost');
+if (opusPlan.model !== 'opusplan' || opusPlan.effort !== 'max') throw new Error('opusplan/max override lost');
+console.log(JSON.stringify({{ oneMillion, opusPlan }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_outcome_classifier_detects_refusal_and_fallback_served():
+    module_uri = (PLUGIN / "scripts" / "lib" / "outcome-classifier.mjs").as_uri()
+    code = f"""
+import {{ classifyClaudeOutcome }} from {json.dumps(module_uri)};
+const refusal = classifyClaudeOutcome({{
+  status: 0,
+  metadata: {{ sdkEvents: [{{ type: 'result', stop_reason: 'refusal', stop_details: {{ category: 'cyber' }} }}] }}
+}});
+const served = classifyClaudeOutcome({{
+  status: 0,
+  metadata: {{ sdkEvents: [{{ type: 'result', stop_reason: 'end_turn', usage: {{ iterations: [{{ type: 'message' }}, {{ type: 'fallback_message' }}] }} }}] }}
+}});
+const timeout = classifyClaudeOutcome({{ status: 1, stderr: 'Error: ETIMEDOUT' }});
+const unknownDeny = classifyClaudeOutcome({{ status: 1, stderr: 'Permission deny rule "MultiEdit" matches no known tool.' }});
+const successfulReviewText = classifyClaudeOutcome({{
+  status: 0,
+  stdout: 'Reviewed retry timeout handling, API key redaction, and 429 rate limit docs with no findings.'
+}});
+if (refusal.kind !== 'refusal' || refusal.refusalCategory !== 'cyber' || refusal.ok !== false) throw new Error(JSON.stringify(refusal));
+if (served.kind !== 'success' || served.servedByFallback !== true || served.stopReason !== 'end_turn') throw new Error(JSON.stringify(served));
+if (timeout.kind !== 'timeout') throw new Error(JSON.stringify(timeout));
+if (unknownDeny.kind !== 'unknown_deny_tool') throw new Error(JSON.stringify(unknownDeny));
+if (successfulReviewText.kind !== 'success' || successfulReviewText.ok !== true) throw new Error(JSON.stringify(successfulReviewText));
+console.log(JSON.stringify({{ refusal, served, timeout, unknownDeny, successfulReviewText }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_sdk_backend_metadata_compacts_events_for_classification_without_raw_text(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    sdk_module, _capture = write_fake_claude_sdk(
+        tmp_path,
+        extra_js="""
+  yield {
+    type: 'result',
+    subtype: 'success',
+    result: 'RAW_REFUSAL_TEXT_SHOULD_NOT_BE_IN_METADATA',
+    text: 'RAW_TEXT_SHOULD_NOT_BE_IN_METADATA',
+    stop_reason: 'refusal',
+    stop_details: { category: 'cyber', raw_prompt: 'SECRET_PROMPT_SHOULD_NOT_BE_IN_METADATA' },
+    usage: { input_tokens: 9, output_tokens: 1, iterations: [{ type: 'message', model: 'fable' }, { type: 'fallback_message', model: 'opus' }] }
+  };
+  return;
+""",
+    )
+    backend_uri = (PLUGIN / "scripts" / "lib" / "claude-backend.mjs").as_uri()
+    classifier_uri = (PLUGIN / "scripts" / "lib" / "outcome-classifier.mjs").as_uri()
+    code = f"""
+import {{ runSdkPrompt }} from {json.dumps(backend_uri)};
+import {{ classifyClaudeOutcome }} from {json.dumps(classifier_uri)};
+const result = await runSdkPrompt('prompt containing SECRET_PROMPT_SHOULD_NOT_BE_IN_METADATA', {{}}, {{ cwd: {json.dumps(str(repo))} }});
+result.metadata.outcome = classifyClaudeOutcome(result);
+console.log(JSON.stringify(result.metadata));
+"""
+    env = os.environ.copy()
+    env["CLAUDE_FOR_CODEX_SDK_MODULE"] = str(sdk_module)
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    metadata = json.loads(result.stdout)
+    assert metadata["sdkEvents"][0]["stop_reason"] == "refusal"
+    assert metadata["sdkEvents"][0]["stop_details"] == {"category": "cyber"}
+    assert metadata["sdkEvents"][0]["usage"]["iterations"][1]["type"] == "fallback_message"
+    assert metadata["outcome"]["kind"] == "refusal"
+    assert metadata["outcome"]["servedByFallback"] is True
+    serialized = json.dumps(metadata)
+    assert "RAW_REFUSAL_TEXT_SHOULD_NOT_BE_IN_METADATA" not in serialized
+    assert "SECRET_PROMPT_SHOULD_NOT_BE_IN_METADATA" not in serialized
+
+
+def test_cli_fallback_model_is_added_per_request_not_global_state(tmp_path):
+    claude = tmp_path / "claude"
+    claude.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "if sys.argv[1:] == ['--version']:\n"
+        "    print('claude fake')\n"
+        "    raise SystemExit(0)\n"
+        "if sys.argv[1:] == ['--help']:\n"
+        "    print('--model <model> alias fable opus sonnet --fallback-model <model> accepts a comma-separated list --effort <level>')\n"
+        "    raise SystemExit(0)\n"
+        "print(json.dumps({'argv': sys.argv[1:]}))\n",
+        encoding="utf8",
+    )
+    claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(claude)
+    env["CLAUDE_FOR_CODEX_TOP_MODEL"] = "fable"
+    env["CLAUDE_FOR_CODEX_TOP_MODEL_FALLBACK"] = "opus,sonnet"
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "claude-companion.mjs"), "review", "--quality", "max"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(result.stdout)["argv"]
+    assert "--model" in argv and argv[argv.index("--model") + 1] == "fable"
+    assert "--fallback-model" in argv and argv[argv.index("--fallback-model") + 1] == "opus,sonnet"
 
 
 def test_quality_policy_max_prefers_fable_when_supported():
@@ -6124,6 +6334,8 @@ def test_setup_state_file_is_outside_repo_and_corruption_is_reported(tmp_path):
 
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
+    env["HOME"] = str(tmp_path / "home")
+    env["PATH"] = str(tmp_path / "bin")
 
     enabled = subprocess.run(
         [NODE, str(runtime), "setup", "--enable-review-gate"],
@@ -6133,6 +6345,9 @@ def test_setup_state_file_is_outside_repo_and_corruption_is_reported(tmp_path):
         text=True,
     )
     assert enabled.returncode == 0, enabled.stderr
+    payload = json.loads(enabled.stdout)
+    assert payload["claudeAvailable"] is False
+    assert payload["gitAvailable"] is False
     state_file = pathlib.Path(json.loads(enabled.stdout)["reviewGate"]["stateFile"])
     assert data in state_file.parents
     assert repo not in state_file.parents
@@ -6182,6 +6397,61 @@ def test_setup_reports_lifecycle_hook_support_and_job_commands(tmp_path):
     assert "semanticProviders" in payload["capabilities"]
     assert payload["hooks"]["manifest"] == "hooks/hooks.json"
     assert payload["hooks"]["events"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+    assert payload["hooks"]["compatibility"]["codexSubset"] is True
+    assert "PreToolUse" in payload["hooks"]["compatibility"]["knownClaudeEvents"]
+
+
+def test_hook_compat_reports_codex_subset_without_mutating_hooks_json():
+    module_uri = (PLUGIN / "scripts" / "lib" / "hook-compat.mjs").as_uri()
+    code = f"""
+import {{ hookCompatibilityReport }} from {json.dumps(module_uri)};
+const report = hookCompatibilityReport({{
+  installedEvents: ['SessionStart', 'SessionEnd', 'UserPromptSubmit', 'Stop']
+}});
+if (!report.supportedEvents.includes('Stop')) throw new Error('Stop missing');
+if (!report.knownClaudeEvents.includes('PreToolUse')) throw new Error('Claude known event missing');
+if (report.unsupportedInstalledEvents.length) throw new Error('unexpected unsupported installed event');
+if (!report.codexSubset) throw new Error('codexSubset should be true');
+if (report.decisionShapes.Stop.shape !== 'top-level-decision') throw new Error('Stop shape mismatch');
+if (report.decisionShapes.PreToolUse.shape !== 'hook-specific-permission') throw new Error('PreToolUse shape mismatch');
+console.log(JSON.stringify(report));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_doctor_json_is_cheap_and_reports_core_surfaces(tmp_path):
+    claude = tmp_path / "claude"
+    claude.write_text(
+        "#!/usr/bin/env bash\n"
+        "if [[ \"$1\" == \"--version\" ]]; then echo '2.1.173 (Claude Code)'; exit 0; fi\n"
+        "if [[ \"$1\" == \"--help\" ]]; then echo '--model sonnet opus fable best opusplan opus[1m] sonnet[1m] --fallback-model comma-separated --effort low medium high xhigh max'; exit 0; fi\n"
+        "echo 'doctor should not run a prompt' >&2\n"
+        "exit 42\n",
+        encoding="utf8",
+    )
+    claude.chmod(0o755)
+    env = os.environ.copy()
+    env["CLAUDE_CODE_PATH"] = str(claude)
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "claude-companion.mjs"), "doctor", "--json"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["checks"]["claude"]["available"] is True
+    assert payload["checks"]["modelAliases"]["opusplan"] is True
+    assert payload["checks"]["modelAliases"]["opus1m"] is True
+    assert payload["checks"]["modelAliases"]["sonnet1m"] is True
+    assert payload["checks"]["fallbackModel"]["supported"] is True
+    assert payload["checks"]["hooks"]["codexSubset"] is True
+    assert payload["checks"]["hookFiles"]["hooksJson"] is True
+    assert "semanticProviders" in payload["checks"]
+    assert "doctor should not run a prompt" not in result.stderr
 
 
 def test_capabilities_reports_quality_policy_metadata(tmp_path):
@@ -6486,7 +6756,7 @@ def test_capabilities_reports_native_claude_cli_surfaces(tmp_path):
         "    print('2.1.162 (Claude Code)')\n"
         "    raise SystemExit(0)\n"
         "if sys.argv[1:] == ['--help']:\n"
-        "    print('--agent <agent> --agents <json> --json-schema <schema> --include-partial-messages --fallback-model <model> --max-budget-usd <amount> --resume --continue --session-id --fork-session --output-format')\n"
+        "    print('--agent <agent> --agents <json> --json-schema <schema> --include-partial-messages --fallback-model <model> accepts a comma-separated list --max-budget-usd <amount> --resume --continue --session-id --fork-session --output-format --model alias best fable opus sonnet haiku opusplan opus[1m] sonnet[1m]')\n"
         "    raise SystemExit(0)\n"
         "if sys.argv[1:] == ['agents', '--help']:\n"
         "    print('Usage: claude agents [options] --json --cwd <path>')\n"
@@ -6518,6 +6788,16 @@ def test_capabilities_reports_native_claude_cli_surfaces(tmp_path):
     assert payload["claude"]["streaming"]["includePartialMessages"] is True
     assert payload["claude"]["ultrareview"]["available"] is True
     assert payload["claude"]["sessions"]["resume"] is True
+    assert payload["claude"]["modelAliases"]["best"] is True
+    assert payload["claude"]["modelAliases"]["fable"] is True
+    assert payload["claude"]["modelAliases"]["opus"] is True
+    assert payload["claude"]["modelAliases"]["sonnet"] is True
+    assert payload["claude"]["modelAliases"]["haiku"] is True
+    assert payload["claude"]["modelAliases"]["opusplan"] is True
+    assert payload["claude"]["modelAliases"]["opus1m"] is True
+    assert payload["claude"]["modelAliases"]["sonnet1m"] is True
+    assert payload["claude"]["fallbackModel"] is True
+    assert payload["claude"]["fallbackModelList"] is True
 
 
 def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
@@ -6557,8 +6837,31 @@ def test_sdk_backend_review_uses_fake_sdk_and_read_only_options(tmp_path):
     assert query["options"]["env"].get("CLAUDE_CONFIG_DIR") == os.environ.get("CLAUDE_CONFIG_DIR")
     assert set(["Read", "Grep", "Glob"]).issubset(set(query["allowedTools"]))
     assert set(["Edit", "Write", "MultiEdit", "Bash"]).issubset(set(query["disallowedTools"]))
+    assert "Agent" not in query["allowedTools"]
+    assert "Agent" not in query["options"]["allowedTools"]
+    assert "agents" not in query
     assert "mcp__claude-for-codex-git__git_status" in query["allowedTools"]
     assert "claude-for-codex-git" in query["mcpServers"]
+
+
+def test_sdk_subagent_definitions_follow_official_read_only_contract():
+    module_uri = (PLUGIN / "scripts" / "lib" / "claude-native-review.mjs").as_uri()
+    code = f"""
+import {{ buildNativeReviewAgents }} from {json.dumps(module_uri)};
+const agents = buildNativeReviewAgents(['security'], {{ model: 'opus[1m]', effort: 'max', structuredJson: true }});
+const agent = agents.cfc_security;
+if (!agent) throw new Error('missing cfc_security');
+if (agent.model !== 'opus[1m]') throw new Error('model alias not preserved: ' + agent.model);
+if (agent.effort !== 'max') throw new Error('effort not preserved');
+if (!agent.tools.every((tool) => ['Read', 'Grep', 'Glob'].includes(tool))) throw new Error('non read-only tool allowed');
+if (!agent.disallowedTools.includes('Agent')) throw new Error('subagent can spawn subagents');
+if ('hooks' in agent || 'mcpServers' in agent || 'permissionMode' in agent) throw new Error('plugin-unsupported subagent fields leaked');
+if (!agent.prompt.includes('fresh isolated context')) throw new Error('prompt does not state official context boundary');
+if (!agent.prompt.includes('Do not invoke Agent')) throw new Error('prompt does not deny nested Agent use');
+console.log(JSON.stringify(agent));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_sdk_backend_receives_quality_resolved_model_and_effort(tmp_path):
@@ -6648,9 +6951,13 @@ def test_sdk_subagent_review_passes_read_only_agent_definitions(tmp_path):
     for definition in agents.values():
         assert definition["tools"] == ["Read", "Grep", "Glob"]
         assert "permissionMode" not in definition
+        assert "hooks" not in definition
+        assert "mcpServers" not in definition
         assert definition["maxTurns"] == 4
         assert definition["model"] == "opus"
         assert definition["effort"] == query["effort"]
+        assert "fresh isolated context" in definition["prompt"]
+        assert "Do not invoke Agent" in definition["prompt"]
         assert set(["Edit", "Write", "MultiEdit", "Bash", "Agent"]).issubset(
             set(definition["disallowedTools"])
         )
@@ -6808,6 +7115,22 @@ def test_sdk_subagents_receive_fable_for_max_quality(tmp_path):
     assert query["agents"]["cfc_correctness"]["effort"] == "max"
     assert query["agents"]["cfc_security"]["effort"] == "max"
     assert "--fallback-model" not in json.dumps(query)
+
+
+def test_sdk_native_agents_fall_back_to_inherit_for_custom_and_default_models():
+    module_uri = (PLUGIN / "scripts" / "lib" / "claude-native-review.mjs").as_uri()
+    code = f"""
+import {{ buildNativeReviewAgents }} from {json.dumps(module_uri)};
+const custom = buildNativeReviewAgents(['correctness'], {{ model: 'gpt-4' }});
+const defaultModel = buildNativeReviewAgents(['correctness'], {{ model: 'default' }});
+const modelId = buildNativeReviewAgents(['correctness'], {{ model: 'claude-opus-latest' }});
+if (custom.cfc_correctness.model !== 'inherit') throw new Error('custom should inherit: ' + custom.cfc_correctness.model);
+if (defaultModel.cfc_correctness.model !== 'inherit') throw new Error('default should inherit: ' + defaultModel.cfc_correctness.model);
+if (modelId.cfc_correctness.model !== 'claude-opus-latest') throw new Error('model id should be preserved: ' + modelId.cfc_correctness.model);
+console.log(JSON.stringify({{ custom, defaultModel, modelId }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
 
 
 def test_sdk_subagents_quality_max_does_not_inherit_cli_top_alias_without_env(tmp_path):
@@ -7751,9 +8074,12 @@ def test_sdk_backend_structured_review_and_report_metadata(tmp_path):
     assert report["backend"] == "sdk"
     assert report["sdkMessageCount"] == 1
     assert report["sdkSessionIdHash"]
+    assert report["outcome"]["kind"] == "success"
+    assert report["outcome"]["ok"] is True
     serialized = json.dumps(report)
     assert "sdk-session-secret" not in serialized
     assert "SDK_REVIEW_OK" not in serialized
+    assert "sdkEvents" not in serialized
 
 
 def test_sdk_backend_review_gate_allows_and_uses_sdk(tmp_path):
@@ -8042,6 +8368,28 @@ def test_release_check_passes_with_remote_install_skipped():
     assert checks["remote-install-smoke"]["detail"] == "skipped"
 
 
+def test_repository_has_fork_safe_claude_for_codex_ci_workflow():
+    workflow = ROOT / ".github" / "workflows" / "claude-for-codex-ci.yml"
+    assert workflow.exists()
+    text = workflow.read_text(encoding="utf8")
+    assert "pull_request_target" not in text
+    assert "pull_request:" in text
+    assert "push:" in text
+    assert "permissions:" in text
+    assert "contents: read" in text
+    assert "node --check plugins/claude-for-codex/scripts/claude-companion.mjs" in text
+    assert "node --check plugins/claude-for-codex/scripts/lib/hook-compat.mjs" in text
+    assert "node --check plugins/claude-for-codex/scripts/lib/doctor.mjs" in text
+    assert "pytest -q tests/test_claude_permission_compat.py" in text
+    assert 'pytest -q tests/test_claude_for_codex_plugin.py -k "' in text
+    assert "outcome_classifier" in text
+    assert "doctor_json" in text
+    assert "hook_compat" in text
+    assert "pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py" not in text
+    assert "release-check --ci-simulate --json" in text
+    assert "git diff --check" in text
+
+
 def test_release_check_knows_claude_0160_native_assets():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     result = subprocess.run(
@@ -8055,7 +8403,7 @@ def test_release_check_knows_claude_0160_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.17.0"
+    assert checks["manifest-version"]["detail"] == "version=0.18.0"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -8068,11 +8416,16 @@ def test_release_check_knows_claude_0160_native_assets():
     assert checks["manifest-asset-logo"]["ok"] is True
     assert checks["manifest-asset-screenshots.0"]["ok"] is True
     assert checks["manifest-asset-screenshots.1"]["ok"] is True
+    assert checks["hook-compat-report"]["ok"] is True
+    assert checks["doctor-command"]["ok"] is True
     assert checks["native-review-helper"]["ok"] is True
     assert checks["ultrareview-skill"]["ok"] is True
     assert checks["native-cli-flags"]["ok"] is True
     assert checks["native-sdk-package-compat"]["ok"] is True
     assert checks["native-docs"]["ok"] is True
+    assert checks["native-maturity-docs"]["ok"] is True
+    assert checks["outcome-success-stdout-not-failure"]["ok"] is True
+    assert checks["model-registry-default-and-env-fallback"]["ok"] is True
     assert checks["native-sdk-explicit-opt-in"]["ok"] is True
     assert checks["native-sdk-explicit-opt-in"]["detail"] == "--backend sdk --agent-team sdk-subagents"
     assert checks["native-default-cli-preserved"]["ok"] is True
@@ -8255,7 +8608,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.17.0"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.18.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -8264,11 +8617,11 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.17.0"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.18.0"] in calls
     assert ["plugin", "list", "--json"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.17.0"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.18.0"
     assert checks["remote-install-plugin-list-schema"]["ok"] is True
     assert checks["remote-install-plugin-list-schema"]["detail"] == f"installed root={installed_plugin}"
 
@@ -8312,7 +8665,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.17.0"],
+        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.18.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -8348,7 +8701,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.17.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "codex plugin list --json" in text
     assert "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" in text
@@ -8593,7 +8946,7 @@ def test_github_actions_rejects_invalid_model_before_render(tmp_path, model):
     )
 
     assert result.returncode == 2
-    assert "Invalid --model value." in result.stderr
+    assert "Invalid --model value" in result.stderr
 
 
 def test_github_actions_init_write_and_force(tmp_path):
@@ -8619,7 +8972,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.17.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.18.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -8707,7 +9060,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.17.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.18.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -8807,10 +9160,17 @@ def test_release_check_ci_simulate_passes():
     assert checks["github-actions-model-env-forwarded"]["ok"] is True
     assert checks["github-actions-effort-env-forwarded"]["ok"] is True
     assert checks["github-actions-model-effort-quoted"]["ok"] is True
+    assert checks["github-actions-ci-present"]["ok"] is True
+    assert checks["github-actions-ci-fork-safe"]["ok"] is True
+    assert checks["github-actions-ci-minimal-permissions"]["ok"] is True
+    assert checks["github-actions-ci-node-check"]["ok"] is True
+    assert checks["github-actions-ci-pytest"]["ok"] is True
+    assert checks["github-actions-ci-release-check"]["ok"] is True
+    assert checks["github-actions-ci-whitespace"]["ok"] is True
     assert checks["quality-policy-assets"]["ok"] is True
     assert checks["quality-top-model-policy"]["ok"] is True
     assert checks["quality-no-concrete-model-defaults"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.17.0"
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.18.0"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
@@ -10460,7 +10820,7 @@ import sys
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
-time.sleep(30)
+time.sleep(120)
 print("SHOULD_NOT_FINISH")
 """
     )
@@ -10497,18 +10857,19 @@ print("SHOULD_NOT_FINISH")
     assert job["pidIdentity"]["command"]
     assert job["childProcessGroupIdentity"]["command"]
 
-    cancel = subprocess.run(
-        [NODE, str(runtime), "cancel", job_id],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
+    cancel = run_cancel_with_lock_retry(runtime, job_id, cwd=repo, env=env)
     assert cancel.returncode == 0, cancel.stderr
     cancel_payload = json.loads(cancel.stdout)
     assert cancel_payload["status"] == "cancelled"
     assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == job["workerPid"]
     assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
+    assert cancel_payload["job"]["cancelWorkerDeferred"] is True
+    assert cancel_payload["job"]["cancelWorkerDelivered"] is False
+    for _ in range(30):
+        if not process_is_running(job["workerPid"]):
+            break
+        time.sleep(0.1)
+    assert not process_is_running(job["workerPid"])
 
 
 def test_cancel_running_host_forwarded_reserved_job_validates_and_terminates_worker(tmp_path):
@@ -10533,7 +10894,7 @@ import time
 if sys.argv[1:] == ["--version"]:
     print("claude fake")
     raise SystemExit(0)
-time.sleep(2)
+time.sleep(120)
 open(os.environ["FAKE_CLAUDE_COMPLETION_MARKER"], "w", encoding="utf8").write("completed\\n")
 print("SHOULD_NOT_FINISH")
 """
@@ -10581,19 +10942,15 @@ print("SHOULD_NOT_FINISH")
         assert "run-reserved-job" in job["pidIdentity"]["command"]
         assert job["childProcessGroupIdentity"]["command"]
 
-        cancel = subprocess.run(
-            [NODE, str(runtime), "cancel", job_id],
-            cwd=repo,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
+        cancel = run_cancel_with_lock_retry(runtime, job_id, cwd=repo, env=env)
         assert cancel.returncode == 0, cancel.stderr
         cancel_payload = json.loads(cancel.stdout)
         assert cancel_payload["status"] == "cancelled"
         assert cancel_payload["job"]["cancelWorkerIdentity"]["pid"] == worker.pid
         assert "run-reserved-job" in cancel_payload["job"]["cancelWorkerIdentity"]["command"]
         assert cancel_payload["job"]["cancelChildIdentity"]["pid"] == job["childProcessGroupPid"]
+        assert cancel_payload["job"]["cancelWorkerDeferred"] is True
+        assert cancel_payload["job"]["cancelWorkerDelivered"] is False
         worker_stdout, worker_stderr = worker.communicate(timeout=5)
         assert worker.returncode == 0, worker_stderr
         worker_payload = json.loads(worker_stdout)

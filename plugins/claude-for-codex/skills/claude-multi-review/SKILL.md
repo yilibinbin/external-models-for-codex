@@ -86,6 +86,8 @@ Rules:
 - Codex remains responsible for deciding which findings to adopt, reject, or report as residual risk.
 - Preserve role headers, file paths, line numbers, uncertainty markers, failed-role diagnostics, and the orchestration summary.
 - Preserve evidence boundaries; do not collapse role-specific uncertainty into a stronger claim.
+- Preserve compact outcome classification metadata from JSON or report output when present, especially refusal, fallback, timeout, and permission-compatibility categories.
+- Native SDK subagents run as fresh isolated context reviewers with normalized model aliases and must not invoke nested `Agent`, shell, workflow, or write tools.
 - Do not fix review findings in the same turn unless the user explicitly asks which findings to adopt.
 - Use `--background` for long multi-role reviews through the background routing contract above and retrieve the job with `claude-result`.
 - Tiny one-to-two file reviews can run foreground; broader or unclear reviews should use background.

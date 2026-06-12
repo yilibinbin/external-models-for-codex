@@ -6,7 +6,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.17.0";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.18.0";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -182,9 +182,9 @@ function checkManifest(root) {
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.17.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.17.0"), "changelog-version", "CHANGELOG contains 0.17.0"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.17.0`"), "readme-current-version", "README current version is 0.17.0"),
+    result(manifest.version === "0.18.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.18.0"), "changelog-version", "CHANGELOG contains 0.18.0"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.18.0`"), "readme-current-version", "README current version is 0.18.0"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -257,9 +257,14 @@ function checkNativeReleaseAssets(root) {
   const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
   const backend = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs"), "utf8");
   const qualityPolicy = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs"), "utf8");
+  const outcomeClassifier = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "outcome-classifier.mjs"), "utf8");
+  const modelRegistryPath = path.join(pluginRoot, "scripts", "lib", "model-registry.mjs");
+  const modelRegistry = fs.existsSync(modelRegistryPath) ? fs.readFileSync(modelRegistryPath, "utf8") : "";
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
   const nativeReview = fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "";
+  const hookCompat = path.join(pluginRoot, "scripts", "lib", "hook-compat.mjs");
+  const doctor = path.join(pluginRoot, "scripts", "lib", "doctor.mjs");
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
   const hooks = fs.readFileSync(path.join(pluginRoot, "hooks", "hooks.json"), "utf8");
   const hookWrapper = fs.readFileSync(path.join(pluginRoot, "hooks", "claude-review-gate.mjs"), "utf8");
@@ -287,10 +292,33 @@ function checkNativeReleaseAssets(root) {
   const defaultCliDocsOk = docsJoined.includes("CLI mode remains the default backend");
   const ultrareviewConsentDocsOk = docsJoined.includes("--confirm-cost") && docsJoined.includes("CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1");
   const ultrareviewNotDefaultDocsOk = docsJoined.includes("never used by hooks or default review paths");
+  const v018DocMarkers = [
+    "model alias registry",
+    "outcome classification",
+    "doctor --json",
+    "fork-safe CI dogfood",
+    "fresh isolated context"
+  ];
+  const v018DocsOk = docs.every((text) => v018DocMarkers.every((marker) => text.includes(marker)));
   const detail = "claude-ultrareview; native assets/docs include --agent-team sdk-subagents, --confirm-cost, @anthropic-ai/claude-agent-sdk";
   return [
     ...manifestAssetChecks(pluginRoot),
     result(fs.existsSync(nativeHelper), "native-review-helper", path.relative(pluginRoot, nativeHelper)),
+    result(
+      fs.existsSync(hookCompat) &&
+        companion.includes("hookCompatibilityReport") &&
+        fs.readFileSync(hookCompat, "utf8").includes("CODEX_DISCOVERED_HOOK_EVENTS"),
+      "hook-compat-report",
+      "hook compatibility report preserves Codex-discovered hook subset"
+    ),
+    result(
+      fs.existsSync(doctor) &&
+        companion.includes('"doctor"') &&
+        companion.includes("doctorReport") &&
+        fs.readFileSync(doctor, "utf8").includes("semanticCapabilities"),
+      "doctor-command",
+      "doctor --json reports cheap diagnostics without Claude prompt execution"
+    ),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
     result(
       companion.includes("--agent-team") &&
@@ -303,6 +331,22 @@ function checkNativeReleaseAssets(root) {
     ),
     result(backend.includes("@anthropic-ai/claude-agent-sdk"), "native-sdk-package-compat", "@anthropic-ai/claude-agent-sdk"),
     result(docsOk, "native-docs", detail),
+    result(v018DocsOk, "native-maturity-docs", "0.18 docs include model alias registry, outcome classification, doctor, SDK isolation, and CI dogfood"),
+    result(
+      outcomeClassifier.includes("unknownOnly") &&
+        outcomeClassifier.includes("const failureText = status === 0") &&
+        outcomeClassifier.includes("`${result.stderr ?? \"\"}\\n${result.error ?? \"\"}`"),
+      "outcome-success-stdout-not-failure",
+      "successful model stdout is not scanned with broad auth/rate-limit/timeout failure classifiers"
+    ),
+    result(
+      modelRegistry.includes("safeModelAliasOrId(env.CLAUDE_FOR_CODEX_TOP_MODEL)") &&
+        modelRegistry.includes('requested === "default"') &&
+        nativeReview.includes('normalized.family === "custom"') &&
+        nativeReview.includes('normalized.family === "default"'),
+      "model-registry-default-and-env-fallback",
+      "default is a selectable CLI alias, invalid top-model env falls back, and SDK child agents inherit for custom/default models"
+    ),
     result(
       companion.includes("args.agentTeam = args.agentTeam ?? \"plugin\"") &&
         companion.includes("--agent-team sdk-subagents requires --backend sdk or CLAUDE_FOR_CODEX_BACKEND=sdk.") &&
@@ -343,13 +387,17 @@ function checkNativeReleaseAssets(root) {
       fs.existsSync(path.join(pluginRoot, "scripts", "lib", "quality-policy.mjs")) &&
         sourceArrayIncludes(qualityPolicy, "VALID_QUALITIES", ["auto", "fast", "standard", "strong", "max"]) &&
         sourceArrayIncludes(qualityPolicy, "VALID_EFFORTS", ["low", "medium", "high", "xhigh", "max"]) &&
-        sourceArrayIncludes(qualityPolicy, "VALID_MODEL_ALIASES", ["haiku", "sonnet", "opus", "fable", "best", "inherit"]) &&
+        modelRegistry.includes("MODEL_ALIAS_REGISTRY") &&
+        ["best", "fable", "opus", "sonnet", "haiku", "opusplan", "inherit"].every((alias) => modelRegistry.includes(`alias: "${alias}"`)) &&
+        modelRegistry.includes("supportsOneMillionSuffix: true") &&
+        qualityPolicy.includes("VALID_MODEL_ALIASES = MODEL_ALIASES") &&
         companion.includes("--quality auto|fast|standard|strong|max"),
       "quality-policy-assets",
       "--quality auto|fast|standard|strong|max"
     ),
     result(
       qualityPolicy.includes("resolveTopModel") &&
+        modelRegistry.includes("resolveTopModelFromCapabilities") &&
         qualityPolicy.includes("DEFAULT_TOP_MODEL_FALLBACK") &&
         qualityPolicy.includes('model: "top"') &&
         qualityPolicy.includes("topModelProfile") &&
@@ -359,7 +407,8 @@ function checkNativeReleaseAssets(root) {
         companion.includes("fallbackModelCapabilities") &&
         companion.includes("fallbackModel") &&
         companion.includes("fallbackModelList") &&
-        (nativeReview.includes("claude-fable-5") || nativeReview.includes("CLAUDE_MODEL_ID_PATTERN")),
+        nativeReview.includes("normalizeModelSelection") &&
+        nativeReview.includes('model || "inherit"'),
       "quality-top-model-policy",
       "max quality is capability-aware and SDK subagents preserve safe Claude model ids"
     ),
@@ -485,6 +534,7 @@ function longRunningLifecycleChecks(pluginRoot) {
   const workerSignalHandlerIndex = companion.indexOf('process.once("SIGTERM", signalHandler)');
   const workerSpawnIndex = companion.indexOf("child = spawn(process.execPath");
   const cancelChildTerminationIndex = jobs.indexOf("let childTermination = Number.isInteger(requestedChildGroupPid)");
+  const cancelChildDeliveredIndex = jobs.indexOf("childTermination.ok && childTermination.delivered");
   const cancelWorkerTerminationIndex = jobs.indexOf("let workerTermination = Number.isInteger(requested.workerPid)");
   // These source guards intentionally complement behavior tests. They pin
   // security/lifecycle invariants that are easy to preserve accidentally in
@@ -557,7 +607,7 @@ function longRunningLifecycleChecks(pluginRoot) {
     result(processText.includes("captureProcessGroupIdentity") && processText.includes("missing saved process identity") && companion.includes("Child process group identity could not be validated") && companion.includes("!isProcessAlive(child.pid)") && processText.includes("commandHash") && processText.includes("processIdentityCommandMatches"), "child-process-identity-required", "child groups require stable saved private identity before signaling while fast exits are allowed to close normally"),
     result(companion.includes("function stopUnvalidatedChild") && companion.includes('stopUnvalidatedChild("SIGKILL")') && companion.includes("Child process group identity could not be validated"), "unvalidated-child-no-negative-pgid", "identity validation failure does not signal an unvalidated process group"),
     result(processText.includes("current === expected") && !processText.includes("expected.includes(current)") && !processText.includes("current.includes(expected)"), "process-identity-no-prefix-match", "process identity validation does not accept prefix/subset command matches"),
-    result(jobs.includes("childTermination.ok && workerTermination.ok") && jobs.includes("cancelChildIdentity") && jobs.includes("cancelWorkerIdentity") && jobs.includes("requires child process group validation before signaling the worker") && jobs.includes("{ preserveActive: true }") && cancelChildTerminationIndex >= 0 && cancelWorkerTerminationIndex > cancelChildTerminationIndex, "cancel-child-and-worker", "cancel validates and terminates the child group before signaling the worker, then waits for both"),
+    result(jobs.includes("persistCancelledAfterValidatedSignal") && jobs.includes("cancelledJobUpdates") && jobs.includes("cancelWorkerDeferred") && jobs.includes("deferred: true") && jobs.includes("childTermination.ok && workerTermination.ok") && jobs.includes("requires child process group validation before signaling the worker") && jobs.includes("{ preserveActive: true }") && cancelChildTerminationIndex >= 0 && cancelChildDeliveredIndex > cancelChildTerminationIndex && cancelWorkerTerminationIndex > cancelChildDeliveredIndex, "cancel-child-worker-deferred", "cancel validates and terminates the child group first, persists cancellation from that delivered signal, and defers worker termination to avoid killing the worker while it holds the job lock"),
     result(jobs.includes("function cancelQueuedJob") && jobs.includes('current.status !== "queued"') && jobs.includes("return cancelJob(cwd, jobId, env)"), "cancel-queued-lock-reread", "queued cancel re-reads under lock and routes claimed jobs through running cancel"),
     result(jobs.includes("cancelQueuedWorkerPid") && jobs.includes("terminateValidatedJobWorker(updated.cancelQueuedWorkerPid") && jobs.includes("Queued worker cancellation requires process identity validation"), "cancel-queued-worker-terminated", "queued jobs with a spawned worker are not reported cancelled until the validated worker is handled"),
     result(jobs.includes("Running job cancellation did not deliver a signal") && jobs.includes("signalDelivered") && jobs.includes("phaseBeforeCancel") && jobs.includes("missingStartingChildSupervision") && jobs.includes("before child supervision metadata was persisted") && jobs.includes("preserveActive") && jobs.includes("Job reached a terminal state before cancellation failure could be persisted"), "cancel-requires-delivered-signal", "running cancel cannot report cancelled unless a validated signal was delivered and startup child supervision is known"),
@@ -726,11 +776,13 @@ function checkNaturalLanguageRouting(root) {
 }
 
 function checkGithubActionsCi(root) {
-  const { pluginRoot } = resolveLayout(root);
+  const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
   const defaultWorkflow = renderWorkflow(pluginRoot);
   const annotationWorkflow = renderWorkflow(pluginRoot, { annotations: true });
   const validation = validateWorkflow(defaultWorkflow);
   const annotationValidation = validateWorkflow(annotationWorkflow, { annotations: true });
+  const ciWorkflow = installedPluginOnly ? "" : path.join(repoRoot, ".github", "workflows", "claude-for-codex-ci.yml");
+  const ciText = ciWorkflow && fs.existsSync(ciWorkflow) ? fs.readFileSync(ciWorkflow, "utf8") : "";
   const checks = [
     result(validation.ok && annotationValidation.ok, "github-actions-template-safe"),
     result(validation.checks.some((check) => check.name === "github-actions-fork-safe" && check.ok), "github-actions-fork-safe"),
@@ -746,7 +798,27 @@ function checkGithubActionsCi(root) {
     result(defaultWorkflow.includes('MODEL_ARGS+=(--model "$CLAUDE_FOR_CODEX_MODEL")'), "github-actions-model-env-forwarded"),
     result(defaultWorkflow.includes('MODEL_ARGS+=(--effort "$CLAUDE_FOR_CODEX_EFFORT")'), "github-actions-effort-env-forwarded"),
     result(defaultWorkflow.includes('${MODEL_ARGS[@]+"${MODEL_ARGS[@]}"}'), "github-actions-model-effort-quoted"),
-    result(defaultWorkflow.includes("retention-days: 5"), "github-actions-short-artifact-retention")
+    result(defaultWorkflow.includes("retention-days: 5"), "github-actions-short-artifact-retention"),
+    result(installedPluginOnly || fs.existsSync(ciWorkflow), "github-actions-ci-present"),
+    result(installedPluginOnly || (!ciText.includes("pull_request_target") && ciText.includes("pull_request:") && ciText.includes("push:")), "github-actions-ci-fork-safe"),
+    result(installedPluginOnly || ciText.includes("contents: read"), "github-actions-ci-minimal-permissions"),
+    result(installedPluginOnly || ciText.includes("node --check plugins/claude-for-codex/scripts/claude-companion.mjs"), "github-actions-ci-node-check"),
+    result(
+      installedPluginOnly ||
+        (
+          ciText.includes("pytest -q tests/test_claude_permission_compat.py") &&
+          ciText.includes('pytest -q tests/test_claude_for_codex_plugin.py -k "') &&
+          ciText.includes("release_check") &&
+          ciText.includes("outcome_classifier") &&
+          ciText.includes("doctor_json") &&
+          ciText.includes("hook_compat") &&
+          !ciText.includes("pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py")
+        ),
+      "github-actions-ci-pytest",
+      "PR dogfood runs permission compatibility plus bounded Claude plugin smoke tests instead of the full long lifecycle suite"
+    ),
+    result(installedPluginOnly || ciText.includes("release-check --ci-simulate --json"), "github-actions-ci-release-check"),
+    result(installedPluginOnly || ciText.includes("git diff --check"), "github-actions-ci-whitespace")
   ];
   return checks;
 }

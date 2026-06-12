@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.17.0`
+- Current version: `0.18.0`
 
 Published capabilities:
 
@@ -24,15 +24,18 @@ Published capabilities:
 - Read-only Claude rescue diagnosis when Codex is stuck or validation is failing.
 - Multi-role review fan-out across correctness, security, tests, release, and adversarial perspectives.
 - Adaptive `--quality auto|fast|standard|strong|max` model/effort policy using Claude Code aliases.
+- Dynamic model alias registry for Claude Code aliases such as `best`, `fable`, `opus`, `sonnet`, `haiku`, `opusplan`, `opus[1m]`, `sonnet[1m]`, and `inherit`.
 - Native SDK subagent review teams with `--backend sdk --agent-team sdk-subagents`.
+- Request-local outcome classification for Claude CLI and SDK runs, including compact refusal, fallback, timeout, and permission-compatibility metadata.
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Native structured output and sanitized streaming progress with `--native-structured` and `--stream-progress`.
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
-- Capability diagnostics for Claude CLI, Git, GitHub CLI, hooks, MCP, and optional semantic providers.
+- Capability diagnostics and cheap `doctor --json` health checks for Claude CLI, SDK package resolution, Git, GitHub CLI, hooks, MCP, state, review-gate, and optional semantic providers.
 - Optional semantic context for review commands, disabled by default.
 - Optional Claude SDK backend for explicitly selected review, gate, plan, and rescue flows.
 - Explicit-consent Claude ultrareview with `--confirm-cost`.
 - GitHub Actions PR review workflow templates with fork-safe defaults.
+- Fork-safe repository CI dogfood for plugin syntax, focused tests, release checks, and whitespace validation.
 - Sanitized per-run review reports that omit prompts, diffs, raw model output, and secrets by default.
 - Release checks for manifest, hook, docs, prompt, skill, and secret-scan hygiene.
 - Background execution for long Claude review, adversarial review, multi-review, and rescue jobs.
@@ -47,6 +50,8 @@ Safety and operating model:
 - Read-only SDK review disables Claude Code settings, skills, hooks, plugins, and SDK session persistence while preserving the normal Claude authentication path.
 - CLI mode remains the default backend. The SDK backend runs only with `--backend sdk` or `CLAUDE_FOR_CODEX_BACKEND=sdk`.
 - Native SDK subagent teams require the SDK backend and keep the read-only Git MCP boundary.
+- Native SDK child agents run with fresh isolated context, preserve normalized model aliases, and deny nested `Agent`, shell, workflow, and write-tool escalation.
+- Outcome classification stores compact status metadata only; reports do not persist raw SDK events, prompt text, source snippets, or raw model output.
 - Ultrareview may use remote/cloud execution and usage-credit billing; it requires `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1`.
 - Rescue is read-only by default; `rescue --write` is explicit opt-in and records git fingerprints before and after Claude runs.
 - Codex remains responsible for applying or rejecting Claude findings.
@@ -64,6 +69,7 @@ Adaptive quality:
 - `--quality max` uses the strongest advertised local Claude alias with max effort, preferring `best`, then `fable`, then `opus`.
 - Explicit `--model` and `--effort` always win over `--quality`.
 - The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`, so Claude Code can map aliases to the current best available model.
+- The model alias registry is shared by CLI quality policy and SDK subagent selection so future Claude Code alias updates do not require duplicated hardcoded allowlists.
 - `ultracode` is not passed as `--effort`; current noninteractive Claude Code accepts only `low`, `medium`, `high`, `xhigh`, and `max`.
 - `claude ultrareview` remains a separate explicit command requiring `--confirm-cost` and is never used by hooks or default review paths.
 - Set `CLAUDE_FOR_CODEX_QUALITY=standard|strong|max` to change the default for manual commands. Stop hooks and `review-gate` remain capped to `standard` unless you run `review-gate` manually with explicit `--quality strong` or `--quality max`.
@@ -136,6 +142,12 @@ Claude CLI resolution order:
 
 If setup reports `claudeAvailable: false` but Claude is installed elsewhere, set `CLAUDE_CODE_PATH` to the absolute executable path before running Codex.
 
+For a cheap health check that does not run a Claude prompt or spend model quota:
+
+```bash
+node plugins/claude-for-codex/scripts/claude-companion.mjs doctor --json
+```
+
 ## Install From This Repository
 
 ```bash
@@ -150,7 +162,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.17.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -227,7 +239,7 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs status
 
 `multi-review` runs several role-specialized Claude review prompts in parallel by default and prints one section per role plus an orchestration summary. This plugin-managed CLI fan-out is read-only; Codex must reconcile findings before any follow-up changes. Use `--sequential` to run one role at a time for debugging or rate-limit-sensitive environments. For Claude native SDK mode, use `multi-review --backend sdk --agent-team sdk-subagents`; this requires the Claude SDK backend, configures native subagents for the selected roles, and rejects incompatible `--sequential` or non-SDK combinations before invoking Claude.
 
-Native SDK mode resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. It is opt-in and experimental until live SDK subagent smoke tests are stable; plugin-managed CLI `multi-review` remains the default. Combine `--json --native-structured` to request a schema-backed SDK aggregate where `role_results[].result.review` is a full review JSON object. The plugin validates that object locally and does not serialize raw role text or raw SDK `structured_output` into reports. Add `--stream-progress` to show sanitized progress events without printing raw SDK chunks or storing raw SDK messages in reports.
+Native SDK mode resolves `@anthropic-ai/claude-agent-sdk` first and keeps `@anthropic-ai/claude-code` as a compatibility fallback. It is opt-in and experimental until live SDK subagent smoke tests are stable; plugin-managed CLI `multi-review` remains the default. SDK subagents are created as fresh isolated context reviewers, preserve normalized Claude model aliases including long-context forms, and cannot call nested `Agent`, shell, workflow, or write tools. Combine `--json --native-structured` to request a schema-backed SDK aggregate where `role_results[].result.review` is a full review JSON object. The plugin validates that object locally and does not serialize raw role text or raw SDK `structured_output` into reports. Add `--stream-progress` to show sanitized progress events without printing raw SDK chunks or storing raw SDK messages in reports.
 
 Role packs are named reviewer presets for `multi-review`. Use `roles list`, `roles inspect <pack>`, and `multi-review --role-pack <pack>` for built-in packs such as `minimal`, `release`, `security`, and `default`. User-authored JSON packs can be validated with `roles validate <file>`, but they are validate/inspect-only and are not executable by review commands. Role packs are plugin-managed presets, not native Claude subagents, and they cannot grant tools, shell commands, hooks, MCP servers, environment variables, backend mode, or write permissions.
 
@@ -251,7 +263,7 @@ If the same background command, arguments, and workspace are submitted again whi
 
 Stop hook never starts background jobs, never calls `reserve-job`, and never invokes ultrareview. If review-gate work exceeds its bounded role timeout or Claude is unavailable, it fails open and tells you to run an explicit tracked review.
 
-`capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. It does not execute external semantic providers.
+`capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. `doctor --json` is the cheap first-stop diagnostic for installed setups: it reports CLI, SDK, hook compatibility, review-gate state, state-file health, and semantic-provider configuration without running a Claude prompt or initializing providers.
 
 `--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies configured write-tool candidates such as `Edit`, `Write`, `MultiEdit`, and `Bash` when the installed Claude runtime recognizes them, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. SDK-backed background and reserved jobs automatically enable sanitized stream progress so `jobs` and `result` can show progress previews without raw model chunks. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
 
@@ -261,11 +273,11 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `report --latest` reads the latest sanitized review report from the repo-external plugin data directory. Reports are minimal metadata only: command, scope, roles/lenses, backend, model/effort, timestamps, exit status, output byte counts, and structured verdict/finding counts when available. Reports do not store prompts, source code, diffs, raw model output, environment variables, or raw absolute workspace paths by default. Set `CLAUDE_FOR_CODEX_NO_TELEMETRY=1` to disable all non-job report writes.
 
-`github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`.
+`github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`. This repository also ships a fork-safe CI dogfood workflow that runs syntax checks, focused pytest, `release-check --ci-simulate --json`, and `git diff --check` for Claude for Codex changes.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.17.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.17.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.17.0` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.18.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.18.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

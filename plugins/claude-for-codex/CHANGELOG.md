@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.18.0 - 2026-06-12
+
+### Added
+
+- Add a dynamic Claude model alias registry shared by CLI policy and native SDK subagents, including long-context aliases without pinned dated model IDs.
+- Add request-local Claude outcome classification for CLI and SDK runs, with compact refusal, fallback, timeout, and permission-compatibility metadata in sanitized reports.
+- Add hook compatibility diagnostics and a cheap `doctor --json` command that checks CLI, SDK, hook, state, semantic, and review-gate surfaces without spending model quota.
+- Add a fork-safe Claude for Codex repository CI workflow and release-check guards for its syntax, focused pytest, CI-simulated release checks, minimal permissions, and whitespace gate.
+
+### Fixed
+
+- Align native SDK subagent definitions with Claude's isolated-context model by preserving normalized aliases, denying nested agent/tool escalation, and keeping the default CLI fan-out path unchanged.
+- Keep installed-plugin-only release checks from constructing repository workflow paths when no repository root exists.
+
+### Documentation
+
+- Document the 0.18.0 diagnostics, model alias registry, outcome classification, SDK subagent boundaries, and fork-safe CI dogfood workflow in README and skill guidance.
+
 ## 0.17.0 - 2026-06-11
 
 ### Added

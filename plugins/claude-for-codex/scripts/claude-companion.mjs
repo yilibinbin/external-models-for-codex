@@ -45,6 +45,8 @@ import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib/mailbox.mjs";
 import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
+import { doctorReport, renderDoctorText } from "./lib/doctor.mjs";
+import { hookCompatibilityReport } from "./lib/hook-compat.mjs";
 import { latestReport, listReports, reportFromResult, safeWriteReport } from "./lib/reports.mjs";
 import { runReleaseCheck } from "./lib/release-check.mjs";
 import {
@@ -68,6 +70,7 @@ import {
   runSdkNativeReview,
   runSdkPrompt
 } from "./lib/claude-backend.mjs";
+import { classifyClaudeOutcome } from "./lib/outcome-classifier.mjs";
 import {
   buildNativeReviewAgents,
   nativeReviewTeamPrompt
@@ -141,7 +144,7 @@ import {
   workingTreeFingerprintMatches
 } from "./lib/worktree-fingerprint.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
@@ -351,19 +354,23 @@ function flagSupport(helpText, flags) {
 function modelAliasAdvertised(helpText = "", alias = "") {
   const normalized = String(helpText).toLowerCase();
   const escaped = String(alias).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`\\balias(?:es)?\\b[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized)
-    || new RegExp(`--model[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized)
-    || new RegExp(`\\b(?:models?|choices?|options?)\\b[^\\r\\n.;:]*\\b${escaped}\\b`).test(normalized);
+  const suffix = "(?=$|[\\s,.;:)])";
+  return new RegExp(`\\balias(?:es)?\\b[^\\r\\n.;:]*\\b${escaped}${suffix}`).test(normalized)
+    || new RegExp(`--model[^\\r\\n.;:]*\\b${escaped}${suffix}`).test(normalized)
+    || new RegExp(`\\b(?:models?|choices?|options?)\\b[^\\r\\n.;:]*\\b${escaped}${suffix}`).test(normalized);
 }
 
 function modelAliasCapabilities(helpText = "") {
   const normalized = String(helpText).toLowerCase();
   return {
     best: modelAliasAdvertised(normalized, "best"),
-    fable: modelAliasAdvertised(normalized, "fable") || /claude-fable-5/.test(normalized),
-    opus: /\bopus\b/.test(normalized),
-    sonnet: /\bsonnet\b/.test(normalized),
-    haiku: /\bhaiku\b/.test(normalized)
+    fable: modelAliasAdvertised(normalized, "fable"),
+    opus: modelAliasAdvertised(normalized, "opus"),
+    sonnet: modelAliasAdvertised(normalized, "sonnet"),
+    haiku: modelAliasAdvertised(normalized, "haiku"),
+    opusplan: modelAliasAdvertised(normalized, "opusplan"),
+    opus1m: modelAliasAdvertised(normalized, "opus[1m]"),
+    sonnet1m: modelAliasAdvertised(normalized, "sonnet[1m]")
   };
 }
 
@@ -1276,9 +1283,20 @@ function runClaudeAsync(args, options = {}) {
   });
 }
 
+function withClaudeOutcome(result = {}) {
+  const enriched = {
+    ...result,
+    metadata: {
+      ...(result?.metadata ?? {})
+    }
+  };
+  enriched.metadata.outcome = classifyClaudeOutcome(enriched);
+  return enriched;
+}
+
 async function claudePrintAsync(prompt, options) {
   if (resolveBackend(options, process.env) === "sdk") {
-    return runSdkPrompt(prompt, options, { cwd: process.cwd(), timeout: options.timeout });
+    return withClaudeOutcome(await runSdkPrompt(prompt, options, { cwd: process.cwd(), timeout: options.timeout }));
   }
   let denyTools = configuredWriteDenyTools(process.env);
   const omitted = new Set();
@@ -1297,12 +1315,12 @@ async function claudePrintAsync(prompt, options) {
       }
     }
     if (options.write) {
-      return result;
+      return withClaudeOutcome(result);
     }
     // Newer Claude runtimes may warn about an unknown deny tool and still emit stdout; retry before trusting that run.
     const candidate = parseUnknownDenyToolFailure(result, denyTools);
     if (!candidate || omitted.has(candidate)) {
-      return result;
+      return withClaudeOutcome(result);
     }
     const remainingTools = buildDenyToolsAfterOmission(denyTools, candidate);
     if (remainingTools.length === denyTools.length || remainingTools.length === 0) {
@@ -2378,7 +2396,8 @@ function hookDiagnostics() {
     codexConfigPath: configPath,
     codexConfigChecked,
     codexConfigError,
-    trustedInCodexConfig: hookTrustedInCodexConfig(configText)
+    trustedInCodexConfig: hookTrustedInCodexConfig(configText),
+    compatibility: hookCompatibilityReport({ installedEvents: events })
   };
 }
 
@@ -2394,27 +2413,31 @@ function mcpDiagnostics() {
 
 function buildSetupReport(actionsTaken = []) {
   const cwd = process.cwd();
-  const stateReport = readStateReport(cwd);
-  const config = stateReport.state.config;
   return {
     node: process.version,
     claudeAvailable: hasClaude(),
     claudeCommand: claudeCommand(),
     gitAvailable: hasBinary("git"),
     cwd,
-    reviewGate: {
-      enabled: Boolean(config.reviewGateEnabled),
-      mode: config.reviewGateMode,
-      stateFile: stateFileForCwd(cwd),
-      stateReadable: stateReport.readable,
-      stateError: stateReport.error,
-      bypassEnv: REVIEW_GATE_ENV
-    },
+    reviewGate: reviewGateDiagnostics(cwd),
     jobCommands: ["jobs", "result", "cancel", "rescue"],
     hooks: hookDiagnostics(),
     mcp: mcpDiagnostics(),
     capabilities: buildCapabilitiesReport(),
     actionsTaken
+  };
+}
+
+function reviewGateDiagnostics(cwd = process.cwd()) {
+  const stateReport = readStateReport(cwd);
+  const config = stateReport.state.config;
+  return {
+    enabled: Boolean(config.reviewGateEnabled),
+    mode: config.reviewGateMode,
+    stateFile: stateFileForCwd(cwd),
+    stateReadable: stateReport.readable,
+    stateError: stateReport.error,
+    bypassEnv: REVIEW_GATE_ENV
   };
 }
 
@@ -2444,7 +2467,9 @@ function printSetup(rawArgs) {
   };
 
   console.log(JSON.stringify(report, null, 2));
-  process.exit(report.claudeAvailable && report.gitAvailable && report.reviewGate.stateReadable ? 0 : 1);
+  const mutatedConfig = Boolean(options.enable || options.disable || options.mode);
+  const healthy = report.claudeAvailable && report.gitAvailable && report.reviewGate.stateReadable;
+  process.exit((mutatedConfig && report.reviewGate.stateReadable) || healthy ? 0 : 1);
 }
 
 function printStatus() {
@@ -2469,16 +2494,42 @@ function printCapabilities() {
   process.stdout.write(`${JSON.stringify(buildCapabilitiesReport({ probeNativeSubcommands: true }), null, 2)}\n`);
 }
 
+function printDoctor(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  const jsonOutput = tokens.includes("--json");
+  const unknown = tokens.find((token) => token !== "--json");
+  if (unknown) {
+    console.error(`Unknown doctor option "${unknown}".`);
+    process.exit(2);
+  }
+  const cwd = process.cwd();
+  const report = doctorReport({
+    cwd,
+    pluginRoot: pluginRoot(),
+    env: process.env,
+    capabilities: buildCapabilitiesReport(),
+    state: {
+      reviewGate: reviewGateDiagnostics(cwd)
+    }
+  });
+  process.stdout.write(jsonOutput ? `${JSON.stringify(report, null, 2)}\n` : `${renderDoctorText(report)}\n`);
+}
+
 function recordCommandReport(command, args, result, startedAt, parsed, roleResults = []) {
   const endedAt = new Date().toISOString();
+  const enrichedResult = withClaudeOutcome(result);
+  const enrichedRoleResults = roleResults.map((entry) => ({
+    ...entry,
+    result: withClaudeOutcome(entry.result)
+  }));
   const report = reportFromResult({
     command,
     args,
-    result,
+    result: enrichedResult,
     startedAt,
     endedAt,
     parsed,
-    roleResults
+    roleResults: enrichedRoleResults
   });
   safeWriteReport(process.cwd(), report);
   return endedAt;
@@ -4211,6 +4262,9 @@ switch (command) {
     break;
   case "capabilities":
     printCapabilities();
+    break;
+  case "doctor":
+    printDoctor(rawArgs);
     break;
   case "review":
     await runClaudeTask("review", rawArgs);
