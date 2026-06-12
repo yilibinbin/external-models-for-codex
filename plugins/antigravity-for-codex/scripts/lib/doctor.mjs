@@ -9,6 +9,7 @@ import {
   parseAgyModels,
   selectAgyModel
 } from "./agy-capabilities.mjs";
+import { antigravityHookCompatibility } from "./hook-compat.mjs";
 
 function safeSelect(selection) {
   try {
@@ -80,6 +81,7 @@ export function antigravityDoctor(env = process.env, options = {}) {
       status: modelsResult.status,
       error: probeError(modelsResult)
     },
-    selected
+    selected,
+    hooks: antigravityHookCompatibility()
   };
 }

@@ -130,6 +130,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "antigravity-runtime.mjs",
         "doctor.mjs",
         "github-actions.mjs",
+        "hook-compat.mjs",
         "job-lifecycle.mjs",
         "jobs.mjs",
         "leases.mjs",
@@ -255,6 +256,33 @@ def test_antigravity_hooks_use_antigravity_env_names():
     assert "session-lifecycle.mjs" in hooks["hooks"]["SessionEnd"][0]["hooks"][0]["command"]
     assert "unread-result.mjs" in hooks["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"]
     assert "antigravity-review-gate.mjs" in stop_hooks[0]["command"]
+
+
+def test_antigravity_hook_compatibility_report():
+    source = (
+        "const h = await import('./plugins/antigravity-for-codex/scripts/lib/hook-compat.mjs');"
+        "process.stdout.write(JSON.stringify(h.antigravityHookCompatibility()));"
+    )
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["supportedEvents"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+    assert payload["unsupportedEvents"] == ["PreToolUse", "PostToolUse", "PermissionRequest", "Notification"]
+    assert [item["event"] for item in payload["supported"]] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+    assert [item["event"] for item in payload["unsupported"]] == ["PreToolUse", "PostToolUse", "PermissionRequest", "Notification"]
+    for item in payload["supported"]:
+        assert item["behavior"]
+        assert item["failOpen"] is True
+    assert any(item["event"] == "PreToolUse" for item in payload["unsupported"])
+    for item in payload["unsupported"]:
+        assert item["reason"]
+    for event in payload["supportedEvents"]:
+        assert payload["events"][event]["supported"] is True
+        assert payload["events"][event]["behavior"]
+        assert payload["events"][event]["failOpen"] is True
+    for event in payload["unsupportedEvents"]:
+        assert payload["events"][event]["supported"] is False
+        assert payload["events"][event]["reason"]
 
 
 FAKE_AGY_HELP = (
@@ -2610,6 +2638,10 @@ def test_antigravity_doctor_is_cheap_and_reports_capabilities(tmp_path):
     assert payload["agy"]["capabilities"]["logFile"] is True
     assert payload["models"]["gemini"]
     assert payload["models"]["claude"]
+    assert payload["hooks"]["supportedEvents"] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+    assert [item["event"] for item in payload["hooks"]["supported"]] == ["SessionStart", "SessionEnd", "UserPromptSubmit", "Stop"]
+    assert all(item["failOpen"] is True for item in payload["hooks"]["supported"])
+    assert any(item["event"] == "PermissionRequest" and item["reason"] for item in payload["hooks"]["unsupported"])
     assert "modelCall" not in payload
 
 
@@ -3977,6 +4009,229 @@ def test_review_gate_uses_inner_timeout_below_hook_timeout(tmp_path):
     prompt = argv[argv.index("--prompt") + 1]
     assert "<role_name>stop-gate</role_name>" in prompt
     assert "<task>Run a stop-gate review of the current git changes.</task>" in prompt
+
+
+def test_review_gate_timeout_cap_ignores_inner_cli_and_env_timeout(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    argv_file = tmp_path / "agy-argv.json"
+    env = sanitized_env()
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = str(60 * 60 * 1000)
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file))
+
+    result = subprocess.run(
+        [NODE, str(runtime), "review-gate", "--timeout-seconds", "3600"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = json.loads(argv_file.read_text(encoding="utf8"))["argv"]
+    assert argv[argv.index("--print-timeout") + 1] == "840s"
+
+
+def test_review_gate_cli_timeout_bounds_hanging_model_call_and_fails_open(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, never_exit=True))
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+
+    started = time.monotonic()
+    result = subprocess.run(
+        [NODE, str(runtime), "review-gate", "--timeout-seconds", "1"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "allowing stop" in result.stderr
+    assert elapsed < 5
+
+
+def test_review_gate_hanging_agy_help_respects_aggregate_budget_and_fails_open(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    agy = tmp_path / "agy"
+    agy.write_text(
+        "#!/usr/bin/env node\n"
+        "const argv = process.argv.slice(2);\n"
+        "if (argv.join(' ') === '--help') { setTimeout(() => {}, 10000); }\n"
+        "else { process.stdout.write('ALLOW: ok'); }\n",
+        encoding="utf8",
+    )
+    agy.chmod(0o755)
+    env = companion_env(tmp_path, agy)
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "1000"
+
+    started = time.monotonic()
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "allowing stop" in result.stderr
+    assert elapsed < 5
+
+
+def test_review_gate_hanging_agy_times_out_before_wrapper_and_fails_open(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, never_exit=True))
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "1000"
+
+    started = time.monotonic()
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "allowing stop" in result.stderr
+    assert elapsed < 5
+
+
+def test_review_gate_hanging_git_context_respects_aggregate_budget_and_fails_open(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "agy-argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text("#!/bin/sh\nsleep 5\n", encoding="utf8")
+    fake_git.chmod(0o755)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "1000"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    started = time.monotonic()
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "allowing stop" in result.stderr
+    assert not argv_file.exists()
+    assert elapsed < 5
+
+
+def test_review_gate_git_root_failure_fails_open_without_model_call(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "agy-argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1 $2\" = \"rev-parse --show-toplevel\" ]; then\n"
+        "  echo 'fatal: injected git root failure' >&2\n"
+        "  exit 128\n"
+        "fi\n"
+        f"exec {shlex.quote(shutil.which('git') or 'git')} \"$@\"\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "5000"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "allowing stop" in result.stderr
+    assert "git root discovery failed" in result.stderr
+    assert not argv_file.exists()
+
+
+def test_review_gate_secondary_git_failure_fails_open_without_model_call(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "agy-argv.json"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        "if [ \"$1 $2\" = \"rev-parse --show-toplevel\" ]; then\n"
+        "  pwd\n"
+        "  exit 0\n"
+        "fi\n"
+        "if [ \"$1 $2\" = \"status --short\" ]; then\n"
+        "  echo 'fatal: injected git status failure' >&2\n"
+        "  exit 42\n"
+        "fi\n"
+        f"exec {shlex.quote(shutil.which('git') or 'git')} \"$@\"\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"] = "5000"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "allowing stop" in result.stderr
+    assert "git status failed" in result.stderr
+    assert "injected git status failure" in result.stderr
+    assert not argv_file.exists()
+
+
+def test_review_gate_git_diffs_use_no_ext_diff(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    argv_file = tmp_path / "agy-argv.json"
+    git_log = tmp_path / "git-argv.log"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_git = fake_bin / "git"
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        f"printf '%s\\n' \"$*\" >> {shlex.quote(str(git_log))}\n"
+        f"exec {shlex.quote(shutil.which('git') or 'git')} \"$@\"\n",
+        encoding="utf8",
+    )
+    fake_git.chmod(0o755)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
+
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True, timeout=10)
+
+    assert result.returncode == 0, result.stderr
+    assert argv_file.exists()
+    commands = git_log.read_text(encoding="utf8").splitlines()
+    assert "diff --no-ext-diff --cached --stat" in commands
+    assert "diff --no-ext-diff --stat" in commands
+    assert "diff --no-ext-diff --cached -- ." in commands
+    assert "diff --no-ext-diff -- ." in commands
 
 
 def test_review_gate_hook_does_not_block_on_open_stdin_pipe(tmp_path):

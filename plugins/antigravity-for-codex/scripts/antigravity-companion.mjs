@@ -112,7 +112,10 @@ const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const REPO_ROOT_DIR = path.resolve(ROOT_DIR, "..", "..");
 const COMPANION_PATH = fileURLToPath(import.meta.url);
 const DEFAULT_TIMEOUT_MS = 15 * 60 * 1000;
-const REVIEW_GATE_INNER_TIMEOUT_MS = 14 * 60 * 1000;
+const REVIEW_GATE_TIMEOUT_ENV = "ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS";
+const REVIEW_GATE_DEFAULT_TIMEOUT_MS = 14 * 60 * 1000;
+const REVIEW_GATE_WRAPPER_TIMEOUT_MS = 870 * 1000;
+const REVIEW_GATE_WRAPPER_GRACE_MS = 30 * 1000;
 const BACKGROUND_SUPERVISOR_TIMEOUT_GRACE_MS = 1000;
 const CHILD_OUTPUT_MAX_BUFFER = 20 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 30 * 1000;
@@ -378,6 +381,100 @@ function runGitOk(args, options = {}) {
   };
 }
 
+function reviewGateTimeoutBudgetMs(env = process.env, cliTimeoutMs = undefined) {
+  const raw = env[REVIEW_GATE_TIMEOUT_ENV];
+  const requested = raw === undefined || String(raw).trim() === ""
+    ? REVIEW_GATE_DEFAULT_TIMEOUT_MS
+    : Number(raw);
+  const normalized = Number.isFinite(requested)
+    ? Math.max(1000, Math.ceil(requested))
+    : REVIEW_GATE_DEFAULT_TIMEOUT_MS;
+  const cliTimeout = Number.isFinite(cliTimeoutMs)
+    ? Math.max(1000, Math.ceil(cliTimeoutMs))
+    : normalized;
+  const wrapperCap = Math.max(0, REVIEW_GATE_WRAPPER_TIMEOUT_MS - REVIEW_GATE_WRAPPER_GRACE_MS);
+  return Math.min(normalized, cliTimeout, wrapperCap);
+}
+
+function reviewGateDeadline(timeoutMs) {
+  return {
+    expiresAt: Date.now() + Math.max(0, Math.ceil(timeoutMs || 0))
+  };
+}
+
+function reviewGateRemainingMs(deadline) {
+  return Math.max(0, Math.ceil((deadline?.expiresAt || 0) - Date.now()));
+}
+
+function reviewGateGitCommand(args, options = {}) {
+  const remaining = reviewGateRemainingMs(options.deadline);
+  if (remaining <= 0) {
+    return {
+      status: 1,
+      stdout: "",
+      stderr: `review gate timeout budget exhausted before: git ${args.join(" ")}`,
+      error: "review gate timeout budget exhausted",
+      errorCode: "ETIMEOUT",
+      timedOut: true
+    };
+  }
+  const result = spawnSync("git", args, {
+    cwd: options.cwd || process.cwd(),
+    encoding: "utf8",
+    maxBuffer: GIT_MAX_BUFFER,
+    timeout: Math.max(1, Math.min(GIT_TIMEOUT_MS, remaining)),
+    killSignal: "SIGKILL"
+  });
+  return {
+    status: result.status ?? 1,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error ? String(result.error.message || result.error) : "",
+    errorCode: result.error?.code ? String(result.error.code) : "",
+    timedOut: result.error?.code === "ETIMEDOUT"
+  };
+}
+
+function reviewGateGitResult(args, options = {}) {
+  const result = reviewGateGitCommand(args, options);
+  const stdout = String(result.stdout || "").trim();
+  const stdoutTruncated = Buffer.byteLength(stdout, "utf8") > GIT_OUTPUT_EXCERPT_BYTES;
+  const output = stdoutTruncated ? stdout.slice(0, GIT_OUTPUT_EXCERPT_BYTES) : stdout;
+  const marker = result.error || stdoutTruncated ? gitMarker(args) : "";
+  return {
+    command: `git ${args.join(" ")}`,
+    args,
+    status: result.status,
+    ok: result.status === 0 && !result.error && !stdoutTruncated,
+    stdout: output,
+    output: [output, marker].filter(Boolean).join("\n"),
+    marker,
+    truncated: stdoutTruncated,
+    stderr: result.stderr,
+    error: result.error,
+    errorCode: result.errorCode,
+    timedOut: result.timedOut
+  };
+}
+
+function reviewGateGitOk(args, options = {}) {
+  return reviewGateGitResult(args, options);
+}
+
+function reviewGateGitFailureReason(label, result) {
+  const detail = [
+    result.command,
+    result.errorCode,
+    result.timedOut ? "timed out" : "",
+    result.truncated ? "output truncated" : "",
+    result.error,
+    result.stderr,
+    result.marker,
+    result.status !== 0 ? `exit ${result.status}` : ""
+  ].filter(Boolean).join("; ").trim();
+  return `${label}${detail ? `: ${detail}` : ""}`;
+}
+
 function isSafeRelativePath(relativePath) {
   return Boolean(relativePath)
     && !path.isAbsolute(relativePath)
@@ -438,6 +535,33 @@ function untrackedContext(root) {
   return excerpts.join("\n\n");
 }
 
+function reviewGateUntrackedContext(root, deadline) {
+  const listing = reviewGateGitOk(["ls-files", "--others", "--exclude-standard"], { cwd: root, deadline });
+  if (!listing.ok) {
+    return {
+      trusted: false,
+      reason: reviewGateGitFailureReason("git untracked file discovery failed", listing),
+      context: ""
+    };
+  }
+  const files = listing.stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const excerpts = files.slice(0, UNTRACKED_FILE_LIMIT).map((file) => textExcerptForFile(root, file));
+  if (files.length > UNTRACKED_FILE_LIMIT) {
+    excerpts.push(`[untracked file list truncated after ${UNTRACKED_FILE_LIMIT} files]`);
+  }
+  if (listing.marker) {
+    excerpts.push(listing.marker);
+  }
+  return {
+    trusted: true,
+    reason: "",
+    context: excerpts.join("\n\n")
+  };
+}
+
 function gitContext() {
   const rootResult = runGitOk(["rev-parse", "--show-toplevel"]);
   const root = rootResult.ok ? rootResult.stdout : "";
@@ -459,6 +583,98 @@ function gitContext() {
     workingDiff ? `Working diff:\n${workingDiff}` : "",
     untracked ? `Untracked files:\n${untracked}` : ""
   ].filter(Boolean).join("\n\n");
+}
+
+function reviewGateGitContext({ deadline } = {}) {
+  const rootResult = reviewGateGitOk(["rev-parse", "--show-toplevel"], { deadline });
+  const root = rootResult.ok ? rootResult.stdout : "";
+  if (!root) {
+    if (
+      !rootResult.ok
+      && !rootResult.error
+      && !rootResult.errorCode
+      && !rootResult.marker
+      && /not a git repository|not a git repo|outside repository/i.test(rootResult.stderr || "")
+    ) {
+      return {
+        trusted: false,
+        reason: "no git repository was detected",
+        context: "No git repository was detected. Review only the user's explicit focus text."
+      };
+    }
+    const detail = [
+      rootResult.errorCode,
+      rootResult.error,
+      rootResult.stderr,
+      rootResult.marker
+    ].filter(Boolean).join("; ").trim();
+    return {
+      trusted: false,
+      reason: `git root discovery failed${detail ? `: ${detail}` : ""}`,
+      context: ""
+    };
+  }
+  const status = reviewGateGitResult(["status", "--short"], { cwd: root, deadline });
+  if (!status.ok) {
+    return {
+      trusted: false,
+      reason: reviewGateGitFailureReason("git status failed", status),
+      context: ""
+    };
+  }
+  const stagedStat = reviewGateGitResult(["diff", "--no-ext-diff", "--cached", "--stat"], { cwd: root, deadline });
+  if (!stagedStat.ok) {
+    return {
+      trusted: false,
+      reason: reviewGateGitFailureReason("git staged diff stat failed", stagedStat),
+      context: ""
+    };
+  }
+  const workingStat = reviewGateGitResult(["diff", "--no-ext-diff", "--stat"], { cwd: root, deadline });
+  if (!workingStat.ok) {
+    return {
+      trusted: false,
+      reason: reviewGateGitFailureReason("git working diff stat failed", workingStat),
+      context: ""
+    };
+  }
+  const stagedDiff = reviewGateGitResult(["diff", "--no-ext-diff", "--cached", "--", "."], { cwd: root, deadline });
+  if (!stagedDiff.ok) {
+    return {
+      trusted: false,
+      reason: reviewGateGitFailureReason("git staged diff failed", stagedDiff),
+      context: ""
+    };
+  }
+  const workingDiff = reviewGateGitResult(["diff", "--no-ext-diff", "--", "."], { cwd: root, deadline });
+  if (!workingDiff.ok) {
+    return {
+      trusted: false,
+      reason: reviewGateGitFailureReason("git working diff failed", workingDiff),
+      context: ""
+    };
+  }
+  const untracked = reviewGateUntrackedContext(root, deadline);
+  if (!untracked.trusted) {
+    return untracked;
+  }
+  if (reviewGateRemainingMs(deadline) <= 0) {
+    return {
+      trusted: false,
+      reason: "review gate timeout budget exhausted after git context",
+      context: ""
+    };
+  }
+  const context = [
+    `Repository: ${root}`,
+    status.output ? `Status:\n${status.output}` : "Status: clean",
+    stagedStat.output ? `Staged diff stat:\n${stagedStat.output}` : "",
+    workingStat.output ? `Working diff stat:\n${workingStat.output}` : "",
+    stagedDiff.output ? `Staged diff:\n${stagedDiff.output}` : "",
+    workingDiff.output ? `Working diff:\n${workingDiff.output}` : "",
+    untracked.context ? `Untracked files:\n${untracked.context}` : ""
+  ].filter(Boolean).join("\n\n");
+  return { trusted: true, reason: "", context };
 }
 
 function focusBlock(args) {
@@ -863,7 +1079,9 @@ function runDoctor(rawArgs) {
     `Current selection: ${payload.selected.current.ok ? `${payload.selected.current.modelProvider} ${payload.selected.current.model}` : `error - ${payload.selected.current.error}`}`,
     `Gemini models: ${payload.models.gemini.length}`,
     `Claude models: ${payload.models.claude.length}`,
-    `Unsupported models rejected: ${payload.models.unsupported.length}`
+    `Unsupported models rejected: ${payload.models.unsupported.length}`,
+    `Hooks supported: ${payload.hooks.supportedEvents.join(", ")}`,
+    `Hooks unsupported: ${payload.hooks.unsupportedEvents.join(", ")}`
   ];
   if (!payload.agy.available) {
     lines.push(`Antigravity error: ${conciseDiagnostic(payload.agy.helpError) || `help exited ${payload.agy.helpStatus}`}`);
@@ -1196,7 +1414,7 @@ function runReviewGate(rawArgs) {
     return;
   }
   const args = parseArgsOrExit(rawArgs);
-  args.timeout = Math.min(args.timeout || DEFAULT_TIMEOUT_MS, REVIEW_GATE_INNER_TIMEOUT_MS);
+  const deadline = reviewGateDeadline(reviewGateTimeoutBudgetMs(process.env, args.timeout));
   if (args.help) {
     process.stdout.write("Usage: antigravity-companion.mjs review-gate [--model-provider gemini|claude] [--model <label>] [focus]\n");
     return;
@@ -1204,20 +1422,39 @@ function runReviewGate(rawArgs) {
 
   let result;
   try {
-    const preflight = antigravityPreflight(process.env, args);
+    const preflightBudget = reviewGateRemainingMs(deadline);
+    if (preflightBudget <= 0) {
+      warnReviewGate("timeout budget exhausted before preflight; allowing stop");
+      return;
+    }
+    const preflight = antigravityPreflight(process.env, { ...args, timeout: preflightBudget });
+    if (reviewGateRemainingMs(deadline) <= 0) {
+      warnReviewGate("timeout budget exhausted after preflight; allowing stop");
+      return;
+    }
     if (!preflight.ok) {
       warnReviewGate(`runtime unavailable; allowing stop: ${preflight.error || `missing ${preflight.missing.join(", ")}`}`);
+      return;
+    }
+    const context = reviewGateGitContext({ deadline });
+    if (!context.trusted) {
+      warnReviewGate(`${context.reason || "repository context unavailable"}; allowing stop`);
+      return;
+    }
+    const remaining = reviewGateRemainingMs(deadline);
+    if (remaining <= 0) {
+      warnReviewGate("timeout budget exhausted before model call; allowing stop");
       return;
     }
     const prompt = renderCommandPrompt("review-gate", {
       ROLE: "stop-gate",
       ROLE_BRIEF: "Block only concrete issues that should prevent Codex from stopping.",
       TASK: focusBlock(args),
-      GIT_CONTEXT: gitContext(),
+      GIT_CONTEXT: context.context,
       MODEL_PROVIDER: preflight.modelProvider,
       MODEL: preflight.model
     });
-    result = antigravityPrint(prompt, { ...args, preflight }, process.env);
+    result = antigravityPrint(prompt, { ...args, timeout: remaining, preflight }, process.env);
   } catch (error) {
     warnReviewGate(`runtime error; allowing stop: ${error.message || String(error)}`);
     return;

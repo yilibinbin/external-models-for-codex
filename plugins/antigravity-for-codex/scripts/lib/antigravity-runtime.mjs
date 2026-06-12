@@ -255,7 +255,11 @@ function readAgyLogDiagnostic(logFile) {
 
 export function antigravityPreflight(env = process.env, options = {}) {
   const command = agyCommand(env);
-  const result = runCommand(command, ["--help"], { env });
+  const commandOptions = { env };
+  if (Number.isFinite(options.timeout) && options.timeout > 0) {
+    commandOptions.timeout = options.timeout;
+  }
+  const result = runCommand(command, ["--help"], commandOptions);
   const help = result.stdout || result.stderr || "";
   const capabilities = parseAgyHelp(help);
   let selected = { modelProvider: "", model: "" };
