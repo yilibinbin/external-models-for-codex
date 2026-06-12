@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { renderWorkflow, validateWorkflow } from "./github-actions.mjs";
+import { installedEntry as installedClaudePluginEntry } from "./install-consistency.mjs";
 import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.18.1";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.18.2";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -141,19 +142,6 @@ function commandExists(name) {
   return check.status === 0;
 }
 
-function claudePluginFromCodexList(parsed) {
-  const installed = Array.isArray(parsed?.installed) ? parsed.installed : [];
-  return installed.find((plugin) => {
-    if (!plugin || typeof plugin !== "object") {
-      return false;
-    }
-    if (plugin.pluginId === "claude-for-codex@external-models-for-codex") {
-      return true;
-    }
-    return plugin.name === "claude-for-codex" && plugin.marketplaceName === "external-models-for-codex";
-  });
-}
-
 function validateCodexInstalledClaudePlugin(listStdout) {
   let parsed;
   try {
@@ -161,7 +149,7 @@ function validateCodexInstalledClaudePlugin(listStdout) {
   } catch (error) {
     return { ok: false, detail: `plugin list JSON parse failed: ${error.message}` };
   }
-  const plugin = claudePluginFromCodexList(parsed);
+  const plugin = installedClaudePluginEntry(parsed);
   if (!plugin) {
     return { ok: false, detail: "claude-for-codex@external-models-for-codex missing from codex plugin list" };
   }
@@ -182,9 +170,9 @@ function checkManifest(root) {
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.18.1", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.18.1"), "changelog-version", "CHANGELOG contains 0.18.1"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.18.1`"), "readme-current-version", "README current version is 0.18.1"),
+    result(manifest.version === "0.18.2", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.18.2"), "changelog-version", "CHANGELOG contains 0.18.2"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.18.2`"), "readme-current-version", "README current version is 0.18.2"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -318,6 +306,15 @@ function checkNativeReleaseAssets(root) {
         fs.readFileSync(doctor, "utf8").includes("semanticCapabilities"),
       "doctor-command",
       "doctor --json reports cheap diagnostics without Claude prompt execution"
+    ),
+    result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "install-consistency.mjs")), "install-consistency-module"),
+    result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "project-instructions.mjs")), "project-instructions-module"),
+    result(qualityPolicy.includes("explanation:"), "quality-policy-explanation"),
+    result(
+      ["review.md", "multi-review-role.md", "adversarial-review.md", "plan.md", "rescue.md"].every((prompt) =>
+        fs.readFileSync(path.join(pluginRoot, "prompts", prompt), "utf8").includes("PROJECT_INSTRUCTIONS_BLOCK")
+      ),
+      "project-instructions-prompts"
     ),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
     result(

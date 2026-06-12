@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.18.1`
+- Current version: `0.18.2`
 
 Published capabilities:
 
@@ -148,6 +148,15 @@ For a cheap health check that does not run a Claude prompt or spend model quota:
 node plugins/claude-for-codex/scripts/claude-companion.mjs doctor --json
 ```
 
+`doctor --json` also reports install consistency between the running `claude-for-codex` plugin manifest and Codex's enabled `claude-for-codex@external-models-for-codex` registry entry. If Codex reports an older installed version than the running plugin, run:
+
+```bash
+codex plugin marketplace upgrade external-models-for-codex
+codex plugin add claude-for-codex@external-models-for-codex
+```
+
+Review, multi-review, adversarial review, plan, and rescue prompts automatically include bounded advisory project rules from `CLAUDE.md`, `REVIEW.md`, `.claude/review.md`, and `.claude/CLAUDE.md`. Symlinks and files outside the workspace are ignored. `capabilities --json` includes a quality-policy explanation so Codex can report why `--quality auto|fast|standard|strong|max` chose a model and effort.
+
 ## Install From This Repository
 
 ```bash
@@ -162,7 +171,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -275,9 +284,9 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`. This repository also ships a fork-safe CI dogfood workflow that runs syntax checks, focused pytest, `release-check --ci-simulate --json`, and `git diff --check` for Claude for Codex changes.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.1`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.18.1` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.18.1` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.18.2` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.18.2` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

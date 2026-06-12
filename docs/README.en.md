@@ -15,7 +15,7 @@ Natural-language Claude routing rule: users should ask for Claude normally, for 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
@@ -171,6 +171,8 @@ Claude native SDK mode is explicit and experimental until live SDK subagent smok
 SDK native subagent structured reviews use nested per-role review objects and remain an explicit opt-in path. The default review backend is unchanged.
 
 Claude for Codex supports `--quality auto|fast|standard|strong|max`. `auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size. `fast` maps to `sonnet` plus low effort, `standard` maps to `sonnet` plus high effort, `strong` maps to `opus` plus xhigh effort, and `max` maps to the strongest advertised local Claude alias with max effort, preferring `best`, then `fable`, then `opus`. Explicit `--model` and `--effort` always win. The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`; `ultracode` is not passed as `--effort`, and `ultrareview` remains a separate explicit-cost command. The shared model alias registry covers aliases such as `best`, `fable`, `opus`, `sonnet`, `haiku`, `opusplan`, `opus[1m]`, `sonnet[1m]`, and `inherit` without duplicated hardcoded allowlists. `review-gate` remains capped to `standard` unless manually run with explicit `--quality strong|max`.
+
+Claude for Codex diagnostics include install consistency between the running plugin manifest and Codex's enabled registry entry. Review, multi-review, adversarial review, plan, and rescue prompts include bounded advisory project rules from `CLAUDE.md`, `REVIEW.md`, `.claude/review.md`, and `.claude/CLAUDE.md`; symlinks and outside-workspace files are ignored. `capabilities --json` includes an explanation for adaptive quality routing.
 
 ### Fable / top-model routing
 

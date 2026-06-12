@@ -107,6 +107,23 @@ export function profileForQuality(quality, context = {}) {
   return profile;
 }
 
+function qualityExplanation({ quality, profile, explicitModel, explicitEffort, topModel }) {
+  const lines = [
+    `requested quality ${quality}`,
+    `resolved quality ${profile.quality}`,
+    explicitModel ? "model was explicitly supplied by the user" : `model came from ${topModel?.source || "quality-policy"}`,
+    explicitEffort ? "effort was explicitly supplied by the user" : "effort came from quality-policy"
+  ];
+  if (profile.topModel && !explicitModel) {
+    if (topModel?.source === "default") {
+      lines.push("top aliases were not advertised by Claude Code; falling back to opus alias");
+    } else if (topModel?.model) {
+      lines.push(`top-model routing selected ${topModel.model}`);
+    }
+  }
+  return lines;
+}
+
 export function resolveQualityPolicy(command, args = {}, env = process.env, signals = {}, capabilities = {}) {
   const explicitQuality = args.quality !== undefined;
   const rawQuality = explicitQuality ? args.quality : env[QUALITY_ENV] || "auto";
@@ -132,6 +149,7 @@ export function resolveQualityPolicy(command, args = {}, env = process.env, sign
     topModelProfile: Boolean(profile.topModel),
     topModelSelected: Boolean(!explicitModel && profile.topModel && topModel?.model !== "opus"),
     fallbackModel: !explicitModel && profile.topModel ? topModel?.fallbackModel || "" : "",
+    explanation: qualityExplanation({ quality, profile, explicitModel, explicitEffort, topModel }),
     score: quality === "auto" ? scoreQuality(command, args, signals) : null,
     signals: {
       changedFiles: Number(signals.changedFiles ?? 0),

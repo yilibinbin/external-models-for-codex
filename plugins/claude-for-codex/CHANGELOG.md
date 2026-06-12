@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.18.2 - 2026-06-12
+
+### Added
+
+- Add install consistency diagnostics for stale Codex registry entries and mismatched installed cache manifests.
+- Add explainable adaptive quality routing metadata so Codex can report why Claude model and effort aliases were selected.
+- Add bounded Claude project review instructions from workspace advisory files with XML escaping and workspace-bound path checks.
+
+### Fixed
+
+- Reuse the shared Claude plugin-list matcher across release checks and doctor diagnostics.
+- Stabilize Claude background timeout and cancellation regressions under loaded test runs.
+- Clarify top-model fallback explanations so env-selected aliases do not report default fallback behavior.
+
 ## 0.18.1 - 2026-06-12
 
 ### Fixed
