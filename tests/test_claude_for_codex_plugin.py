@@ -8635,6 +8635,27 @@ def test_release_check_knows_claude_0160_native_assets():
     assert checks["read-only-sdk-structured-output"]["ok"] is True
     assert checks["sdk-native-structured-review-contract"]["ok"] is True
     assert checks["skills-natural-language-routing"]["ok"] is True
+    assert checks["install-consistency-module"]["ok"] is True
+    assert checks["project-instructions-module"]["ok"] is True
+    assert checks["quality-policy-explanation"]["ok"] is True
+    assert checks["project-instructions-prompts"]["ok"] is True
+
+
+def test_release_check_covers_next_hardening_guards():
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "release-check", "--ci-simulate", "--json"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    checks = {check["name"]: check for check in payload["checks"]}
+    assert checks["install-consistency-module"]["ok"] is True
+    assert checks["project-instructions-module"]["ok"] is True
+    assert checks["quality-policy-explanation"]["ok"] is True
+    assert checks["project-instructions-prompts"]["ok"] is True
 
 
 def test_release_check_knows_subagent_review_skill():

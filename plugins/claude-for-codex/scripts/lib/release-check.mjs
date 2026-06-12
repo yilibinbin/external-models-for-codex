@@ -319,6 +319,15 @@ function checkNativeReleaseAssets(root) {
       "doctor-command",
       "doctor --json reports cheap diagnostics without Claude prompt execution"
     ),
+    result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "install-consistency.mjs")), "install-consistency-module"),
+    result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "project-instructions.mjs")), "project-instructions-module"),
+    result(qualityPolicy.includes("explanation:"), "quality-policy-explanation"),
+    result(
+      ["review.md", "multi-review-role.md", "adversarial-review.md", "plan.md", "rescue.md"].every((prompt) =>
+        fs.readFileSync(path.join(pluginRoot, "prompts", prompt), "utf8").includes("PROJECT_INSTRUCTIONS_BLOCK")
+      ),
+      "project-instructions-prompts"
+    ),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
     result(
       companion.includes("--agent-team") &&

@@ -148,6 +148,15 @@ For a cheap health check that does not run a Claude prompt or spend model quota:
 node plugins/claude-for-codex/scripts/claude-companion.mjs doctor --json
 ```
 
+`doctor --json` also reports install consistency between the running `claude-for-codex` plugin manifest and Codex's enabled `claude-for-codex@external-models-for-codex` registry entry. If Codex reports an older installed version than the running plugin, run:
+
+```bash
+codex plugin marketplace upgrade external-models-for-codex
+codex plugin add claude-for-codex@external-models-for-codex
+```
+
+Review, multi-review, adversarial review, plan, and rescue prompts automatically include bounded advisory project rules from `CLAUDE.md`, `REVIEW.md`, `.claude/review.md`, and `.claude/CLAUDE.md`. Symlinks and files outside the workspace are ignored. `capabilities --json` includes a quality-policy explanation so Codex can report why `--quality auto|fast|standard|strong|max` chose a model and effort.
+
 ## Install From This Repository
 
 ```bash

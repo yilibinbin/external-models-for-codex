@@ -95,6 +95,8 @@ Claude for Codex supports `--quality auto|fast|standard|strong|max`. The policy 
 
 Claude for Codex 0.18.1 keeps those aliases in a shared model alias registry used by CLI policy and SDK subagent selection. It also records compact outcome classification metadata for CLI/SDK runs, exposes `doctor --json` as a cheap no-prompt health check, documents SDK subagents as fresh isolated context reviewers, ships fork-safe repository CI validation, and hardens SDK timeout handling across permission-compatibility retries.
 
+Claude for Codex diagnostics now include install consistency between the running plugin manifest and Codex's enabled registry entry. Review, multi-review, adversarial review, plan, and rescue prompts include bounded advisory project rules from `CLAUDE.md`, `REVIEW.md`, `.claude/review.md`, and `.claude/CLAUDE.md`; symlinks and outside-workspace files are ignored. `capabilities --json` also explains adaptive quality routing decisions.
+
 ### Fable / top-model routing
 
 Claude for Codex treats `--quality max` as the strongest local Claude tier. On Claude Code versions that advertise a top model alias, the runtime prefers `best`, then `fable`, then falls back to `opus`. When a top model is selected through the CLI backend and `--fallback-model` is available, the plugin adds Claude Code's native fallback unless you supplied your own fallback. It uses `--fallback-model opus,sonnet` only when the installed CLI help advertises comma-separated fallback lists; otherwise it uses `--fallback-model opus`. This fallback only handles Claude Code-supported model unavailable, overload, or server-side model errors; it does not handle auth, quota, billing, rate-limit, network, or request-size failures.
