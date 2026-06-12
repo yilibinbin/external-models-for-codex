@@ -47,7 +47,7 @@ def test_sanitized_env_removes_antigravity_runtime_flags(monkeypatch):
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.5.4"
+    assert manifest["version"] == "0.6.0"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
@@ -69,6 +69,10 @@ def test_antigravity_manifest_is_valid_json():
         "Opt-in Stop hook gate",
         "Codex-Antigravity collaboration",
     ]
+    assert len(manifest["interface"]["defaultPrompt"]) <= 3
+    assert manifest["interface"]["composerIcon"].startswith("./assets/")
+    assert manifest["interface"]["logo"].startswith("./assets/")
+    assert all(item.startswith("./assets/") for item in manifest["interface"]["screenshots"])
     text = json.dumps(manifest)
     assert "Gemini CLI" not in text
     assert "Claude Code CLI" not in text
@@ -346,7 +350,7 @@ def write_fake_agy(
         completion = (
             "const prompt = argv[argv.indexOf('--prompt') + 1] || '';\n"
             "let output = 'ANTIGRAVITY_FOR_CODEX_SMOKE_OK';\n"
-            "if (prompt.includes('ALLOW:') || prompt.includes('stop-gate')) output = 'ALLOW: ANTIGRAVITY_FOR_CODEX_SMOKE_OK';\n"
+            "if (prompt.includes('<role_name>stop-gate</role_name>') || prompt.includes('Run a stop-gate review')) output = 'ALLOW: ANTIGRAVITY_FOR_CODEX_SMOKE_OK';\n"
             "else if (prompt.includes('structured review') || prompt.includes('JSON')) output = '{\"verdict\":\"approve\",\"summary\":\"ANTIGRAVITY_FOR_CODEX_SMOKE_OK\",\"findings\":[],\"next_steps\":[]}';\n"
             f"setTimeout(() => {{ fs.writeSync(1, output); process.exit({int(exit_code)}); }}, {int(delay_ms)});\n"
         )
@@ -1084,8 +1088,10 @@ def test_runtime_async_timeout_kills_agy_that_ignores_sigterm(tmp_path):
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
         "const started = Date.now();"
+        "const preflight = r.antigravityPreflight(process.env, {timeout: 2000});"
+        "if (!preflight.ok) throw new Error(preflight.error || 'preflight failed');"
         "const result = await r.antigravityPrintAsync('timeout check', "
-        "{timeout: 100, timeoutKillGraceMs: 50, timeoutForceResolveGraceMs: 50}, process.env);"
+        "{preflight, timeout: 100, timeoutKillGraceMs: 50, timeoutForceResolveGraceMs: 50}, process.env);"
         "result.elapsedMs = Date.now() - started;"
         "process.stdout.write(JSON.stringify(result));"
     )
@@ -1114,8 +1120,10 @@ def test_runtime_async_timeout_close_handler_keeps_timeout_outcome(tmp_path):
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "const preflight = r.antigravityPreflight(process.env, {timeout: 2000});"
+        "if (!preflight.ok) throw new Error(preflight.error || 'preflight failed');"
         "const result = await r.antigravityPrintAsync('timeout check', "
-        "{timeout: 100, timeoutKillGraceMs: 1000, timeoutForceResolveGraceMs: 1000}, process.env);"
+        "{preflight, timeout: 100, timeoutKillGraceMs: 1000, timeoutForceResolveGraceMs: 1000}, process.env);"
         "process.stdout.write(JSON.stringify(result));"
     )
     result = run_node_eval(source, env)
@@ -3802,7 +3810,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.5.4\n"
+        "# antigravity-for-codex-v0.6.0\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -3841,7 +3849,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.5.4\n"
+        "          echo --ref antigravity-for-codex-v0.6.0\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
@@ -4275,8 +4283,22 @@ def test_release_check_passes():
     assert "PASS manifest-name" in result.stdout
     assert "PASS manifest-version" in result.stdout
     assert "PASS docs-version-aligned" in result.stdout
-    assert "PASS marketplace-docs-release-ref" in result.stdout
     assert "PASS manifest-model-policy" in result.stdout
+    assert "PASS agy-capabilities-module" in result.stdout
+    assert "PASS agy-outcome-module" in result.stdout
+    assert "PASS doctor-command" in result.stdout
+    assert "PASS job-lifecycle-fingerprint" in result.stdout
+    assert "PASS hook-compat-module" in result.stdout
+    assert "PASS no-claude-native-executable-leakage" in result.stdout
+    assert "PASS no-raw-claude-executable-invocation" in result.stdout
+    assert "PASS docs-negative-claude-boundary" in result.stdout
+    assert "PASS no-local-absolute-paths" in result.stdout
+    assert "PASS manifest-default-prompts-limit" in result.stdout
+    assert "PASS manifest-composer-icon-relative" in result.stdout
+    assert "PASS manifest-logo-relative" in result.stdout
+    assert "PASS manifest-screenshots-relative" in result.stdout
+    assert "PASS review-gate-timeout-env" in result.stdout
+    assert "PASS background-idempotency-fingerprint" in result.stdout
     assert "PASS skills-natural-language-routing-paths" in result.stdout
     assert "PASS skills-natural-language-routing" in result.stdout
     assert "PASS agy-prompt-timeout-argv" in result.stdout
@@ -4292,6 +4314,7 @@ def test_release_check_passes():
     assert "PASS workflow-plugin-install" in result.stdout
     assert "PASS version-helper" in result.stdout
     assert "PASS release-ref-derived" in result.stdout
+    assert "PASS repository-install-docs-release-ref" in result.stdout
     assert "PASS docs-maturity-boundary" in result.stdout
     assert "PASS docs-no-unsupported-parity" in result.stdout
     assert "PASS docs-claude-through-antigravity-boundary" in result.stdout
@@ -4302,19 +4325,19 @@ def test_release_check_passes():
 
 
 def test_release_check_passes_from_installed_plugin_layout(tmp_path):
-    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.5.4"
+    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.6.0"
     shutil.copytree(PLUGIN, installed)
     runtime = installed / "scripts" / "antigravity-companion.mjs"
 
     result = subprocess.run([NODE, str(runtime), "release-check"], cwd=installed, env=sanitized_env(), capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-    assert "PASS marketplace-docs-release-ref - skipped repo-level docs in installed plugin layout" in result.stdout
     assert "PASS skills-natural-language-routing" in result.stdout
     assert "PASS github-actions-no-repo-relative-runtime-path" in result.stdout
+    assert "PASS repository-install-docs-release-ref" in result.stdout
 
 
-def test_release_check_enforces_repo_docs_when_source_layout_has_docs(tmp_path):
+def test_release_check_rejects_stale_source_layout_repository_install_docs(tmp_path):
     repo = tmp_path / "repo"
     plugin = repo / "plugins" / "antigravity-for-codex"
     shutil.copytree(PLUGIN, plugin)
@@ -4327,7 +4350,50 @@ def test_release_check_enforces_repo_docs_when_source_layout_has_docs(tmp_path):
     result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, env=sanitized_env(), capture_output=True, text=True)
 
     assert result.returncode == 1
-    assert "release-check failed: marketplace-docs-release-ref" in result.stderr
+    assert "FAIL repository-install-docs-release-ref" in result.stdout
+    assert "release-check failed: repository-install-docs-release-ref" in result.stderr
+
+
+def test_release_check_rejects_local_paths_in_shipped_prompts(tmp_path):
+    plugin = tmp_path / "antigravity-for-codex"
+    shutil.copytree(PLUGIN, plugin)
+    prompt = plugin / "prompts" / "review.md"
+    prompt.write_text(
+        prompt.read_text(encoding="utf8")
+        + "\nLeaked local paths: /home/example/project and C:\\Users\\example\\project\n",
+        encoding="utf8",
+    )
+    runtime = plugin / "scripts" / "antigravity-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, env=sanitized_env(), capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "FAIL no-local-absolute-paths" in result.stdout
+    assert "release-check failed: no-local-absolute-paths" in result.stderr
+
+
+def test_release_check_rejects_local_paths_in_shipped_assets(tmp_path):
+    plugin = tmp_path / "antigravity-for-codex"
+    shutil.copytree(PLUGIN, plugin)
+    asset = plugin / "assets" / "logo.svg"
+    asset.write_text(
+        asset.read_text(encoding="utf8")
+        + "\n<!-- Leaked local path: /Users/example/project/plugins/antigravity-for-codex -->\n",
+        encoding="utf8",
+    )
+    runtime = plugin / "scripts" / "antigravity-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, env=sanitized_env(), capture_output=True, text=True)
+
+    assert result.returncode == 1
+    assert "FAIL no-local-absolute-paths" in result.stdout
+    assert "release-check failed: no-local-absolute-paths" in result.stderr
+
+
+def test_antigravity_release_check_rejects_linux_home_paths_in_source_guard():
+    text = (PLUGIN / "scripts" / "antigravity-companion.mjs").read_text(encoding="utf8")
+    assert r"\/home\/" in text
+    assert "no-local-absolute-paths" in text
 
 
 def test_version_helper_matches_manifest():
@@ -4378,6 +4444,8 @@ def test_real_smoke_full_runs_review_shapes(tmp_path):
     argv_file = tmp_path / "agy-full-argv.json"
     env = companion_env(tmp_path, fake_agy(tmp_path, smart_smoke=True, capture_argv=argv_file))
     env["ANTIGRAVITY_FOR_CODEX_REAL_SMOKE"] = "1"
+    init_git_repo(tmp_path)
+    (tmp_path / ".gitignore").write_text("agy\nagy-full-argv.json\nstate/\n", encoding="utf8")
 
     result = subprocess.run(
         [NODE, str(runtime), "real-smoke", "--full", "--model-provider", "gemini", "--model", "Gemini Custom (High)", "--timeout-seconds", "5"],

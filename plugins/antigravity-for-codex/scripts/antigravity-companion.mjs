@@ -324,6 +324,79 @@ function exists(relativePath) {
   return fs.existsSync(path.join(ROOT_DIR, relativePath));
 }
 
+function shippedPluginTexts(roots = [
+  "scripts",
+  "hooks",
+  "skills",
+  "prompts",
+  "templates",
+  "contracts",
+  "schemas",
+  "assets",
+  "README.md",
+  "CHANGELOG.md",
+  ".codex-plugin/plugin.json"
+]) {
+  const results = [];
+  const visit = (relativePath) => {
+    const fullPath = path.join(ROOT_DIR, relativePath);
+    if (!fs.existsSync(fullPath)) return;
+    const stat = fs.statSync(fullPath);
+    if (stat.isDirectory()) {
+      for (const child of fs.readdirSync(fullPath)) visit(path.join(relativePath, child));
+      return;
+    }
+    if (stat.isFile() && /\.(mjs|json|md|yml|yaml|svg)$/.test(relativePath)) {
+      results.push({ relativePath, text: fs.readFileSync(fullPath, "utf8") });
+    }
+  };
+  for (const root of roots) visit(root);
+  return results;
+}
+
+function textScanPasses(items, forbidden) {
+  return items.every(({ text }) => forbidden.every((pattern) => !pattern.test(text)));
+}
+
+function isSourceRepositoryLayout() {
+  return path.resolve(REPO_ROOT_DIR, "plugins", "antigravity-for-codex") === ROOT_DIR;
+}
+
+function repositoryInstallDocsReleaseRefCheck() {
+  if (!isSourceRepositoryLayout()) {
+    return { ok: true, detail: "skipped outside source layout" };
+  }
+  const docs = ["README.md", "docs/README.en.md", "docs/README.zh-CN.md"];
+  const staleRefs = [];
+  const missingCurrentRef = [];
+  for (const relativePath of docs) {
+    const fullPath = path.join(REPO_ROOT_DIR, relativePath);
+    if (!fs.existsSync(fullPath)) {
+      missingCurrentRef.push(relativePath);
+      continue;
+    }
+    const text = fs.readFileSync(fullPath, "utf8");
+    if (!text.includes(`--ref ${RELEASE_REF}`)) {
+      missingCurrentRef.push(relativePath);
+    }
+    for (const match of text.matchAll(/antigravity-for-codex-v\d+\.\d+\.\d+/g)) {
+      if (match[0] !== RELEASE_REF) {
+        staleRefs.push(`${relativePath}:${match[0]}`);
+      }
+    }
+  }
+  if (missingCurrentRef.length || staleRefs.length) {
+    return {
+      ok: false,
+      detail: [
+        missingCurrentRef.length ? `missing ${RELEASE_REF} in ${missingCurrentRef.join(", ")}` : "",
+        staleRefs.length ? `stale refs ${staleRefs.join(", ")}` : ""
+      ].filter(Boolean).join("; ")
+    };
+  }
+  return { ok: true };
+}
+
 function parseArgsOrExit(rawArgs) {
   try {
     return parseArgs(rawArgs);
@@ -1703,38 +1776,80 @@ function runReleaseCheck(rawArgs) {
       return text
         && (naturalLanguageRoutingContract.githubActionsInitForbiddenSubstrings || []).every((forbidden) => !text.includes(forbidden));
     });
-  const marketplaceDocPaths = [
-    "README.md",
-    path.join("docs", "README.en.md"),
-    path.join("docs", "README.zh-CN.md")
-  ];
-  const marketplaceDocs = marketplaceDocPaths.map((relativePath) => ({
-    existsInRepo: fs.existsSync(path.join(REPO_ROOT_DIR, relativePath)),
-    text: repoTextIfExists(relativePath)
-  }));
-  const marketplaceDocsExistInRepo = marketplaceDocs.some((doc) => doc.existsInRepo);
-  const marketplaceDocsReleaseRefOk = marketplaceDocs
-    .filter((doc) => doc.existsInRepo)
-    .every((doc) => doc.text.includes(`--ref ${RELEASE_REF}`));
   const hooks = exists("hooks/hooks.json") ? readText("hooks/hooks.json") : "";
   const renderedWorkflow = renderWorkflow(ROOT_DIR, { releaseRef: RELEASE_REF });
   const workflowValidation = validateWorkflow(renderedWorkflow);
+  const repositoryInstallDocs = repositoryInstallDocsReleaseRefCheck();
   const matureCommands = expectedPublicCommands();
   const manifestCapabilities = Array.isArray(manifest.interface?.capabilities) ? manifest.interface.capabilities : [];
   const printHotPath = runtime.match(/export function antigravityPrintArgs[\s\S]*?export function antigravityPrint\(/)?.[0] || "";
+  const shippedTexts = shippedPluginTexts();
+  const executableTexts = shippedPluginTexts([
+    "scripts",
+    "hooks",
+    "prompts",
+    "templates",
+    "contracts",
+    "schemas",
+    ".codex-plugin/plugin.json"
+  ]);
+  const docsTexts = shippedPluginTexts(["README.md", "CHANGELOG.md", "skills"]);
+  const doctorText = shippedTexts.find(({ relativePath }) => relativePath === "scripts/lib/doctor.mjs")?.text || "";
+  const claudeWord = "cla" + "ude";
+  const fableWord = "Fa" + "ble";
+  const fallbackModelFlag = "--fallback-" + "model";
+  const ultrareviewWord = "ultra" + "review";
+  const ucWord = "ultra" + "code";
+  const forbiddenClaudeNativePatterns = [
+    new RegExp(`${claudeWord}-${fableWord}`, "i"),
+    new RegExp(`${fableWord} 5`, "i"),
+    new RegExp(`@anthropic-ai/${claudeWord}-agent-sdk`, "i"),
+    new RegExp(fallbackModelFlag, "i"),
+    new RegExp(`${claudeWord} ${ultrareviewWord}`, "i"),
+    new RegExp(ucWord, "i")
+  ];
+  const forbiddenRawClaudeExecutionPatterns = [
+    new RegExp(`\\b(?:spawn|spawnSync|execFile|execFileSync)\\(\\s*["']${claudeWord}["']`, "i"),
+    new RegExp(`\\b(?:exec|execSync)\\(\\s*["'][^"']*\\b${claudeWord}\\b`, "i"),
+    new RegExp(`\\b(?:command|cmd|binary|executable)\\s*[:=]\\s*["']${claudeWord}["']`, "i"),
+    new RegExp(`\\b${claudeWord}\\s+-p\\b`, "i")
+  ];
+  const forbiddenLocalPathPatterns = [
+    /\/Users\/[A-Za-z0-9._/-]+/,
+    /\/home\/[A-Za-z0-9._/-]+/,
+    /\/private\/var\/folders\//,
+    /[A-Za-z]:\\Users\\/
+  ];
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
     releaseCheckResult(manifest.version === PLUGIN_VERSION, "manifest-version"),
     releaseCheckResult(versionHelper.includes(`PLUGIN_VERSION = "${manifest.version}"`), "version-helper"),
     releaseCheckResult(readme.includes(`Version: ${PLUGIN_VERSION}`) && changelog.includes(`## ${PLUGIN_VERSION} `), "docs-version-aligned"),
-    releaseCheckResult(
-      !marketplaceDocsExistInRepo || marketplaceDocsReleaseRefOk,
-      "marketplace-docs-release-ref",
-      !marketplaceDocsExistInRepo ? "skipped repo-level docs in installed plugin layout" : ""
-    ),
     releaseCheckResult(RELEASE_REF === `antigravity-for-codex-v${PLUGIN_VERSION}`, "release-ref-derived"),
+    releaseCheckResult(repositoryInstallDocs.ok, "repository-install-docs-release-ref", repositoryInstallDocs.detail),
     releaseCheckResult(manifest.skills === "./skills/", "manifest-skills"),
     releaseCheckResult(manifestCapabilities.includes("Explicit Gemini or Claude model selection"), "manifest-model-policy"),
+    releaseCheckResult(exists("scripts/lib/agy-capabilities.mjs"), "agy-capabilities-module"),
+    releaseCheckResult(exists("scripts/lib/agy-outcome.mjs"), "agy-outcome-module"),
+    releaseCheckResult(
+      exists("scripts/lib/doctor.mjs")
+        && companion.includes('"doctor"')
+        && doctorText.includes("runDoctorCommand")
+        && doctorText.includes("typeof result.then"),
+      "doctor-command"
+    ),
+    releaseCheckResult(exists("scripts/lib/job-lifecycle.mjs") && exists("scripts/lib/worktree-fingerprint.mjs"), "job-lifecycle-fingerprint"),
+    releaseCheckResult(exists("scripts/lib/hook-compat.mjs"), "hook-compat-module"),
+    releaseCheckResult(textScanPasses(executableTexts, forbiddenClaudeNativePatterns), "no-claude-native-executable-leakage"),
+    releaseCheckResult(textScanPasses(executableTexts, forbiddenRawClaudeExecutionPatterns), "no-raw-claude-executable-invocation"),
+    releaseCheckResult(docsTexts.some(({ text }) => text.includes("not Antigravity features") || text.includes("does not claim Claude SDK")), "docs-negative-claude-boundary"),
+    releaseCheckResult(textScanPasses(shippedTexts, forbiddenLocalPathPatterns), "no-local-absolute-paths"),
+    releaseCheckResult(Array.isArray(manifest.interface?.defaultPrompt) && manifest.interface.defaultPrompt.length <= 3, "manifest-default-prompts-limit"),
+    releaseCheckResult(String(manifest.interface?.composerIcon || "").startsWith("./assets/"), "manifest-composer-icon-relative"),
+    releaseCheckResult(String(manifest.interface?.logo || "").startsWith("./assets/"), "manifest-logo-relative"),
+    releaseCheckResult((manifest.interface?.screenshots || []).every((item) => String(item).startsWith("./assets/")), "manifest-screenshots-relative"),
+    releaseCheckResult(companion.includes("ANTIGRAVITY_FOR_CODEX_REVIEW_GATE_TIMEOUT_MS"), "review-gate-timeout-env"),
+    releaseCheckResult(companion.includes("deriveJobIdempotencyKey") && companion.includes("worktreeFingerprint"), "background-idempotency-fingerprint"),
     releaseCheckResult(githubActionsForbiddenPluginPathsExist, "skills-natural-language-routing-paths"),
     releaseCheckResult(
       naturalLanguageRoutingContractLoaded
