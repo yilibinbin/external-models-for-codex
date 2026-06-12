@@ -67,12 +67,13 @@ export function classifyJobLiveness(job, options = {}) {
     return { state: "terminal", status, staleForMs: 0 };
   }
   if (status === "queued" || status === "reserved") {
-    const created = parseTime(job?.createdAt);
-    const staleForMs = created === null ? 0 : Math.max(0, now - created);
+    const updated = status === "queued" ? parseTime(job?.updatedAt) : null;
+    const referenceTime = updated !== null ? updated : parseTime(job?.createdAt);
+    const staleForMs = referenceTime === null ? 0 : Math.max(0, now - referenceTime);
     const queuedLostAfterMs = Number.isFinite(options.queuedLostAfterMs)
       ? options.queuedLostAfterMs
       : JOB_QUEUED_LOST_AFTER_MS;
-    if (created !== null && staleForMs >= queuedLostAfterMs) {
+    if (referenceTime !== null && staleForMs >= queuedLostAfterMs) {
       return { state: "lost", status, staleForMs, queued: true };
     }
     return { state: "queued", status, staleForMs };

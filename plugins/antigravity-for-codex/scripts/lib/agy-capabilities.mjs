@@ -2,16 +2,21 @@ export const DEFAULT_GEMINI_MODEL = "Gemini 3.1 Pro (High)";
 export const DEFAULT_CLAUDE_MODEL = "Claude Sonnet 4.6 (Thinking)";
 export const VALID_AGY_MODEL_PROVIDERS = Object.freeze(["gemini", "claude"]);
 
+function hasStandaloneFlag(text, flag) {
+  const escaped = flag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|\\s)${escaped}(?=$|\\s|=)`).test(text);
+}
+
 export function parseAgyHelp(helpText = "") {
   const text = String(helpText || "");
   return {
-    prompt: text.includes("--prompt"),
-    model: text.includes("--model"),
-    print: text.includes("--print"),
-    printTimeout: text.includes("--print-timeout"),
-    sandbox: text.includes("--sandbox"),
-    addDir: text.includes("--add-dir"),
-    logFile: text.includes("--log-file"),
+    prompt: hasStandaloneFlag(text, "--prompt"),
+    model: hasStandaloneFlag(text, "--model"),
+    print: hasStandaloneFlag(text, "--print"),
+    printTimeout: hasStandaloneFlag(text, "--print-timeout"),
+    sandbox: hasStandaloneFlag(text, "--sandbox"),
+    addDir: hasStandaloneFlag(text, "--add-dir"),
+    logFile: hasStandaloneFlag(text, "--log-file"),
     modelsCommand: /\bmodels\b/.test(text),
     pluginCommand: /\bplugin\b/.test(text)
   };

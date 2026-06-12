@@ -7,6 +7,7 @@ import {
   DEFAULT_GEMINI_MODEL,
   normalizeAgyProvider,
   parseAgyHelp,
+  parseAgyModels,
   selectAgyModel,
   validateAgyModelForProvider
 } from "./agy-capabilities.mjs";
@@ -435,7 +436,8 @@ export function selectedModel(env = process.env, options = {}) {
   const selected = selectAgyModel({
     provider: options.modelProvider || env[MODEL_PROVIDER_ENV],
     explicitModel: options.model,
-    env
+    env,
+    models: options.models || null
   });
   return { modelProvider: selected.modelProvider, model: selected.model };
 }
@@ -485,9 +487,27 @@ function collapseRepeatedDiagnostic(text) {
   return diagnostic;
 }
 
+function escapedRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function redactFileSystemPaths(text) {
+  let redacted = String(text || "");
+  const home = process.env.HOME || "";
+  if (home) {
+    const homePattern = escapedRegExp(home).replace(/\\\//g, "[/\\\\]+");
+    redacted = redacted.replace(new RegExp(homePattern, "g"), "[redacted-path]");
+  }
+  return redacted
+    .replace(/\\\\[A-Za-z0-9._$ -]+(?:\\{1,2}[^\r\n"'`<>|]+)+/g, "[redacted-path]")
+    .replace(/(^|[\s"'(=])[A-Za-z]:(?:\\{1,2}|\/)[^\r\n"'`<>|]+/g, "$1[redacted-path]")
+    .replace(/(^|[\s"'(=])~(?:\/|\\)[^\r\n"'`<>|]*/g, "$1[redacted-path]")
+    .replace(/(^|[\s"'(=])\/(?:Users|home|private\/var\/folders|root|Volumes|workspace|workspaces|mnt)[^\r\n"'`<>|]*/g, "$1[redacted-path]");
+}
+
 function sanitizeDiagnostic(text) {
-  const redacted = String(text || "")
-    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]")
+  const redacted = redactFileSystemPaths(String(text || "")
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[redacted-email]"))
     .replace(/\s+/g, " ")
     .trim();
   return collapseRepeatedDiagnostic(redacted);
@@ -532,10 +552,15 @@ export function antigravityPreflight(env = process.env, options = {}) {
   const result = runCommand(command, ["--help"], commandOptions);
   const help = result.stdout || result.stderr || "";
   const capabilities = parseAgyHelp(help);
+  const catalog = options.models
+    ? { available: true, status: 0, models: options.models, error: "" }
+    : (capabilities.modelsCommand
+      ? antigravityModelCatalog(env, { timeout: options.modelCatalogTimeout })
+      : { available: false, status: 1, models: parseAgyModels(""), error: "agy models command not reported" });
   let selected = { modelProvider: "", model: "" };
   let modelError = "";
   try {
-    selected = selectedModel(env, options);
+    selected = selectedModel(env, { ...options, models: catalog.models });
   } catch (error) {
     modelError = error.message || String(error);
   }
@@ -551,19 +576,26 @@ export function antigravityPreflight(env = process.env, options = {}) {
     capabilities,
     modelProvider: selected.modelProvider,
     model: selected.model,
+    modelCatalog: {
+      available: catalog.available,
+      status: catalog.status,
+      models: catalog.models,
+      count: catalog.models?.all?.length || 0,
+      selectedModelListed: Boolean(catalog.models?.all?.includes(selected.model)),
+      error: catalog.error
+    },
     modelPolicyError: Boolean(modelError),
     error: modelError || (result.status === 0 ? "" : (result.stderr || result.error || "agy --help failed").trim())
   };
 }
 
-export function antigravityModelCatalog(env = process.env) {
+export function antigravityModelCatalog(env = process.env, options = {}) {
   const command = agyCommand(env);
-  const result = runCommand(command, ["models"], { env, timeout: 30 * 1000 });
-  const models = result.status === 0
-    ? result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
-    : [];
+  const result = runCommand(command, ["models"], { env, timeout: options.timeout || 10 * 1000 });
+  const models = result.status === 0 ? parseAgyModels(result.stdout) : parseAgyModels("");
   return {
     available: result.status === 0,
+    status: result.status,
     models,
     error: result.status === 0 ? "" : (result.stderr || result.error || "").trim()
   };
@@ -571,10 +603,7 @@ export function antigravityModelCatalog(env = process.env) {
 
 export function antigravityModelDiagnostics(env = process.env, options = {}) {
   const preflight = antigravityPreflight(env, options);
-  const capabilities = preflight.capabilities || {};
-  const catalog = capabilities.modelsCommand
-    ? antigravityModelCatalog(env)
-    : { available: false, models: [], error: "agy models command not reported" };
+  const catalog = preflight.modelCatalog || { available: false, status: 1, models: parseAgyModels(""), error: "agy models command not reported" };
   return {
     ok: true,
     provider: {
@@ -583,8 +612,8 @@ export function antigravityModelDiagnostics(env = process.env, options = {}) {
     },
     modelCatalog: {
       available: catalog.available,
-      selectedModelListed: catalog.models.includes(preflight.model),
-      count: catalog.models.length,
+      selectedModelListed: Boolean(catalog.models?.all?.includes(preflight.model)),
+      count: catalog.models?.all?.length || 0,
       error: catalog.error
     }
   };
@@ -774,10 +803,11 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
     child.on("close", (status, signal) => {
       const output = String(stdout || "").trim();
       const emptyOutput = !timedOut && status === 0 && !output;
-      const logDiagnostic = emptyOutput ? readAgyLogDiagnostic(invocation.logFile) : "";
-      const timedOutStderr = signal
+      const logDiagnostic = (timedOut || emptyOutput) ? readAgyLogDiagnostic(invocation.logFile) : "";
+      const timedOutText = signal
         ? `${stderr}${stderr ? "\n" : ""}terminated by ${signal} after timeout`
         : `${stderr}${stderr ? "\n" : ""}Antigravity timeout.`;
+      const timedOutStderr = outcomeStderr({ status: 1, stdout: output, stderr: timedOutText, errorCode: "ETIMEDOUT" }, { logDiagnostic });
       const normalized = {
         status: timedOut || emptyOutput ? 1 : status ?? 1,
         stdout: output,
@@ -789,9 +819,11 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
         timedOut,
         provider: invocation.preflight
       };
-      const outcome = emptyOutput
-        ? classifyAgyOutcome({ status, stdout: output, stderr, errorCode: "" }, { logDiagnostic })
-        : classifyAgyOutcome(normalized);
+      const outcome = timedOut
+        ? classifyAgyOutcome(normalized, { logDiagnostic })
+        : (emptyOutput
+          ? classifyAgyOutcome({ status, stdout: output, stderr, errorCode: "" }, { logDiagnostic })
+          : classifyAgyOutcome(normalized));
       settle({ ...normalized, outcome });
       cleanupAgyLogFile(invocation.logFile);
     });

@@ -883,12 +883,16 @@ Available subcommands:
   plugin
 `;
 const capabilities = parseAgyHelp(help);
+const timeoutOnlyCapabilities = parseAgyHelp('Usage of agy:\\n  --print-timeout\\n  --prompt\\n');
 const models = parseAgyModels(`Gemini 3.1 Pro (High)
 Claude Sonnet 4.6 (Thinking)
 GPT-OSS 120B (Medium)
 `);
 if (!capabilities.prompt || !capabilities.printTimeout || !capabilities.logFile || !capabilities.modelsCommand) {
   throw new Error('expected key agy capabilities');
+}
+if (timeoutOnlyCapabilities.print) {
+  throw new Error('--print-timeout must not imply standalone --print support');
 }
 if (models.gemini[0] !== 'Gemini 3.1 Pro (High)') throw new Error('gemini model missing');
 if (models.claude[0] !== 'Claude Sonnet 4.6 (Thinking)') throw new Error('claude model missing');
@@ -1151,10 +1155,15 @@ def test_runtime_async_timeout_close_handler_keeps_timeout_outcome(tmp_path):
     agy = tmp_path / "agy"
     agy.write_text(
         "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
         "const argv = process.argv.slice(2);\n"
         "if (argv.join(' ') === '--help') { process.stdout.write(`Usage of agy:\\n  --log-file\\n  --model\\n  --print-timeout\\n  --prompt\\n`); process.exit(0); }\n"
         "if (argv.join(' ') === 'models') { process.stdout.write('Gemini 3.1 Pro (High)\\nClaude Sonnet 4.6 (Thinking)\\n'); process.exit(0); }\n"
-        "process.on('SIGTERM', () => { process.exit(0); });\n"
+        "process.on('SIGTERM', () => {\n"
+        "  const logFileIndex = argv.indexOf('--log-file');\n"
+        "  if (logFileIndex >= 0) fs.writeFileSync(argv[logFileIndex + 1], 'E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): timeout quota detail\\n');\n"
+        "  process.exit(0);\n"
+        "});\n"
         "setInterval(() => {}, 1000);\n",
         encoding="utf8",
     )
@@ -1176,6 +1185,7 @@ def test_runtime_async_timeout_close_handler_keeps_timeout_outcome(tmp_path):
     assert payload["errorCode"] == "ETIMEDOUT"
     assert payload["outcome"]["kind"] == "timeout"
     assert "timeout" in payload["stderr"].lower()
+    assert "RESOURCE_EXHAUSTED (code 429)" in payload["stderr"]
     assert "empty-output" not in payload["stderr"]
 
 
@@ -1259,6 +1269,22 @@ def test_runtime_log_diagnostic_collapses_duplicate_resource_errors():
     assert result.returncode == 0, result.stderr
     assert result.stdout == "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 38h51m45s"
     assert result.stdout.count("RESOURCE_EXHAUSTED") == 1
+
+
+def test_runtime_log_diagnostic_redacts_emails_and_paths():
+    source = """
+const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');
+const log = 'E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): user dev@example.com in /Users/example/My Project/file.js and C:\\\\Projects\\\\secret\\\\file.js and ~/local/token\\n';
+process.stdout.write(r.antigravityLogDiagnostic(log));
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+    assert "[redacted-email]" in result.stdout
+    assert "[redacted-path]" in result.stdout
+    assert "dev@example.com" not in result.stdout
+    assert "/Users/example" not in result.stdout
+    assert "C:\\Projects" not in result.stdout
+    assert "~/local" not in result.stdout
 
 
 def test_agy_outcome_classifier_covers_quota_auth_invalid_stream_and_success():
@@ -1400,6 +1426,28 @@ const done = classifyJobLiveness({ status: 'succeeded' }, { now });
 if (queued.state !== 'queued') throw new Error('queued wrong');
 if (lost.state !== 'lost') throw new Error('lost wrong');
 if (done.state !== 'terminal') throw new Error('terminal wrong');
+console.log('ok');
+"""
+    result = run_node_eval(source)
+    assert result.returncode == 0, result.stderr
+
+
+def test_antigravity_lifecycle_queued_age_uses_queue_transition_time():
+    source = """
+import { classifyJobLiveness } from './plugins/antigravity-for-codex/scripts/lib/job-lifecycle.mjs';
+const now = Date.parse('2026-06-12T00:00:00.000Z');
+const queued = classifyJobLiveness({
+  status: 'queued',
+  createdAt: '2026-06-11T23:00:00.000Z',
+  updatedAt: '2026-06-11T23:59:55.000Z'
+}, { now });
+const reserved = classifyJobLiveness({
+  status: 'reserved',
+  createdAt: '2026-06-11T23:00:00.000Z',
+  updatedAt: '2026-06-11T23:59:55.000Z'
+}, { now });
+if (queued.state !== 'queued' || queued.staleForMs !== 5000) throw new Error(JSON.stringify(queued));
+if (reserved.state !== 'lost') throw new Error(JSON.stringify(reserved));
 console.log('ok');
 """
     result = run_node_eval(source)
@@ -1597,6 +1645,13 @@ process.stdout.write(JSON.stringify(worktreeFingerprint({json.dumps(str(repo))},
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert "\x1b[" not in payload["text"]
+
+
+def test_antigravity_worktree_fingerprint_pins_git_locale():
+    text = (PLUGIN / "scripts" / "lib" / "worktree-fingerprint.mjs").read_text(encoding="utf8")
+    assert 'env.LANG = "C"' in text
+    assert 'env.LC_ALL = "C"' in text
+    assert 'env.LC_MESSAGES = "C"' in text
 
 
 def test_antigravity_worktree_fingerprint_disables_textconv_filters(tmp_path):
@@ -3128,13 +3183,30 @@ def test_preflight_warns_when_selected_model_not_listed(tmp_path):
     assert payload["modelCatalog"]["count"] == 2
 
 
+def test_preflight_uses_catalog_fallback_when_default_model_is_not_listed(tmp_path):
+    agy = fake_agy(tmp_path, models_text="Gemini 3.5 Flash (High)\nClaude Opus 4.6 (Thinking)\n")
+    env = sanitized_env()
+    env["AGY_CLI_PATH"] = str(agy)
+    source = (
+        "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
+        "process.stdout.write(JSON.stringify(r.antigravityPreflight(process.env)));"
+    )
+    result = run_node_eval(source, env)
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["model"] == "Gemini 3.5 Flash (High)"
+    assert payload["modelCatalog"]["selectedModelListed"] is True
+    assert payload["modelCatalog"]["count"] == 2
+
+
 def test_reserved_job_lifecycle_is_explicit(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
     env = companion_env(tmp_path, fake_agy(tmp_path, response="RESERVED_OK", delay_ms=100))
 
-    reserved = run_companion(["reserve-job", "review", "--timeout-seconds", "1", "reserved focus"], repo, env)
+    reserved = run_companion(["reserve-job", "review", "--background", "--background=ignored", "--timeout-seconds", "1", "reserved focus"], repo, env)
 
     assert reserved.returncode == 0, reserved.stderr
     reserved_payload = json.loads(reserved.stdout)
@@ -3144,6 +3216,8 @@ def test_reserved_job_lifecycle_is_explicit(tmp_path):
     status_payload = json.loads(status.stdout)
     assert status_payload["status"] == "reserved"
     assert status_payload["timeout"] == 1000
+    assert "--background" not in status_payload["args"]
+    assert "--background=ignored" not in status_payload["args"]
 
     rejected = run_companion(["reserve-job", "review-gate"], repo, env)
     assert rejected.returncode == 2
@@ -4209,6 +4283,44 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     windows_forward_path_checks = {check["name"]: check["ok"] for check in json.loads(windows_forward_path.stdout)["checks"]}
     assert windows_forward_path_checks["no-local-absolute-paths"] is False
 
+    windows_generic_drive_path_workflow = tmp_path / "windows-generic-drive-local-path.yml"
+    windows_generic_drive_path_workflow.write_text(
+        custom_render.stdout.replace(
+            'ANTIGRAVITY_FOR_CODEX_MODEL: ""',
+            'ANTIGRAVITY_FOR_CODEX_MODEL: ""\n          LEAKED_LOCAL_PATH: "D:/Work Projects/external-models-for-codex"',
+        ),
+        encoding="utf8",
+    )
+    windows_generic_drive_path = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(windows_generic_drive_path_workflow)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert windows_generic_drive_path.returncode == 1
+    generic_drive_checks = {check["name"]: check["ok"] for check in json.loads(windows_generic_drive_path.stdout)["checks"]}
+    assert generic_drive_checks["no-local-absolute-paths"] is False
+
+    home_path_with_spaces_workflow = tmp_path / "home-path-with-spaces.yml"
+    home_path_with_spaces_workflow.write_text(
+        custom_render.stdout.replace(
+            'ANTIGRAVITY_FOR_CODEX_MODEL: ""',
+            'ANTIGRAVITY_FOR_CODEX_MODEL: ""\n          LEAKED_LOCAL_PATH: "/Users/example/My Project/external-models-for-codex"',
+        ),
+        encoding="utf8",
+    )
+    home_path_with_spaces = subprocess.run(
+        [NODE, str(runtime), "github-actions", "validate", "--path", str(home_path_with_spaces_workflow)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert home_path_with_spaces.returncode == 1
+    home_path_checks = {check["name"]: check["ok"] for check in json.loads(home_path_with_spaces.stdout)["checks"]}
+    assert home_path_checks["no-local-absolute-paths"] is False
+
 
 def test_github_actions_rejects_invalid_shell_like_model(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
@@ -4881,7 +4993,7 @@ def test_release_check_passes():
     assert "PASS docs-claude-through-antigravity-boundary" in result.stdout
     assert "PASS docs-real-smoke-opt-in" in result.stdout
     assert "PASS docs-ci-authenticated-agy" in result.stdout
-    assert "PASS model-catalog-not-in-hot-path" in result.stdout
+    assert "PASS model-catalog-bounded-preflight" in result.stdout
     assert "PASS all-mature-commands" in result.stdout
 
 
@@ -5119,9 +5231,25 @@ def test_release_check_rejects_local_paths_in_shipped_assets(tmp_path):
     assert "release-check failed: no-local-absolute-paths" in result.stderr
 
 
+def test_release_check_ignores_symlinked_shipped_texts(tmp_path):
+    plugin = tmp_path / "antigravity-for-codex"
+    shutil.copytree(PLUGIN, plugin)
+    outside = tmp_path / "outside.md"
+    outside.write_text("Leaked local path behind symlink: /Users/example/secret/project\n", encoding="utf8")
+    (plugin / "prompts" / "symlinked-local-path.md").symlink_to(outside)
+    runtime = plugin / "scripts" / "antigravity-companion.mjs"
+
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, env=sanitized_env(), capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert "PASS no-local-absolute-paths" in result.stdout
+
+
 def test_antigravity_release_check_rejects_linux_home_paths_in_source_guard():
     text = (PLUGIN / "scripts" / "antigravity-companion.mjs").read_text(encoding="utf8")
-    assert r"\/home\/" in text
+    assert "/(?:Users|home|" in text
+    assert "[A-Za-z]:(?:\\\\{1,2}|\\/)" in text
+    assert "(?:^|[\\s\"'=])[A-Za-z]:" in text
     assert "no-local-absolute-paths" in text
 
 

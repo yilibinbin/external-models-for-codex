@@ -359,7 +359,8 @@ function shippedPluginTexts(roots = [
   const visit = (relativePath) => {
     const fullPath = path.join(ROOT_DIR, relativePath);
     if (!fs.existsSync(fullPath)) return;
-    const stat = fs.statSync(fullPath);
+    const stat = fs.lstatSync(fullPath);
+    if (stat.isSymbolicLink()) return;
     if (stat.isDirectory()) {
       for (const child of fs.readdirSync(fullPath)) visit(path.join(relativePath, child));
       return;
@@ -878,7 +879,7 @@ function parseReviewGateOutput(output) {
 }
 
 function rawArgsWithoutBackground(rawArgs) {
-  return rawArgs.filter((arg) => arg !== "--background");
+  return rawArgs.filter((arg) => arg !== "--background" && !String(arg).startsWith("--background="));
 }
 
 function sanitizeBackgroundArgs(rawArgs) {
@@ -1424,14 +1425,14 @@ function runReserveJob(rawArgs) {
     if (!RESERVABLE_COMMANDS.has(command)) {
       return { exitCode: 2, stderr: `Command "${command}" cannot be reserved.\n` };
     }
+    const cleanArgs = rawArgsWithoutBackground(commandArgs.map(String));
     let args;
     try {
-      args = parseArgs(commandArgs);
+      args = parseArgs(cleanArgs);
     } catch (error) {
       return { exitCode: 2, stderr: `${error.message || String(error)}\n` };
     }
-    const cleanArgs = commandArgs.map(String);
-    const timeout = commandArgs.some((arg) => arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds="))
+    const timeout = cleanArgs.some((arg) => arg === "--timeout-seconds" || arg.startsWith("--timeout-seconds="))
       ? args.timeout
       : null;
     const fingerprint = worktreeFingerprint(cwd, { env: process.env });
@@ -2057,6 +2058,7 @@ function runReleaseCheck(rawArgs) {
   const matureCommands = expectedPublicCommands();
   const manifestCapabilities = Array.isArray(manifest.interface?.capabilities) ? manifest.interface.capabilities : [];
   const printHotPath = runtime.match(/export function antigravityPrintArgs[\s\S]*?export function antigravityPrint\(/)?.[0] || "";
+  const preflightHotPath = sourceSlice(runtime, "export function antigravityPreflight", "function timeoutMsToAgyDuration");
   const untrackedExcerptHotPath = sourceSlice(companion, "function openReadOnlyNoFollow", "function untrackedContext");
   const normalGitHotPath = sourceSlice(companion, "function runGit", "function reviewGateTimeoutBudgetMs");
   const normalGitContextHotPath = sourceSlice(companion, "function gitContext", "function reviewGateGitContext");
@@ -2204,10 +2206,9 @@ function runReleaseCheck(rawArgs) {
     new RegExp(`\\b${claudeWord}\\s+-p\\b`, "i")
   ];
   const forbiddenLocalPathPatterns = [
-    /\/Users\/[A-Za-z0-9._/-]+/,
-    /\/home\/[A-Za-z0-9._/-]+/,
-    /\/private\/var\/folders\//,
-    /[A-Za-z]:(?:\\{1,2}|\/)Users(?:\\{1,2}|\/)/
+    /(?:^|[\s"'=])~(?:\/|\\)[^\r\n"'`<>|]*/,
+    /(?:^|[\s"'=])\/(?:Users|home|private\/var\/folders|root|Volumes)[^\r\n"'`<>|]*/,
+    /(?:^|[\s"'=])[A-Za-z]:(?:\\{1,2}|\/)[^\r\n"'`<>|]*/
   ];
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
@@ -2280,7 +2281,12 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(renderWorkflow(ROOT_DIR).includes(`--ref ${RELEASE_REF}`), "github-actions-default-ref-derived"),
     releaseCheckResult(workflowValidation.checks.some((check) => check.name === "plugin-root-resolved" && check.ok), "github-actions-plugin-root-resolved"),
     releaseCheckResult(workflowValidation.checks.some((check) => check.name === "no-repo-relative-runtime-path" && check.ok), "github-actions-no-repo-relative-runtime-path"),
-    releaseCheckResult(!printHotPath.includes("antigravityModelCatalog") && !printHotPath.includes("antigravityModelDiagnostics"), "model-catalog-not-in-hot-path"),
+    releaseCheckResult(
+      preflightHotPath.includes("antigravityModelCatalog(env, { timeout: options.modelCatalogTimeout })")
+        && preflightHotPath.includes("selectedModel(env, { ...options, models: catalog.models })")
+        && runtime.includes("timeout: options.timeout || 10 * 1000"),
+      "model-catalog-bounded-preflight"
+    ),
     releaseCheckResult(companion.includes("antigravityModelDiagnostics") && companion.includes("modelCatalog"), "model-catalog-diagnostics"),
     releaseCheckResult(jobs.includes("stateDirForCwd") && mailbox.includes("stateDirForCwd") && leases.includes("stateDirForCwd"), "repo-external-state"),
     releaseCheckResult(reports.includes("stdoutBytes") && !reports.includes("stdout:"), "reports-omit-raw-output"),

@@ -39,6 +39,9 @@ function sanitizedGitEnv(sourceEnv) {
     }
   }
   env.NO_COLOR = "1";
+  env.LANG = "C";
+  env.LC_ALL = "C";
+  env.LC_MESSAGES = "C";
   return env;
 }
 
