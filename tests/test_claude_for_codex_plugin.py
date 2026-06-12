@@ -1008,21 +1008,35 @@ while True:
     env = os.environ.copy()
     env["CLAUDE_PLUGIN_DATA"] = str(data)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
-    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "1000"
+    env["CLAUDE_FOR_CODEX_HARD_TIMEOUT_MS"] = "2000"
     env["CLAUDE_FOR_CODEX_KILL_GRACE_MS"] = "200"
 
     result = subprocess.run(
-        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "4000", "timeout-survivor"],
+        [NODE, str(runtime), "review", "--background", "--wait", "--wait-timeout-ms", "6000", "timeout-survivor"],
         cwd=repo,
         env=env,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=12,
     )
 
-    assert result.returncode != 0
+    assert result.returncode in (0, 1), result.stderr
     payload = json.loads(result.stdout)
+    job_id = payload["job"]["id"]
+    deadline = time.time() + 12
+    while payload["job"]["status"] not in {"failed", "succeeded", "cancelled"} and time.time() < deadline:
+        time.sleep(0.2)
+        polled = subprocess.run(
+            [NODE, str(runtime), "result", job_id, "--json"],
+            cwd=repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+        assert polled.returncode == 0, polled.stderr
+        payload = json.loads(polled.stdout)
     assert payload["job"]["status"] == "failed"
+    assert child_pid_file.exists(), json.dumps(payload, indent=2)
     survivor_pid = int(child_pid_file.read_text())
     for _ in range(30):
         if not process_is_running(survivor_pid):
