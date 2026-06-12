@@ -12,6 +12,36 @@ NODE = os.environ.get("NODE_BINARY") or shutil.which("node")
 if not NODE:
     raise RuntimeError("node not found; set NODE_BINARY or put node on PATH")
 
+def sanitized_env():
+    env = dict(os.environ)
+    for name in list(env):
+        if name in {"AGY_CLI_PATH", "ANTIGRAVITY_CLI_PATH"} or name.startswith("ANTIGRAVITY_FOR_CODEX_"):
+            env.pop(name, None)
+    return env
+
+
+def test_sanitized_env_removes_antigravity_runtime_flags(monkeypatch):
+    polluted = {
+        "AGY_CLI_PATH": "/polluted/agy",
+        "ANTIGRAVITY_CLI_PATH": "/polluted/antigravity",
+        "ANTIGRAVITY_FOR_CODEX_DISABLE_LOG_CAPTURE": "1",
+        "ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER": "openai",
+        "ANTIGRAVITY_FOR_CODEX_MODEL": "bad-model",
+        "ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL": "Claude Sonnet 4.6 (Thinking)",
+        "ANTIGRAVITY_FOR_CODEX_CLAUDE_MODEL": "Gemini 3.1 Pro (High)",
+        "ANTIGRAVITY_FOR_CODEX_STATE_HOME": "/polluted/state",
+        "ANTIGRAVITY_FOR_CODEX_REVIEW_GATE": "on",
+        "ANTIGRAVITY_FOR_CODEX_REAL_SMOKE": "1",
+        "ANTIGRAVITY_FOR_CODEX_TEST_DISABLE_CANDIDATE_DISCOVERY": "1",
+    }
+    for name, value in polluted.items():
+        monkeypatch.setenv(name, value)
+
+    env = sanitized_env()
+
+    for name in polluted:
+        assert name not in env
+
 
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
@@ -97,6 +127,7 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "agy-capabilities.mjs",
         "agy-outcome.mjs",
         "antigravity-runtime.mjs",
+        "doctor.mjs",
         "github-actions.mjs",
         "jobs.mjs",
         "leases.mjs",
@@ -253,6 +284,10 @@ def write_fake_agy(
     capture_pid=None,
     help_text=FAKE_AGY_HELP,
     models_text=FAKE_AGY_MODELS,
+    help_exit_code=0,
+    help_stderr="",
+    models_exit_code=0,
+    models_stderr="",
     exit_code=0,
     delay_ms=0,
     ignore_sigterm=False,
@@ -292,8 +327,8 @@ def write_fake_agy(
         "const fs = require('fs');\n"
         "const argv = process.argv.slice(2);\n"
         "if (argv.join(' ') === '--version') { console.log('1.0.6-fake'); process.exit(0); }\n"
-        f"if (argv.join(' ') === '--help') {{ process.stdout.write({json.dumps(help_text)}); process.exit(0); }}\n"
-        f"if (argv.join(' ') === 'models') {{ process.stdout.write({json.dumps(models_text)}); process.exit(0); }}\n"
+        f"if (argv.join(' ') === '--help') {{ process.stdout.write({json.dumps(help_text)}); process.stderr.write({json.dumps(help_stderr)}); process.exit({int(help_exit_code)}); }}\n"
+        f"if (argv.join(' ') === 'models') {{ process.stdout.write({json.dumps(models_text)}); process.stderr.write({json.dumps(models_stderr)}); process.exit({int(models_exit_code)}); }}\n"
         f"{capture}"
         f"{pid_capture}"
         "const logFileIndex = argv.indexOf('--log-file');\n"
@@ -318,17 +353,23 @@ def run_node_eval(source, env=None):
     return subprocess.run(
         [NODE, "--input-type=module", "-e", source],
         cwd=ROOT,
-        env=env,
+        env=env or sanitized_env(),
         capture_output=True,
         text=True,
     )
 
 
 def companion_env(tmp_path, agy=None):
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     if agy is not None:
         env["AGY_CLI_PATH"] = str(agy)
+    return env
+
+
+def doctor_env(agy):
+    env = sanitized_env()
+    env["AGY_CLI_PATH"] = str(agy)
     return env
 
 
@@ -443,7 +484,7 @@ console.log(JSON.stringify({ ok: true, capabilities, models }));
 
 def test_runtime_defaults_to_gemini_model(tmp_path):
     agy = fake_agy(tmp_path)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -460,7 +501,7 @@ def test_runtime_defaults_to_gemini_model(tmp_path):
 def test_runtime_prefers_agy_cli_path_over_antigravity_cli_path(tmp_path):
     preferred = fake_agy(tmp_path / "preferred")
     fallback = fake_agy(tmp_path / "fallback")
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(preferred)
     env["ANTIGRAVITY_CLI_PATH"] = str(fallback)
     source = (
@@ -474,7 +515,7 @@ def test_runtime_prefers_agy_cli_path_over_antigravity_cli_path(tmp_path):
 
 def test_runtime_allows_explicit_claude_provider(tmp_path):
     agy = fake_agy(tmp_path)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
     source = (
@@ -491,7 +532,7 @@ def test_runtime_allows_explicit_claude_provider(tmp_path):
 
 def test_runtime_claude_provider_ignores_cross_provider_generic_env(tmp_path):
     agy = fake_agy(tmp_path)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
     env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "Gemini 3.1 Pro (High)"
@@ -510,7 +551,7 @@ def test_runtime_claude_provider_ignores_cross_provider_generic_env(tmp_path):
 
 def test_runtime_rejects_bare_anthropic_as_claude_model(tmp_path):
     agy = fake_agy(tmp_path)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
     source = (
@@ -526,7 +567,7 @@ def test_runtime_rejects_bare_anthropic_as_claude_model(tmp_path):
 
 def test_runtime_rejects_cross_provider_model(tmp_path):
     agy = fake_agy(tmp_path)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "gemini"
     source = (
@@ -542,7 +583,7 @@ def test_runtime_rejects_cross_provider_model(tmp_path):
 
 def test_runtime_rejects_gpt_model_for_any_provider(tmp_path):
     agy = fake_agy(tmp_path)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "claude"
     env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "GPT-OSS 120B (Medium)"
@@ -560,7 +601,7 @@ def test_runtime_rejects_gpt_model_for_any_provider(tmp_path):
 def test_runtime_requires_print_timeout_support(tmp_path):
     help_without_print_timeout = FAKE_AGY_HELP.replace("  --print-timeout\n", "")
     agy = fake_agy(tmp_path, help_text=help_without_print_timeout)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -576,7 +617,7 @@ def test_runtime_requires_print_timeout_support(tmp_path):
 def test_runtime_preflight_error_result_includes_outcome(tmp_path):
     help_without_print_timeout = FAKE_AGY_HELP.replace("  --print-timeout\n", "")
     agy = fake_agy(tmp_path, help_text=help_without_print_timeout)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -594,7 +635,7 @@ def test_runtime_preflight_error_result_includes_outcome(tmp_path):
 def test_runtime_async_preflight_error_result_includes_outcome(tmp_path):
     help_without_print_timeout = FAKE_AGY_HELP.replace("  --print-timeout\n", "")
     agy = fake_agy(tmp_path, help_text=help_without_print_timeout)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -611,7 +652,7 @@ def test_runtime_async_preflight_error_result_includes_outcome(tmp_path):
 
 def test_runtime_async_timeout_kills_agy_that_ignores_sigterm(tmp_path):
     agy = fake_agy(tmp_path, ignore_sigterm=True, never_exit=True)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -642,7 +683,7 @@ def test_runtime_async_timeout_close_handler_keeps_timeout_outcome(tmp_path):
         encoding="utf8",
     )
     agy.chmod(0o755)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     source = (
         "const r = await import('./plugins/antigravity-for-codex/scripts/lib/antigravity-runtime.mjs');"
@@ -702,7 +743,7 @@ console.log('ok');
 def test_runtime_empty_output_surfaces_agy_log_diagnostic(tmp_path):
     argv_file = tmp_path / "agy-argv.json"
     agy = fake_agy(tmp_path, response="", capture_argv=argv_file)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["FAKE_AGY_LOG"] = (
         "I0611 print mode started\n"
@@ -727,7 +768,7 @@ def test_runtime_empty_output_surfaces_agy_log_diagnostic(tmp_path):
 
 def test_runtime_async_empty_output_surfaces_agy_log_diagnostic(tmp_path):
     agy = fake_agy(tmp_path, response="")
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["FAKE_AGY_LOG"] = (
         "E0611 agent executor error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. "
@@ -764,7 +805,7 @@ def test_structured_review_outputs_valid_json_and_report(tmp_path):
         "next_steps": ["ship"]
     })
     argv_file = tmp_path / "agy-argv.json"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response, capture_argv=argv_file))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
 
@@ -800,7 +841,7 @@ def test_failed_review_writes_latest_sanitized_report(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
 
@@ -839,7 +880,7 @@ def test_preflight_failed_review_writes_latest_sanitized_report(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
 
@@ -879,7 +920,7 @@ def test_parse_failed_review_writes_latest_sanitized_report(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
 
@@ -917,7 +958,7 @@ def test_structured_failed_review_writes_latest_sanitized_report(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path / "success", response="AGY_REVIEW_OK"))
 
@@ -957,7 +998,7 @@ def test_review_json_implies_structured_output(tmp_path):
     repo.mkdir()
     init_git_repo(repo)
     response = json.dumps({"verdict": "approve", "summary": "ok", "findings": [], "next_steps": []})
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
@@ -970,7 +1011,7 @@ def test_structured_review_invalid_json_fails_without_stack_trace(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="not json"))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     result = subprocess.run([NODE, str(runtime), "review", "--structured"], cwd=repo, env=env, capture_output=True, text=True)
@@ -991,7 +1032,7 @@ def test_structured_review_rejects_top_level_extra_fields(tmp_path):
         "next_steps": [],
         "rawOutput": "not allowed"
     })
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
@@ -1021,7 +1062,7 @@ def test_structured_review_rejects_finding_extra_fields(tmp_path):
         }],
         "next_steps": ["remove extra field"]
     })
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
@@ -1050,7 +1091,7 @@ def test_structured_review_rejects_reversed_line_ranges(tmp_path):
         }],
         "next_steps": ["fix range"]
     })
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=response))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
@@ -1079,7 +1120,7 @@ def test_structured_review_rejects_approve_with_findings_and_parses_balanced_jso
         }],
         "next_steps": ["ship"]
     }
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f"prefix {{not json}}\n{json.dumps(payload)}\ntrailing {{note}}"))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
     result = subprocess.run([NODE, str(runtime), "review", "--json"], cwd=repo, env=env, capture_output=True, text=True)
@@ -1099,7 +1140,7 @@ def test_structured_review_prefers_schema_like_json_candidate(tmp_path):
         "findings": [],
         "next_steps": ["ship"]
     }
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f"Example object: {{}}\n{json.dumps(payload)}"))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
 
@@ -1120,7 +1161,7 @@ def test_structured_review_skips_partial_schema_like_json_candidate(tmp_path):
         "findings": [],
         "next_steps": ["ship"]
     }
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f'Example: {{"findings":"not review output"}}\n{json.dumps(payload)}'))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
 
@@ -1141,7 +1182,7 @@ def test_structured_review_recovers_after_unclosed_prose_brace(tmp_path):
         "findings": [],
         "next_steps": ["ship"]
     }
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response=f"Intro with unfinished brace {{\n{json.dumps(payload)}"))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(tmp_path / "state")
 
@@ -1419,9 +1460,255 @@ def test_internal_worker_command_is_not_user_facing(tmp_path):
     assert "modelCatalog" in payload
 
 
+def test_antigravity_doctor_is_cheap_and_reports_capabilities(tmp_path):
+    agy = fake_agy(tmp_path)
+    env = doctor_env(agy)
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["agy"]["available"] is True
+    assert payload["agy"]["capabilities"]["prompt"] is True
+    assert payload["agy"]["capabilities"]["logFile"] is True
+    assert payload["models"]["gemini"]
+    assert payload["models"]["claude"]
+    assert "modelCall" not in payload
+
+
+def test_antigravity_doctor_ignores_benign_success_stderr_in_json(tmp_path):
+    agy = fake_agy(
+        tmp_path,
+        help_stderr="usage summary was printed on stderr",
+        models_stderr="model catalog warning on stderr",
+    )
+    env = doctor_env(agy)
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["agy"]["available"] is True
+    assert payload["agy"]["helpError"] == ""
+    assert payload["models"]["available"] is True
+    assert payload["models"]["error"] == ""
+
+
+def test_antigravity_doctor_does_not_throw_when_generic_model_matches_one_provider(tmp_path):
+    agy = fake_agy(tmp_path)
+    env = doctor_env(agy)
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "gemini"
+    env["ANTIGRAVITY_FOR_CODEX_MODEL"] = "Gemini 3.1 Pro (High)"
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["selected"]["current"]["modelProvider"] == "gemini"
+    assert payload["selected"]["current"]["model"] == "Gemini 3.1 Pro (High)"
+    assert payload["selected"]["current"]["source"] == "env-generic"
+    assert payload["selected"]["providers"]["claude"]["ok"] is True
+
+
+def test_antigravity_doctor_reports_invalid_provider_env_as_json(tmp_path):
+    agy = fake_agy(tmp_path)
+    env = doctor_env(agy)
+    env["ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER"] = "openai"
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["agy"]["available"] is True
+    assert payload["selected"]["current"]["ok"] is False
+    assert "Invalid Antigravity model provider" in payload["selected"]["current"]["error"]
+    assert "stack" not in result.stderr.lower()
+
+
+def test_antigravity_doctor_reports_provider_model_mismatch_in_json_and_human_output(tmp_path):
+    agy = fake_agy(tmp_path)
+    env = doctor_env(agy)
+    command = [
+        NODE,
+        str(PLUGIN / "scripts" / "antigravity-companion.mjs"),
+        "doctor",
+        "--model-provider",
+        "claude",
+        "--model",
+        "Gemini 3.1 Pro (High)",
+    ]
+    json_result = subprocess.run([*command, "--json"], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert json_result.returncode == 0, json_result.stderr
+    payload = json.loads(json_result.stdout)
+    assert payload["ok"] is False
+    assert payload["selected"]["current"]["ok"] is False
+    assert "requires a Claude" in payload["selected"]["current"]["error"]
+
+    human_result = subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True)
+    assert human_result.returncode == 0, human_result.stderr
+    assert "Ready: no" in human_result.stdout
+    assert "Current selection: error" in human_result.stdout
+    assert "requires a Claude" in human_result.stdout
+
+
+def test_antigravity_doctor_is_not_ready_when_models_command_fails(tmp_path):
+    agy = fake_agy(
+        tmp_path,
+        models_text=FAKE_AGY_MODELS,
+        models_stderr="catalog failed",
+        models_exit_code=4,
+    )
+    env = doctor_env(agy)
+
+    json_result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert json_result.returncode == 0, json_result.stderr
+    payload = json.loads(json_result.stdout)
+    assert payload["ok"] is False
+    assert payload["models"]["available"] is False
+    assert payload["models"]["status"] == 4
+    assert "catalog failed" in payload["models"]["error"]
+
+    human_result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert human_result.returncode == 0, human_result.stderr
+    assert "Ready: no" in human_result.stdout
+    assert "Models error: catalog failed" in human_result.stdout
+
+
+def test_antigravity_doctor_reports_stdout_only_probe_failures_in_json(tmp_path):
+    help_agy = fake_agy(tmp_path / "help", help_text="help failed on stdout", help_stderr="", help_exit_code=3)
+    help_result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=doctor_env(help_agy),
+        capture_output=True,
+        text=True,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    help_payload = json.loads(help_result.stdout)
+    assert help_payload["ok"] is False
+    assert help_payload["agy"]["available"] is False
+    assert help_payload["agy"]["helpStatus"] == 3
+    assert help_payload["agy"]["helpError"] == "help failed on stdout"
+
+    models_agy = fake_agy(tmp_path / "models", models_text="models failed on stdout", models_stderr="", models_exit_code=4)
+    models_result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "--json"],
+        cwd=ROOT,
+        env=doctor_env(models_agy),
+        capture_output=True,
+        text=True,
+    )
+    assert models_result.returncode == 0, models_result.stderr
+    models_payload = json.loads(models_result.stdout)
+    assert models_payload["ok"] is False
+    assert models_payload["models"]["available"] is False
+    assert models_payload["models"]["status"] == 4
+    assert models_payload["models"]["error"] == "models failed on stdout"
+
+
+def test_antigravity_doctor_human_output_surfaces_cli_and_model_errors(tmp_path):
+    help_agy = fake_agy(tmp_path / "help", help_text="", help_stderr="help failed", help_exit_code=3)
+    help_result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor"],
+        cwd=ROOT,
+        env=doctor_env(help_agy),
+        capture_output=True,
+        text=True,
+    )
+    assert help_result.returncode == 0, help_result.stderr
+    assert "Available: no" in help_result.stdout
+    assert "Antigravity error: help failed" in help_result.stdout
+
+    models_agy = fake_agy(tmp_path / "models", models_text="", models_stderr="models failed", models_exit_code=4)
+    models_result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor"],
+        cwd=ROOT,
+        env=doctor_env(models_agy),
+        capture_output=True,
+        text=True,
+    )
+    assert models_result.returncode == 0, models_result.stderr
+    assert "Ready: no" in models_result.stdout
+    assert "Models error: models failed" in models_result.stdout
+    assert "Gemini selection error: no Gemini models listed" in models_result.stdout
+    assert "Claude selection error: no Claude models listed" in models_result.stdout
+
+
+def test_antigravity_doctor_malformed_json_option_returns_json_error(tmp_path):
+    agy = fake_agy(tmp_path)
+    cases = [
+        (["--model-provider", "--json"], "Missing value for --model-provider."),
+        (["--bogus", "--json"], "Unknown doctor argument: --bogus."),
+        (["extra", "--json"], "Unknown doctor argument: extra."),
+        (["--model-provider=", "--json"], "Missing value for --model-provider."),
+        (["--model=", "--json"], "Missing value for --model."),
+        (["--model-provider", "", "--json"], "Missing value for --model-provider."),
+        (["--model", "", "--json"], "Missing value for --model."),
+    ]
+    for args, expected_error in cases:
+        result = subprocess.run(
+            [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", *args],
+            cwd=ROOT,
+            env=doctor_env(agy),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["error"] == expected_error
+        assert "stack" not in result.stderr.lower()
+
+
+def test_antigravity_doctor_malformed_human_option_returns_stderr(tmp_path):
+    agy = fake_agy(tmp_path)
+    result = subprocess.run(
+        [NODE, str(PLUGIN / "scripts" / "antigravity-companion.mjs"), "doctor", "extra"],
+        cwd=ROOT,
+        env=doctor_env(agy),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "Unknown doctor argument: extra.\n"
+    assert "stack" not in result.stderr.lower()
+
+
 def test_preflight_warns_when_selected_model_not_listed(tmp_path):
     agy = fake_agy(tmp_path, models_text="Gemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n")
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(agy)
     env["ANTIGRAVITY_FOR_CODEX_GEMINI_MODEL"] = "Gemini 3.1 Pro (High)"
     source = (
@@ -1741,7 +2028,7 @@ def test_advisory_state_write_failure_does_not_fail_multi_review(tmp_path):
     init_git_repo(repo)
     bad_state = tmp_path / "state-file"
     bad_state.write_text("not a directory", encoding="utf8")
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ALLOW"))
     env["ANTIGRAVITY_FOR_CODEX_STATE_HOME"] = str(bad_state)
 
@@ -1922,7 +2209,7 @@ def test_setup_does_not_emit_command_inventory(tmp_path):
 
 def test_setup_exits_zero_when_agy_is_unavailable():
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["PATH"] = ""
     env["ANTIGRAVITY_FOR_CODEX_TEST_DISABLE_CANDIDATE_DISCOVERY"] = "1"
     env.pop("AGY_CLI_PATH", None)
@@ -1938,7 +2225,7 @@ def test_setup_exits_zero_when_agy_is_unavailable():
 def test_multi_review_help_does_not_call_agy(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     argv_file = tmp_path / "agy-argv.json"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, capture_argv=argv_file))
 
     result = subprocess.run([NODE, str(runtime), "multi-review", "--help"], env=env, capture_output=True, text=True)
@@ -1950,7 +2237,7 @@ def test_multi_review_help_does_not_call_agy(tmp_path):
 
 def test_role_packs_lists_builtin_packs():
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
-    result = subprocess.run([NODE, str(runtime), "roles", "--json"], capture_output=True, text=True)
+    result = subprocess.run([NODE, str(runtime), "roles", "--json"], env=sanitized_env(), capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     assert "default" in payload["packs"]
@@ -1962,10 +2249,12 @@ def test_github_actions_init_validate_and_render(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
+    env = sanitized_env()
 
     rendered = subprocess.run(
         [NODE, str(runtime), "github-actions", "render", "--model-provider", "gemini", "--timeout-minutes", "15"],
         cwd=repo,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -1988,6 +2277,7 @@ def test_github_actions_init_validate_and_render(tmp_path):
     init = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--force", "--model-provider", "gemini"],
         cwd=repo,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2000,7 +2290,7 @@ def test_github_actions_init_validate_and_render(tmp_path):
     assert "pull_request_target" not in text
     assert "antigravity-for-codex-v" in text
 
-    validate = subprocess.run([NODE, str(runtime), "github-actions", "validate"], cwd=repo, capture_output=True, text=True)
+    validate = subprocess.run([NODE, str(runtime), "github-actions", "validate"], cwd=repo, env=env, capture_output=True, text=True)
     assert validate.returncode == 0, validate.stderr
     assert json.loads(validate.stdout)["ok"] is True
 
@@ -2183,10 +2473,12 @@ def test_review_gate_prompt_uses_resolved_environment_model(tmp_path):
 
 def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    env = sanitized_env()
     for ref in ["main", "refs/heads/main", "develop", "release/latest"]:
         bad_ref = subprocess.run(
             [NODE, str(runtime), "github-actions", "render", "--ref", ref],
             cwd=tmp_path,
+            env=env,
             capture_output=True,
             text=True,
         )
@@ -2197,6 +2489,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     custom_render = subprocess.run(
         [NODE, str(runtime), "github-actions", "render", "--ref", "antigravity-for-codex-v0.2.0"],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2205,6 +2498,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     custom_validate = subprocess.run(
         [NODE, str(runtime), "github-actions", "validate", "--path", str(custom_ref)],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2213,6 +2507,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     invalid_timeout = subprocess.run(
         [NODE, str(runtime), "github-actions", "render", "--timeout-minutes", "abc"],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2244,6 +2539,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     invalid = subprocess.run(
         [NODE, str(runtime), "github-actions", "validate", "--path", str(workflow)],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2272,6 +2568,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     mutable_ref = subprocess.run(
         [NODE, str(runtime), "github-actions", "validate", "--path", str(mutable_ref_workflow)],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2284,6 +2581,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     job_permissions = subprocess.run(
         [NODE, str(runtime), "github-actions", "validate", "--path", str(job_permissions_workflow)],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2296,6 +2594,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     extra_write = subprocess.run(
         [NODE, str(runtime), "github-actions", "validate", "--path", str(extra_write_workflow)],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2314,6 +2613,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
     linux_local_path = subprocess.run(
         [NODE, str(runtime), "github-actions", "validate", "--path", str(linux_local_path_workflow)],
         cwd=tmp_path,
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -2328,6 +2628,7 @@ def test_github_actions_rejects_invalid_shell_like_model(tmp_path):
     rendered = subprocess.run(
         [NODE, str(runtime), "github-actions", "render", "--model", f"gemini $(touch {marker})"],
         cwd=tmp_path,
+        env=sanitized_env(),
         capture_output=True,
         text=True,
     )
@@ -2363,7 +2664,7 @@ def test_render_review_comment_and_annotations_helper():
 def test_multi_review_uses_role_pack(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     argv_file = tmp_path / "agy-argv.json"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="PACK_OK", capture_argv=argv_file))
     result = subprocess.run([NODE, str(runtime), "multi-review", "--role-pack", "security"], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -2374,7 +2675,7 @@ def test_multi_review_uses_role_pack(tmp_path):
 
 def test_review_gate_blocks_only_on_explicit_block(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
 
     block_agy = fake_agy(tmp_path / "block", response="BLOCK: stop here\nEvidence")
@@ -2401,7 +2702,7 @@ def test_review_gate_blocks_only_on_explicit_block(tmp_path):
 
 def test_review_gate_fail_open_on_invalid_output(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="not a gate verdict"))
 
@@ -2415,7 +2716,7 @@ def test_review_gate_fail_open_on_invalid_output(tmp_path):
 def test_review_gate_uses_inner_timeout_below_hook_timeout(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     argv_file = tmp_path / "agy-argv.json"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ALLOW: ok", capture_argv=argv_file))
 
@@ -2434,7 +2735,7 @@ def test_review_gate_hook_does_not_block_on_open_stdin_pipe(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
-    env = os.environ.copy()
+    env = sanitized_env()
     env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ALLOW: ok"))
     text = hook.read_text(encoding="utf8")
@@ -2464,7 +2765,7 @@ def test_review_gate_hook_does_not_block_on_open_stdin_pipe(tmp_path):
 def test_release_check_passes():
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
 
-    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=PLUGIN, capture_output=True, text=True)
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=PLUGIN, env=sanitized_env(), capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
     assert "PASS manifest-name" in result.stdout
@@ -2501,7 +2802,7 @@ def test_release_check_passes_from_installed_plugin_layout(tmp_path):
     shutil.copytree(PLUGIN, installed)
     runtime = installed / "scripts" / "antigravity-companion.mjs"
 
-    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=installed, capture_output=True, text=True)
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=installed, env=sanitized_env(), capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
     assert "PASS marketplace-docs-release-ref - skipped repo-level docs in installed plugin layout" in result.stdout
@@ -2519,7 +2820,7 @@ def test_release_check_enforces_repo_docs_when_source_layout_has_docs(tmp_path):
     (repo / "docs" / "README.zh-CN.md").write_text("missing current release ref\n", encoding="utf8")
     runtime = plugin / "scripts" / "antigravity-companion.mjs"
 
-    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, capture_output=True, text=True)
+    result = subprocess.run([NODE, str(runtime), "release-check"], cwd=plugin, env=sanitized_env(), capture_output=True, text=True)
 
     assert result.returncode == 1
     assert "release-check failed: marketplace-docs-release-ref" in result.stderr
@@ -2539,7 +2840,7 @@ def test_version_helper_matches_manifest():
 
 def test_real_smoke_is_opt_in(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ANTIGRAVITY_FOR_CODEX_SMOKE_OK"))
     env.pop("ANTIGRAVITY_FOR_CODEX_REAL_SMOKE", None)
 
@@ -2552,7 +2853,7 @@ def test_real_smoke_is_opt_in(tmp_path):
 def test_real_smoke_runs_fake_agy_for_gemini_and_claude(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     argv_file = tmp_path / "agy-argv.json"
-    env = os.environ.copy()
+    env = sanitized_env()
     env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="ANTIGRAVITY_FOR_CODEX_SMOKE_OK", capture_argv=argv_file))
     env["ANTIGRAVITY_FOR_CODEX_REAL_SMOKE"] = "1"
 

@@ -29,6 +29,7 @@ import {
   TERMINAL_JOB_STATUSES
 } from "./lib/jobs.mjs";
 import { captureProcessIdentity } from "./lib/process.mjs";
+import { antigravityDoctor } from "./lib/doctor.mjs";
 import {
   renderWorkflow,
   validateWorkflow,
@@ -71,6 +72,7 @@ import {
 const VALID_COMMANDS = new Set([
   "setup",
   "capabilities",
+  "doctor",
   "review",
   "adversarial-review",
   "multi-review",
@@ -116,6 +118,9 @@ function usage(command = "") {
   if (command === "roles") {
     return "Usage: antigravity-companion.mjs roles --json\n";
   }
+  if (command === "doctor") {
+    return "Usage: antigravity-companion.mjs doctor [--json] [--model-provider gemini|claude] [--model <label>]\n";
+  }
   if (command === "report") {
     return "Usage: antigravity-companion.mjs report --latest\n";
   }
@@ -128,7 +133,7 @@ function usage(command = "") {
   if (command === "github-actions") {
     return "Usage: antigravity-companion.mjs github-actions <render|init|validate> [--force] [--model-provider gemini|claude] [--model <label>] [--ref <tag>] [--timeout-minutes <n>] [--path <workflow-path>]\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|github-actions|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
+  return "Usage: antigravity-companion.mjs <setup|capabilities|doctor|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|github-actions|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -668,6 +673,111 @@ function runRoles(rawArgs) {
   process.stdout.write(`${JSON.stringify({ roles: REVIEW_ROLES, packs: BUILT_IN_ROLE_PACKS })}\n`);
 }
 
+function parseDoctorArgs(rawArgs) {
+  const args = {
+    help: false,
+    json: false,
+    modelProvider: undefined,
+    model: undefined
+  };
+  const readDoctorOptionValue = (tokens, index, option) => {
+    const value = readOptionValue(tokens, index, option);
+    if (value.trim() === "") {
+      throw new Error(`Missing value for ${option}.`);
+    }
+    return value;
+  };
+  const readDoctorEqualsValue = (token, option) => {
+    const value = token.slice(`${option}=`.length);
+    if (value.trim() === "") {
+      throw new Error(`Missing value for ${option}.`);
+    }
+    return value;
+  };
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const token = rawArgs[index];
+    if (token === "--help" || token === "-h" || token === "help") {
+      args.help = true;
+    } else if (token === "--json") {
+      args.json = true;
+    } else if (token === "--model-provider") {
+      args.modelProvider = readDoctorOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--model-provider=")) {
+      args.modelProvider = readDoctorEqualsValue(token, "--model-provider");
+    } else if (token === "--model") {
+      args.model = readDoctorOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token.startsWith("--model=")) {
+      args.model = readDoctorEqualsValue(token, "--model");
+    } else {
+      throw new Error(`Unknown doctor argument: ${token}.`);
+    }
+  }
+  return args;
+}
+
+function doctorWantsJson(rawArgs) {
+  return rawArgs.includes("--json");
+}
+
+function conciseDiagnostic(value) {
+  return String(value || "")
+    .trim()
+    .split(/\r?\n/, 1)[0]
+    .trim();
+}
+
+function runDoctor(rawArgs) {
+  let args;
+  try {
+    args = parseDoctorArgs(rawArgs);
+  } catch (error) {
+    const message = error.message || String(error);
+    if (doctorWantsJson(rawArgs)) {
+      writeJson({ ok: false, error: message });
+    } else {
+      process.stderr.write(`${message}\n`);
+    }
+    process.exit(2);
+  }
+  if (args.help) {
+    process.stdout.write(usage("doctor"));
+    return;
+  }
+  const payload = antigravityDoctor(process.env, {
+    modelProvider: args.modelProvider,
+    model: args.model
+  });
+  if (args.json) {
+    writeJson(payload);
+    return;
+  }
+  const lines = [
+    `Antigravity command: ${payload.agy.command}`,
+    `Ready: ${payload.ok ? "yes" : "no"}`,
+    `Available: ${payload.agy.available ? "yes" : "no"}`,
+    `Prompt support: ${payload.agy.capabilities.prompt ? "yes" : "no"}`,
+    `Log diagnostics: ${payload.agy.capabilities.logFile ? "yes" : "no"}`,
+    `Current selection: ${payload.selected.current.ok ? `${payload.selected.current.modelProvider} ${payload.selected.current.model}` : `error - ${payload.selected.current.error}`}`,
+    `Gemini models: ${payload.models.gemini.length}`,
+    `Claude models: ${payload.models.claude.length}`,
+    `Unsupported models rejected: ${payload.models.unsupported.length}`
+  ];
+  if (!payload.agy.available) {
+    lines.push(`Antigravity error: ${conciseDiagnostic(payload.agy.helpError) || `help exited ${payload.agy.helpStatus}`}`);
+  }
+  if (!payload.models.available) {
+    lines.push(`Models error: ${conciseDiagnostic(payload.models.error) || `models exited ${payload.models.status}`}`);
+  }
+  for (const [provider, selection] of Object.entries(payload.selected.providers)) {
+    if (!selection.ok) {
+      lines.push(`${provider === "gemini" ? "Gemini" : "Claude"} selection error: ${selection.error}`);
+    }
+  }
+  process.stdout.write(`${lines.join("\n")}\n`);
+}
+
 function requireJobId(rawArgs, command) {
   const args = parseArgsOrExit(rawArgs);
   if (args.help || args.positional.length !== 1) {
@@ -1043,6 +1153,7 @@ function expectedPublicCommands() {
     "review",
     "adversarial-review",
     "multi-review",
+    "doctor",
     "plan",
     "rescue",
     "review-gate",
@@ -1358,6 +1469,9 @@ async function main() {
   }
   if (command === "roles") {
     return runRoles(rest);
+  }
+  if (command === "doctor") {
+    return runDoctor(rest);
   }
   if (command === "jobs") {
     return runJobs(rest);
