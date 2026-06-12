@@ -2310,13 +2310,17 @@ import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
 const cwd = {json.dumps(str(repo))};
 const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
 const job = createJob(cwd, {{ command: "review", args: ["orphan"], cwd }}, env);
+const childIdentity = captureProcessIdentity({child_pid});
+if (!childIdentity) throw new Error("child identity missing");
+childIdentity.command = "<redacted-path>orphan_child.py";
+delete childIdentity.commandHash;
 updateJob(cwd, job.id, {{
   status: "running",
   phase: "orphaned",
   workerPid: 999999,
   childPid: {child_pid},
   childProcessGroupPid: {child_pid},
-  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  childProcessGroupIdentity: childIdentity,
   startedAt: new Date().toISOString(),
   lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
 }}, env);
@@ -2385,13 +2389,17 @@ import {{ createJob, updateJob }} from {json.dumps(jobs.as_uri())};
 import {{ captureProcessIdentity }} from {json.dumps(process_lib.as_uri())};
 const cwd = {json.dumps(str(repo))};
 const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(data))}, HOME: {json.dumps(str(tmp_path / "home"))} }};
+const childIdentity = captureProcessIdentity({child_pid});
+if (!childIdentity) throw new Error("child identity missing");
+childIdentity.command = "<redacted-path>cancel_race_child.py";
+delete childIdentity.commandHash;
 createJob(cwd, {{ id: "cancel-race", command: "review", args: ["race"], cwd }}, env);
 updateJob(cwd, "cancel-race", {{
   status: "running",
   phase: "running",
   childPid: {child_pid},
   childProcessGroupPid: {child_pid},
-  childProcessGroupIdentity: captureProcessIdentity({child_pid}),
+  childProcessGroupIdentity: childIdentity,
   startedAt: "2026-06-09T00:00:00.000Z",
   lastHeartbeatAt: "2026-06-09T00:00:00.000Z"
 }}, env);
