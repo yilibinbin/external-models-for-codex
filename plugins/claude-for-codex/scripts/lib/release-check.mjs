@@ -803,7 +803,20 @@ function checkGithubActionsCi(root) {
     result(installedPluginOnly || (!ciText.includes("pull_request_target") && ciText.includes("pull_request:") && ciText.includes("push:")), "github-actions-ci-fork-safe"),
     result(installedPluginOnly || ciText.includes("contents: read"), "github-actions-ci-minimal-permissions"),
     result(installedPluginOnly || ciText.includes("node --check plugins/claude-for-codex/scripts/claude-companion.mjs"), "github-actions-ci-node-check"),
-    result(installedPluginOnly || ciText.includes("pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py"), "github-actions-ci-pytest"),
+    result(
+      installedPluginOnly ||
+        (
+          ciText.includes("pytest -q tests/test_claude_permission_compat.py") &&
+          ciText.includes('pytest -q tests/test_claude_for_codex_plugin.py -k "') &&
+          ciText.includes("release_check") &&
+          ciText.includes("outcome_classifier") &&
+          ciText.includes("doctor_json") &&
+          ciText.includes("hook_compat") &&
+          !ciText.includes("pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py")
+        ),
+      "github-actions-ci-pytest",
+      "PR dogfood runs permission compatibility plus bounded Claude plugin smoke tests instead of the full long lifecycle suite"
+    ),
     result(installedPluginOnly || ciText.includes("release-check --ci-simulate --json"), "github-actions-ci-release-check"),
     result(installedPluginOnly || ciText.includes("git diff --check"), "github-actions-ci-whitespace")
   ];

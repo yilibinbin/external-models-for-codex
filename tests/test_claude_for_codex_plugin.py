@@ -8380,7 +8380,12 @@ def test_repository_has_fork_safe_claude_for_codex_ci_workflow():
     assert "node --check plugins/claude-for-codex/scripts/claude-companion.mjs" in text
     assert "node --check plugins/claude-for-codex/scripts/lib/hook-compat.mjs" in text
     assert "node --check plugins/claude-for-codex/scripts/lib/doctor.mjs" in text
-    assert "pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py" in text
+    assert "pytest -q tests/test_claude_permission_compat.py" in text
+    assert 'pytest -q tests/test_claude_for_codex_plugin.py -k "' in text
+    assert "outcome_classifier" in text
+    assert "doctor_json" in text
+    assert "hook_compat" in text
+    assert "pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py" not in text
     assert "release-check --ci-simulate --json" in text
     assert "git diff --check" in text
 
