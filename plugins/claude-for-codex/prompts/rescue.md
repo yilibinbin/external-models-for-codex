@@ -1,5 +1,6 @@
 <task>Diagnose a stuck or failed Codex implementation from Claude's independent read-only perspective.</task>
 {{GIT_CONTEXT}}
+{{PROJECT_INSTRUCTIONS_BLOCK}}
 <rules>
 {{EDIT_RULE}}
 {{REPORT_RULE}}

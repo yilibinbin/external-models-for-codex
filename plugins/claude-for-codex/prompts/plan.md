@@ -1,5 +1,6 @@
 <task>Create an independent implementation plan for Codex to compare against its own plan.</task>
 {{GIT_CONTEXT}}
+{{PROJECT_INSTRUCTIONS_BLOCK}}
 <rules>
 - Do not edit files.
 - Separate observed facts from inferences.

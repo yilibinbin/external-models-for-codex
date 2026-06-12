@@ -45,6 +45,7 @@ import { createGitMcpConfig } from "./lib/mcp-config.mjs";
 import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib/mailbox.mjs";
 import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
+import { renderProjectInstructionsBlock } from "./lib/project-instructions.mjs";
 import { doctorReport, renderDoctorText } from "./lib/doctor.mjs";
 import { hookCompatibilityReport } from "./lib/hook-compat.mjs";
 import { installConsistencyReport } from "./lib/install-consistency.mjs";
@@ -2220,6 +2221,10 @@ function semanticPromptBlock(args) {
   return args.semantic?.promptBlock ? `\n${args.semantic.promptBlock}` : "";
 }
 
+function projectInstructionsPromptBlock(args) {
+  return args.projectInstructionsBlock ?? renderProjectInstructionsBlock(process.cwd());
+}
+
 function reviewPrompt(kind, args) {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -2233,6 +2238,7 @@ function reviewPrompt(kind, args) {
     return renderPromptTemplate(pluginRoot(), "adversarial-review", {
       GIT_CONTEXT: gitContext,
       SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
+      PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
       ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
       FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
       OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
@@ -2242,6 +2248,7 @@ function reviewPrompt(kind, args) {
   return renderPromptTemplate(pluginRoot(), "review", {
     GIT_CONTEXT: gitContext,
     SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
     REVIEW_ROLES_BLOCK: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
     OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
@@ -2256,6 +2263,7 @@ function multiReviewRolePrompt(role, args, gitContext) {
     ROLE_DIRECTIVE: role.directive,
     GIT_CONTEXT: gitContext,
     SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
     FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
     OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
   });
@@ -2276,6 +2284,7 @@ function planPrompt(args) {
 
   return renderPromptTemplate(pluginRoot(), "plan", {
     GIT_CONTEXT: gitContext,
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
     PLANNING_REQUEST_BLOCK: focus ? `<planning_request>${focus}</planning_request>` : ""
   });
 }
@@ -2286,6 +2295,7 @@ function rescuePrompt(args) {
 
   return renderPromptTemplate(pluginRoot(), "rescue", {
     GIT_CONTEXT: gitContext,
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
     EDIT_RULE: args.write ? "- You may edit files because the user explicitly requested rescue --write." : "- Do not edit files.",
     REPORT_RULE: args.write ? "- Keep changes narrowly scoped and report every modified file." : "- Do not suggest that you are currently applying fixes.",
     RESCUE_REQUEST_BLOCK: focus ? `<rescue_request>${focus}</rescue_request>` : ""
