@@ -5,7 +5,7 @@ import { RELEASE_REF } from "./version.mjs";
 const WORKFLOW_RELATIVE_PATH = path.join(".github", "workflows", "antigravity-for-codex-review.yml");
 const DEFAULT_RELEASE_REF = RELEASE_REF;
 const DEFAULT_TIMEOUT_MINUTES = 30;
-const LOCAL_PATH_PATTERN = /\/Users\/[A-Za-z0-9._/-]+|\/home\/[A-Za-z0-9._/-]+|\/private\/var\/folders\/[A-Za-z0-9._/-]+|[A-Za-z]:\\Users\\[A-Za-z0-9._\\/-]+/;
+const LOCAL_PATH_PATTERN = /(?:^|[\s"'=])(?:~(?:\/|\\)[^\r\n"'`<>|]*|\/(?:Users|home|private\/var\/folders|root|Volumes)[^\r\n"'`<>|]*|[A-Za-z]:(?:\\{1,2}|\/)[^\r\n"'`<>|]*)/m;
 
 function result(ok, name, detail = "") {
   return { ok, name, detail };

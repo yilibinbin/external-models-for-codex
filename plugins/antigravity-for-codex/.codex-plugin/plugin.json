@@ -1,6 +1,6 @@
 {
   "name": "antigravity-for-codex",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "Use Antigravity CLI from Codex for mature plugin-managed review, planning, reports, jobs, GitHub Actions, release checks, and opt-in Stop gates with explicit Gemini or Claude model selection.",
   "author": {
     "name": "fanghao",
@@ -49,16 +49,15 @@
     "defaultPrompt": [
       "Use Antigravity to review the current git changes with the default Gemini model.",
       "Use Antigravity with a Claude model to challenge this implementation plan.",
-      "Run a multi-role Antigravity review across correctness, security, tests, release, and adversarial perspectives.",
-      "Enable the opt-in Antigravity Stop review gate for this repository."
+      "Run a multi-role Antigravity review across correctness, security, tests, release, and adversarial perspectives."
     ],
     "websiteURL": "https://github.com/yilibinbin/external-models-for-codex",
     "brandColor": "#0F766E",
-    "composerIcon": "assets/composer-icon.svg",
-    "logo": "assets/logo.svg",
+    "composerIcon": "./assets/composer-icon.svg",
+    "logo": "./assets/logo.svg",
     "screenshots": [
-      "assets/review-workflow.svg",
-      "assets/stop-gate.svg"
+      "./assets/review-workflow.svg",
+      "./assets/stop-gate.svg"
     ]
   }
 }

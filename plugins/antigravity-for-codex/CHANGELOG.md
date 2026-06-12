@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0 - 2026-06-12
+
+- Added agy-native capability, model catalog, and outcome classification modules.
+- Added cheap `doctor` diagnostics for local `agy`, model catalog, provider policy, and hook compatibility.
+- Hardened background job lifecycle with bounded worktree fingerprints, idempotency keys, heartbeats, and safer unread-result handling.
+- Added bounded process probe diagnostics for cancellation and lifecycle decisions.
+- Added release-check guards to prevent Claude-native/Fable/SDK behavior from leaking into Antigravity.
+
 ## 0.5.4 - 2026-06-09
 
 - Resolve generated GitHub Actions workflows through the installed Antigravity plugin root instead of repo-relative runtime paths.

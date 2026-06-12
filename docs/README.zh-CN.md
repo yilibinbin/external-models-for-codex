@@ -21,7 +21,7 @@ codex plugin add claude-for-codex@external-models-for-codex
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.2
 codex plugin add gemini-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.5.4
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.6.0
 codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 

@@ -8,7 +8,7 @@ import {
 
 try {
   const unread = listJobs(process.cwd(), process.env)
-    .filter((job) => TERMINAL_JOB_STATUSES.has(job.status) && !job.viewed)
+    .filter((job) => TERMINAL_JOB_STATUSES.has(job.status) && !job.viewed && !job.resultViewedAt)
     .slice(0, 5);
   if (unread.length) {
     const ids = unread.map((job) => `${job.id}:${job.status}`).join(", ");

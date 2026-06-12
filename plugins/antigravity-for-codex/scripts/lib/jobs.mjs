@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { stateDirForCwd } from "./state.mjs";
-import { terminateValidatedJobWorker } from "./process.mjs";
+import { hasTrustedExpectedIdentity, terminateValidatedCompanionChild, terminateValidatedJobWorker } from "./process.mjs";
+import { classifyJobLiveness } from "./job-lifecycle.mjs";
 
 export const TERMINAL_JOB_STATUSES = new Set(["succeeded", "failed", "cancelled", "cancel_failed"]);
 export const RESERVABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "plan", "rescue"]);
@@ -121,6 +122,67 @@ function capText(value) {
   return `${bytes.subarray(0, OUTPUT_CAP_BYTES - markerBytes).toString("utf8")}${TRUNCATION_MARKER}`;
 }
 
+function positiveIntegerOrNull(value) {
+  const numericValue = Number(value);
+  return Number.isInteger(numericValue) && numericValue > 0 ? numericValue : null;
+}
+
+function recordedWorkerPid(job) {
+  return positiveIntegerOrNull(job?.worker?.pid)
+    ?? positiveIntegerOrNull(job?.workerPid)
+    ?? positiveIntegerOrNull(job?.worker?.identity?.pid);
+}
+
+function requiresTrustedWorkerIdentityForCancellation(job) {
+  const status = String(job?.status || "");
+  const submissionState = String(job?.submissionState || "");
+  const hasRecordedWorker = Boolean(recordedWorkerPid(job));
+  return ["starting", "running"].includes(status)
+    || ["starting", "running"].includes(submissionState)
+    || (status === "queued" && hasRecordedWorker);
+}
+
+function isMetadataOnlyCancellable(job) {
+  const status = String(job?.status || "");
+  const submissionState = String(job?.submissionState || "");
+  const hasRecordedWorker = Boolean(recordedWorkerPid(job));
+  return (status === "reserved" && !hasRecordedWorker && !["starting", "running"].includes(submissionState))
+    || (status === "queued" && !hasRecordedWorker && !["starting", "running"].includes(submissionState));
+}
+
+function missingTrustedWorkerIdentityResult(expected) {
+  return {
+    status: "failed",
+    error: "missing trusted worker identity",
+    phase: "initial",
+    diagnostic: { expected: expected || null }
+  };
+}
+
+function workerPidIdentityMismatchResult(workerPid, expected) {
+  return {
+    status: "failed",
+    error: "worker pid does not match trusted identity",
+    phase: "initial",
+    diagnostic: {
+      workerPid,
+      expected: expected || null
+    }
+  };
+}
+
+function terminateRecordedTrustedWorker(worker, env = process.env, terminator = terminateValidatedJobWorker) {
+  if (!worker) return null;
+  const expected = worker.identity;
+  const workerPid = positiveIntegerOrNull(worker.pid) ?? positiveIntegerOrNull(expected?.pid);
+  if (!workerPid) return null;
+  const expectedPid = positiveIntegerOrNull(expected?.pid);
+  if (expectedPid && workerPid !== expectedPid) {
+    return workerPidIdentityMismatchResult(workerPid, expected);
+  }
+  return terminator(workerPid, expected, env);
+}
+
 export function createJob({ command, args = [], cwd = process.cwd() }, env = process.env) {
   const createdAt = now();
   const job = {
@@ -135,6 +197,15 @@ export function createJob({ command, args = [], cwd = process.cwd() }, env = pro
     startedAt: "",
     endedAt: "",
     worker: null,
+    idempotencyKey: "",
+    workspaceFingerprint: "",
+    executionControls: {},
+    timeout: null,
+    workerPid: null,
+    lastHeartbeatAt: "",
+    lastProgressAt: "",
+    resultViewedAt: "",
+    submissionState: "created",
     stdout: "",
     stderr: "",
     error: ""
@@ -142,12 +213,57 @@ export function createJob({ command, args = [], cwd = process.cwd() }, env = pro
   return writeJob(job, cwd, env);
 }
 
-export function reserveJob({ command, args = [], cwd = process.cwd() }, env = process.env) {
+export function updateJob(jobId, updater, cwd = process.cwd(), env = process.env) {
+  if (env.ANTIGRAVITY_FOR_CODEX_TEST_UPDATE_JOB_FAILURE === "1") {
+    return null;
+  }
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    const updated = updater(job) || job;
+    return writeJob(updated, cwd, env);
+  });
+}
+
+export function findReusableJob({ command, args = [], cwd = process.cwd(), idempotencyKey = "" }, env = process.env) {
+  if (!idempotencyKey) return null;
+  const expectedArgs = JSON.stringify(args.map(String));
+  return listJobs(cwd, env).find((job) => {
+    const liveness = classifyJobLiveness(job, { now: Date.now(), env });
+    return job.command === command
+      && job.cwd === cwd
+      && job.idempotencyKey === idempotencyKey
+      && JSON.stringify((job.args || []).map(String)) === expectedArgs
+      && (liveness.state === "queued" || liveness.state === "healthy");
+  }) || null;
+}
+
+export function withWorkspaceJobLock(cwd = process.cwd(), env = process.env, callback) {
+  return withJobLock("workspace", cwd, env, callback);
+}
+
+export function markJobMetadataPersistenceFailed(jobId, message, cwd = process.cwd(), env = process.env) {
+  return withJobLock(jobId, cwd, env, () => {
+    const job = readJob(jobId, cwd, env);
+    if (!job) return null;
+    job.status = "failed";
+    job.submissionState = "metadata_failed";
+    job.error = capText(message || "Metadata persistence failed before worker start.");
+    job.endedAt = now();
+    job.updatedAt = job.endedAt;
+    return writeJob(job, cwd, env);
+  });
+}
+
+export function reserveJob({ command, args = [], cwd = process.cwd(), timeout = null }, env = process.env) {
   if (!RESERVABLE_COMMANDS.has(command)) {
     throw new Error(`Command "${command}" cannot be reserved.`);
   }
   const job = createJob({ command, args, cwd }, env);
   job.status = "reserved";
+  if (Number.isFinite(timeout) && timeout > 0) {
+    job.timeout = timeout;
+  }
   job.updatedAt = now();
   return writeJob(job, cwd, env);
 }
@@ -159,6 +275,7 @@ export function claimReservedJob(cwd = process.cwd(), jobId, env = process.env) 
       return null;
     }
     job.status = "queued";
+    job.submissionState = "queued";
     job.updatedAt = now();
     return writeJob(job, cwd, env);
   });
@@ -194,7 +311,8 @@ export function markJobViewed(jobId, cwd = process.cwd(), env = process.env) {
     const job = readJob(jobId, cwd, env);
     if (!job) return null;
     job.viewed = true;
-    job.updatedAt = now();
+    job.resultViewedAt = now();
+    job.updatedAt = job.resultViewedAt;
     return writeJob(job, cwd, env);
   });
 }
@@ -208,8 +326,11 @@ export function markJobRunning(jobId, worker, cwd = process.cwd(), env = process
     }
     job.status = "running";
     job.worker = worker;
+    job.workerPid = recordedWorkerPid({ worker });
+    job.submissionState = "running";
     job.startedAt = job.startedAt || now();
-    job.updatedAt = now();
+    job.lastHeartbeatAt = job.lastHeartbeatAt || now();
+    job.updatedAt = job.lastHeartbeatAt;
     return writeJob(job, cwd, env);
   });
 }
@@ -225,6 +346,7 @@ export function finishJob(jobId, result, cwd = process.cwd(), env = process.env)
     job.stdout = capText(result.stdout);
     job.stderr = capText(result.stderr);
     job.error = capText(result.error);
+    job.submissionState = "finished";
     job.endedAt = now();
     job.updatedAt = job.endedAt;
     return writeJob(job, cwd, env);
@@ -239,14 +361,34 @@ export function cancelJob(jobId, cwd = process.cwd(), env = process.env) {
       return refreshed;
     }
 
-    const termination = terminateValidatedJobWorker(refreshed.worker?.pid, refreshed.worker?.identity);
-    if (termination.status === "failed") {
+    const supervisedTermination = terminateRecordedTrustedWorker(refreshed.supervisedWorker, env, terminateValidatedCompanionChild);
+    let termination;
+    if (isMetadataOnlyCancellable(refreshed)) {
+      termination = { status: "not_running" };
+    } else {
+      const expectedIdentity = refreshed.worker?.identity;
+      const workerPid = recordedWorkerPid(refreshed);
+      if (requiresTrustedWorkerIdentityForCancellation(refreshed)
+        && !hasTrustedExpectedIdentity(expectedIdentity)) {
+        termination = missingTrustedWorkerIdentityResult(expectedIdentity);
+      } else if (hasTrustedExpectedIdentity(expectedIdentity)
+        && workerPid !== Number(expectedIdentity.pid)) {
+        termination = workerPidIdentityMismatchResult(workerPid, expectedIdentity);
+      } else {
+        termination = terminateValidatedJobWorker(workerPid, expectedIdentity, env);
+      }
+    }
+    const failedTermination = [supervisedTermination, termination]
+      .filter(Boolean)
+      .find((item) => item.status === "failed");
+    if (failedTermination) {
       refreshed.status = "cancel_failed";
-      refreshed.error = capText(termination.error || "Failed to cancel job.");
+      refreshed.error = capText(failedTermination.error || "Failed to cancel job.");
     } else {
       refreshed.status = "cancelled";
     }
-    refreshed.cancel = termination;
+    refreshed.submissionState = "finished";
+    refreshed.cancel = supervisedTermination ? { worker: termination, supervisedWorker: supervisedTermination } : termination;
     refreshed.endedAt = now();
     refreshed.updatedAt = refreshed.endedAt;
     return writeJob(refreshed, cwd, env);
