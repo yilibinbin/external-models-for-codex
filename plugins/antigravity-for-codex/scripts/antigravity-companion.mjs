@@ -1063,6 +1063,13 @@ function queueBackgroundJob(command, rawArgs) {
     try {
       spawnStoredJobWorker(stamped, resourceLease.lease?.id || "");
     } catch (error) {
+      const message = `Failed to start background job worker: ${error.message || String(error)}`;
+      finishJob(stamped.id, {
+        status: 1,
+        stdout: "",
+        stderr: `${message}\n`,
+        error: message
+      }, cwd, process.env);
       resourceLease.release();
       return {
         exitCode: 2,
@@ -1559,6 +1566,24 @@ function runReserveJob(rawArgs) {
   writeJson(outcome.payload);
 }
 
+function rollbackReservedJobStart(jobId, cwd = process.cwd(), { clearResourceLease = false } = {}) {
+  updateJob(jobId, (draft) => {
+    if (isTerminalJobStatus(draft.status)) {
+      return draft;
+    }
+    draft.status = "reserved";
+    draft.submissionState = "reserved";
+    delete draft.worker;
+    delete draft.workerPid;
+    delete draft.supervisedWorker;
+    if (clearResourceLease) {
+      delete draft.resourceLeaseId;
+    }
+    draft.updatedAt = new Date().toISOString();
+    return draft;
+  }, cwd, process.env);
+}
+
 function runReservedJob(rawArgs) {
   const jobId = requireJobId(rawArgs, "run-reserved-job");
   const cwd = process.cwd();
@@ -1590,6 +1615,7 @@ function runReservedJob(rawArgs) {
   }
   const resourceLease = ensureResourceLease(outcome.job.resourceLeaseId, "background-job", { env: process.env, command: outcome.job.command, transferable: false });
   if (!resourceLease.ok) {
+    rollbackReservedJobStart(outcome.job.id, cwd);
     process.stderr.write(`${capacityBlockedMessage("antigravity-for-codex", resourceLease)}\n`);
     process.exit(75);
   }
@@ -1609,6 +1635,7 @@ function runReservedJob(rawArgs) {
     spawnStoredJobWorker(jobForWorker, resourceLeaseId);
   } catch (error) {
     resourceLease.release();
+    rollbackReservedJobStart(outcome.job.id, cwd, { clearResourceLease: true });
     process.stderr.write(`Failed to start reserved background job: ${error.message || String(error)}\n`);
     process.exit(2);
   }

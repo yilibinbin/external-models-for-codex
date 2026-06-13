@@ -7,7 +7,16 @@ const MAX_ATTEMPTS = 10;
 const MAX_BASE_DELAY_MS = 1000;
 
 function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  if (typeof Atomics !== "undefined"
+    && typeof SharedArrayBuffer !== "undefined"
+    && typeof Atomics.wait === "function") {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    return;
+  }
+  const deadline = Date.now() + Math.max(0, ms);
+  while (Date.now() < deadline) {
+    // Synchronous fallback for JS runtimes without Atomics.wait.
+  }
 }
 
 function boundedInteger(value, fallback, min, max) {

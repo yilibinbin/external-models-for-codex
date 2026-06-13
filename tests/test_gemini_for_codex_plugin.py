@@ -28,6 +28,9 @@ def _run_with_spawn_retry(*args, **kwargs):
             time.sleep(0.05 * (2 ** attempt))
 
 
+# Route every subprocess.run call in this module through _run_with_spawn_retry
+# while preserving _SUBPROCESS_RUN as the original implementation. The test host
+# can transiently raise EAGAIN when spawning child processes under load.
 subprocess.run = _run_with_spawn_retry
 
 
@@ -1858,6 +1861,53 @@ def test_global_governor_reaps_stale_gemini_lease(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stdout == "OK"
     assert argv_file.exists()
+
+
+def test_global_governor_preserves_foreign_and_corrupt_gemini_leases(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    foreign = write_resource_lease(lock_dir, "other-plugin", "model-call", pid=999999, expires_minutes=-5)
+    corrupt = lock_dir / "corrupt.json"
+    corrupt.write_text("{not-json", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="OK", capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "OK"
+    assert argv_file.exists()
+    assert foreign.exists()
+    assert corrupt.exists()
+
+
+def test_global_governor_preserves_corrupt_gemini_mutex(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    mutex = lock_dir / ".governor.lock"
+    mutex.write_text("{not-json", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="SHOULD_NOT_RUN", capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_WAIT_MS"] = "0"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert mutex.exists()
+    assert not argv_file.exists()
 
 
 def test_multi_review_native_agents_uses_gemini_subagent_prompt_and_workspace(tmp_path):

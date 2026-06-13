@@ -2322,6 +2322,13 @@ function startBackgroundJob(command, rawArgs) {
     });
     return readJob(cwd, job.id) ?? job;
   } catch (error) {
+    const message = `Failed to start background job worker: ${error.message || String(error)}`;
+    finishJob(cwd, job.id, {
+      status: 1,
+      stdout: "",
+      stderr: `${message}\n`,
+      error: message
+    });
     resourceLease.release();
     throw error;
   }

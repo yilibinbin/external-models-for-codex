@@ -21,7 +21,16 @@ const DEFAULT_LEASE_TTL_MS = 30 * 60 * 1000;
 const BACKGROUND_LEASE_TTL_MS = 2 * 60 * 60 * 1000;
 
 function sleepMs(ms) {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  if (typeof Atomics !== "undefined"
+    && typeof SharedArrayBuffer !== "undefined"
+    && typeof Atomics.wait === "function") {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+    return;
+  }
+  const deadline = Date.now() + Math.max(0, ms);
+  while (Date.now() < deadline) {
+    // Synchronous fallback for JS runtimes without Atomics.wait.
+  }
 }
 
 function parsePositiveInteger(value, fallback, { min = 1, max = 64 } = {}) {
@@ -101,7 +110,7 @@ function readLease(file) {
 
 function shouldReapLease(lease, now = Date.now()) {
   if (!lease || lease.plugin !== PLUGIN_NAME) {
-    return true;
+    return false;
   }
   const expiresAt = Date.parse(String(lease.expiresAt || ""));
   if (Number.isFinite(expiresAt) && expiresAt <= now) {
@@ -126,7 +135,7 @@ function reapStaleLeases(root, now = Date.now()) {
     }
     const file = path.join(root, name);
     const lease = readLease(file);
-    if (shouldReapLease(lease, now)) {
+    if (lease?.plugin === PLUGIN_NAME && shouldReapLease(lease, now)) {
       try {
         fs.rmSync(file, { force: true });
       } catch {
@@ -165,7 +174,7 @@ function acquireMutex(root, env = process.env) {
       try {
         const stat = fs.statSync(file);
         const lock = readLease(file);
-        if ((Date.now() - stat.mtimeMs) > lockStaleMs(env) || !processAlive(lock?.pid)) {
+        if (lock && ((Date.now() - stat.mtimeMs) > lockStaleMs(env) || !processAlive(lock.pid))) {
           fs.rmSync(file, { force: true });
           continue;
         }

@@ -28,6 +28,9 @@ def _run_with_spawn_retry(*args, **kwargs):
             time.sleep(0.05 * (2 ** attempt))
 
 
+# Route every subprocess.run call in this module through _run_with_spawn_retry
+# while preserving _SUBPROCESS_RUN as the original implementation. The test host
+# can transiently raise EAGAIN when spawning child processes under load.
 subprocess.run = _run_with_spawn_retry
 
 def sanitized_env():
@@ -2880,6 +2883,49 @@ def test_global_governor_reaps_stale_antigravity_lease(tmp_path):
     assert argv_file.exists()
 
 
+def test_global_governor_preserves_foreign_and_corrupt_antigravity_leases(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    foreign = write_resource_lease(lock_dir, "other-plugin", "model-call", pid=999999, expires_minutes=-5)
+    corrupt = lock_dir / "corrupt.json"
+    corrupt.write_text("{not-json", encoding="utf8")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="OK", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = run_companion(["review", "allowed"], repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+    assert argv_file.exists()
+    assert foreign.exists()
+    assert corrupt.exists()
+
+
+def test_global_governor_preserves_corrupt_antigravity_mutex(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    mutex = lock_dir / ".governor.lock"
+    mutex.write_text("{not-json", encoding="utf8")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="SHOULD_NOT_RUN", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_WAIT_MS"] = "0"
+
+    result = run_companion(["review", "blocked"], repo, env)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert mutex.exists()
+    assert not argv_file.exists()
+
+
 def test_background_metadata_persistence_failure_does_not_start_worker(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3421,6 +3467,31 @@ def test_run_reserved_job_rechecks_active_cap_before_start(tmp_path):
     assert "maximum active background jobs (1) reached" in rejected_second.stderr
     assert json.loads(run_companion(["status", second_id], repo, env).stdout)["status"] == "reserved"
     assert wait_for_job(repo, env, first_id)["status"] == "succeeded"
+
+
+def test_run_reserved_job_rolls_back_when_global_capacity_is_full(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="SHOULD_NOT_RUN"))
+    reserve_env = dict(env)
+    reserve_env["ANTIGRAVITY_FOR_CODEX_RESOURCE_GOVERNOR"] = "off"
+    reserved = run_companion(["reserve-job", "review", "capacity reserved"], repo, reserve_env)
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["jobId"]
+
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "antigravity-for-codex", "background-job")
+    run_env = dict(env)
+    run_env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    run_env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS"] = "1"
+    blocked = run_companion(["run-reserved-job", job_id], repo, run_env)
+
+    assert blocked.returncode == 75
+    assert "capacity_blocked" in blocked.stderr
+    status = json.loads(run_companion(["status", job_id], repo, env).stdout)
+    assert status["status"] == "reserved"
+    assert status["submissionState"] == "reserved"
 
 
 def test_reserved_job_cancel_is_metadata_only(tmp_path):
