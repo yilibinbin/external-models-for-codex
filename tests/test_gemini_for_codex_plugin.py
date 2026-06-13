@@ -3,12 +3,45 @@ import os
 import pathlib
 import shutil
 import subprocess
+import datetime
+import errno
+import tempfile
+import time
+
+import pytest
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "gemini-for-codex"
 NODE = os.environ.get("NODE_BINARY") or shutil.which("node") or "/Applications/Codex.app/Contents/Resources/node"
 NODE_DIR = str(pathlib.Path(NODE).resolve().parent)
+_SUBPROCESS_RUN = subprocess.run
+
+
+def _run_with_spawn_retry(*args, **kwargs):
+    for attempt in range(5):
+        try:
+            return _SUBPROCESS_RUN(*args, **kwargs)
+        except BlockingIOError as error:
+            if error.errno != errno.EAGAIN or attempt >= 4:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+
+
+# Route every subprocess.run call in this module through _run_with_spawn_retry
+# while preserving _SUBPROCESS_RUN as the original implementation. The test host
+# can transiently raise EAGAIN when spawning child processes under load.
+subprocess.run = _run_with_spawn_retry
+
+
+@pytest.fixture(autouse=True)
+def isolate_gemini_resource_lock(monkeypatch):
+    monkeypatch.setenv(
+        "GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR",
+        tempfile.mkdtemp(prefix=f"gemini-for-codex-test-locks-{os.getpid()}-")
+    )
+
+
 FAKE_GEMINI_HELP = (
     "Usage: gemini\n"
     "  -p, --prompt TEXT\n"
@@ -73,6 +106,50 @@ def init_git_repo(repo):
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, capture_output=True, text=True)
     subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def write_resource_lease(lock_dir, plugin, kind, pid=None, expires_minutes=5, transferable=False):
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    payload = {
+        "id": f"{kind}-test-lease",
+        "plugin": plugin,
+        "kind": kind,
+        "command": "test",
+        "pid": os.getpid() if pid is None else pid,
+        "ppid": os.getppid(),
+        "transferable": transferable,
+        "createdAt": now.isoformat().replace("+00:00", "Z"),
+        "expiresAt": (now + datetime.timedelta(minutes=expires_minutes)).isoformat().replace("+00:00", "Z"),
+    }
+    target = lock_dir / f"{payload['id']}.json"
+    target.write_text(json.dumps(payload), encoding="utf8")
+    return target
+
+
+def test_spawn_retry_retries_transient_resource_errors():
+    module = (PLUGIN / "scripts" / "lib" / "spawn-retry.mjs").as_uri()
+    script = f"""
+import {{ spawnSyncWithRetry }} from {json.dumps(module)};
+let calls = 0;
+const result = spawnSyncWithRetry("node", [], {{}}, {{
+  attempts: 3,
+  baseDelayMs: 1,
+  spawnSyncImpl: () => {{
+    calls += 1;
+    if (calls < 3) {{
+      return {{ status: null, stdout: "", stderr: "", error: {{ code: "EAGAIN", message: "Resource temporarily unavailable" }} }};
+    }}
+    return {{ status: 0, stdout: "ok", stderr: "" }};
+  }}
+}});
+console.log(JSON.stringify({{ calls, status: result.status, stdout: result.stdout }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload == {"calls": 3, "status": 0, "stdout": "ok"}
 
 
 def fake_gemini(tmp_path, response="GEMINI_OK", capture_argv=None, first_line=None, help_text=FAKE_GEMINI_HELP, exit_on=None):
@@ -147,7 +224,7 @@ def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.11.2"
+    assert manifest["version"] == "0.11.3"
     assert "Antigravity" not in json.dumps(manifest)
     assert "antigravity" not in json.dumps(manifest).lower()
     assert manifest["skills"] == "./skills/"
@@ -166,7 +243,7 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "Real Gemini smoke diagnostics" in manifest["interface"]["capabilities"]
     assert "Gemini CLI extension and MCP capability diagnostics" in manifest["interface"]["capabilities"]
     github_actions = (PLUGIN / "scripts" / "lib" / "github-actions.mjs").read_text(encoding="utf8")
-    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.11.2";' in github_actions
+    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.11.3";' in github_actions
 
 
 def test_marketplace_lists_gemini_for_codex():
@@ -1719,6 +1796,120 @@ def test_multi_review_runs_role_invocations_in_parallel(tmp_path):
     assert "orchestration: parallel Gemini CLI role fan-out" in result.stdout
 
 
+def test_multi_review_degrades_to_sequential_under_global_limit(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    log_file = tmp_path / "gemini-calls.jsonl"
+    repo.mkdir()
+    init_git_repo(repo)
+    fake = fake_gemini_jsonl(tmp_path, log_file, delay_ms=120)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake)
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(tmp_path / "locks")
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--roles", "correctness,security", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert len(calls) == 2
+    assert calls[1]["start"] >= calls[0]["end"]
+    assert "orchestration: sequential Gemini CLI role review" in result.stdout
+
+
+def test_global_governor_blocks_foreground_gemini_when_at_capacity(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "gemini-for-codex", "model-call")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert not argv_file.exists()
+
+
+def test_global_governor_reaps_stale_gemini_lease(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "gemini-for-codex", "model-call", pid=999999)
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="OK", capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "OK"
+    assert argv_file.exists()
+
+
+def test_global_governor_preserves_foreign_and_corrupt_gemini_leases(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    foreign = write_resource_lease(lock_dir, "other-plugin", "model-call", pid=999999, expires_minutes=-5)
+    corrupt = lock_dir / "corrupt.json"
+    corrupt.write_text("{not-json", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="OK", capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "OK"
+    assert argv_file.exists()
+    assert foreign.exists()
+    assert corrupt.exists()
+
+
+def test_global_governor_preserves_corrupt_gemini_mutex(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    mutex = lock_dir / ".governor.lock"
+    mutex.write_text("{not-json", encoding="utf8")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, response="SHOULD_NOT_RUN", capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_WAIT_MS"] = "0"
+
+    result = subprocess.run([NODE, str(runtime), "review", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert mutex.exists()
+    assert not argv_file.exists()
+
+
 def test_multi_review_native_agents_uses_gemini_subagent_prompt_and_workspace(tmp_path):
     runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
     repo = tmp_path / "repo"
@@ -2487,6 +2678,8 @@ def test_release_check_passes_with_provider_fixtures(tmp_path):
     assert payload["checks"]["contextProviderFixtures"] is True
     assert payload["checks"]["nativeOrchestrationSafety"] is True
     assert payload["checks"]["gitTimeoutSafety"] is True
+    assert payload["checks"]["resourceGovernorSafety"] is True
+    assert payload["checks"]["spawnRetrySafety"] is True
 
 
 def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
@@ -2503,7 +2696,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.11.2" in text
+    assert "--ref gemini-for-codex-v0.11.3" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text
@@ -2739,10 +2932,12 @@ def test_lifecycle_hooks_track_session_cancel_only_same_session_and_unread_resul
     assert "extra" in current["hookPayloadKeys"]
 
     reserved_same = subprocess.run([NODE, str(runtime), "reserve-job", "review", "--background"], cwd=repo, env=env, capture_output=True, text=True)
+    assert reserved_same.returncode == 0, reserved_same.stderr
     same_job = json.loads(reserved_same.stdout)["job"]["id"]
     # Create a second sessionless job after removing the current session file.
     current_files[0].unlink()
     reserved_other = subprocess.run([NODE, str(runtime), "reserve-job", "review", "--background"], cwd=repo, env=env, capture_output=True, text=True)
+    assert reserved_other.returncode == 0, reserved_other.stderr
     other_job = json.loads(reserved_other.stdout)["job"]["id"]
 
     no_session_end = subprocess.run([NODE, str(lifecycle), "SessionEnd"], cwd=repo, env=env, input=json.dumps({"cwd": str(repo)}), capture_output=True, text=True)
@@ -2752,6 +2947,7 @@ def test_lifecycle_hooks_track_session_cancel_only_same_session_and_unread_resul
     end = subprocess.run([NODE, str(lifecycle), "SessionEnd"], cwd=repo, env=env, input=json.dumps({"cwd": str(repo), "session_id": "s1"}), capture_output=True, text=True)
     assert end.returncode == 0
     jobs = subprocess.run([NODE, str(runtime), "jobs"], cwd=repo, env=env, capture_output=True, text=True)
+    assert jobs.returncode == 0, jobs.stderr
     job_map = {job["id"]: job for job in json.loads(jobs.stdout)["jobs"]}
     assert job_map[same_job]["status"] == "cancelled"
     assert job_map[other_job]["status"] == "queued"
@@ -2789,6 +2985,54 @@ def test_review_gate_blocks_only_explicit_block(tmp_path):
     payload = json.loads(result.stdout)
     assert payload["decision"] == "block"
     assert "BLOCK" not in result.stderr
+
+
+def test_review_gate_fails_open_when_global_gemini_capacity_is_full(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "file.txt").write_text("base\n", encoding="utf8")
+    subprocess.run(["git", "add", "file.txt"], cwd=repo, check=True, capture_output=True, text=True)
+    subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True, text=True)
+    (repo / "file.txt").write_text("changed\n", encoding="utf8")
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "gemini-for-codex", "model-call")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, first_line="BLOCK: should not run", capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+    subprocess.run([NODE, str(runtime), "setup", "--enable-review-gate"], cwd=repo, env=env, check=True, capture_output=True, text=True)
+
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "capacity_blocked" in result.stderr
+    assert not argv_file.exists()
+
+
+def test_background_job_is_capacity_blocked_by_global_gemini_governor(tmp_path):
+    runtime = PLUGIN / "scripts" / "gemini-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "gemini-for-codex", "background-job")
+    env = os.environ.copy()
+    env["GEMINI_CLI_PATH"] = str(fake_gemini(tmp_path, capture_argv=argv_file))
+    env["GEMINI_FOR_CODEX_DATA"] = str(tmp_path / "data")
+    env["GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["GEMINI_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS"] = "1"
+
+    result = subprocess.run([NODE, str(runtime), "review", "--background", "focus"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert not argv_file.exists()
 
 
 def test_review_gate_role_pack_preserves_bare_default_and_rejects_incompatible_pack(tmp_path):

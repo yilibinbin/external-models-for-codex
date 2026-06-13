@@ -1,10 +1,13 @@
 import json
+import errno
 import os
 import pathlib
 import shlex
 import shutil
 import subprocess
 import time
+import datetime
+import tempfile
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -12,13 +15,77 @@ PLUGIN = ROOT / "plugins" / "antigravity-for-codex"
 NODE = os.environ.get("NODE_BINARY") or shutil.which("node")
 if not NODE:
     raise RuntimeError("node not found; set NODE_BINARY or put node on PATH")
+_SUBPROCESS_RUN = subprocess.run
+
+
+def _run_with_spawn_retry(*args, **kwargs):
+    for attempt in range(5):
+        try:
+            return _SUBPROCESS_RUN(*args, **kwargs)
+        except BlockingIOError as error:
+            if error.errno != errno.EAGAIN or attempt >= 4:
+                raise
+            time.sleep(0.05 * (2 ** attempt))
+
+
+# Route every subprocess.run call in this module through _run_with_spawn_retry
+# while preserving _SUBPROCESS_RUN as the original implementation. The test host
+# can transiently raise EAGAIN when spawning child processes under load.
+subprocess.run = _run_with_spawn_retry
 
 def sanitized_env():
     env = dict(os.environ)
     for name in list(env):
         if name in {"AGY_CLI_PATH", "ANTIGRAVITY_CLI_PATH"} or name.startswith("ANTIGRAVITY_FOR_CODEX_"):
             env.pop(name, None)
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = tempfile.mkdtemp(
+        prefix=f"antigravity-for-codex-test-locks-{os.getpid()}-"
+    )
     return env
+
+
+def write_resource_lease(lock_dir, plugin, kind, pid=None, expires_minutes=5, transferable=False):
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    payload = {
+        "id": f"{kind}-test-lease",
+        "plugin": plugin,
+        "kind": kind,
+        "command": "test",
+        "pid": os.getpid() if pid is None else pid,
+        "ppid": os.getppid(),
+        "transferable": transferable,
+        "createdAt": now.isoformat().replace("+00:00", "Z"),
+        "expiresAt": (now + datetime.timedelta(minutes=expires_minutes)).isoformat().replace("+00:00", "Z"),
+    }
+    target = lock_dir / f"{payload['id']}.json"
+    target.write_text(json.dumps(payload), encoding="utf8")
+    return target
+
+
+def test_spawn_retry_retries_transient_resource_errors():
+    module = (PLUGIN / "scripts" / "lib" / "spawn-retry.mjs").as_uri()
+    script = f"""
+import {{ spawnSyncWithRetry }} from {json.dumps(module)};
+let calls = 0;
+const result = spawnSyncWithRetry("node", [], {{}}, {{
+  attempts: 3,
+  baseDelayMs: 1,
+  spawnSyncImpl: () => {{
+    calls += 1;
+    if (calls < 3) {{
+      return {{ status: null, stdout: "", stderr: "", error: {{ code: "EAGAIN", message: "Resource temporarily unavailable" }} }};
+    }}
+    return {{ status: 0, stdout: "ok", stderr: "" }};
+  }}
+}});
+console.log(JSON.stringify({{ calls, status: result.status, stdout: result.stdout }}));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", script], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload == {"calls": 3, "status": 0, "stdout": "ok"}
 
 
 def test_sanitized_env_removes_antigravity_runtime_flags(monkeypatch):
@@ -47,7 +114,7 @@ def test_sanitized_env_removes_antigravity_runtime_flags(monkeypatch):
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.6.0"
+    assert manifest["version"] == "0.6.1"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
@@ -143,7 +210,9 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "process.mjs",
         "render-review.mjs",
         "reports.mjs",
+        "resource-governor.mjs",
         "role-packs.mjs",
+        "spawn-retry.mjs",
         "state.mjs",
         "structured-output.mjs",
         "version.mjs",
@@ -382,6 +451,34 @@ def write_fake_agy(
 
 def fake_agy(tmp_path, **kwargs):
     return write_fake_agy(tmp_path / "agy", **kwargs)
+
+
+def fake_agy_jsonl(tmp_path, log_file, delay_ms=0):
+    agy = tmp_path / "agy"
+    agy.write_text(
+        "#!/usr/bin/env node\n"
+        "const fs = require('fs');\n"
+        "const argv = process.argv.slice(2);\n"
+        f"const logFile = {json.dumps(str(log_file))};\n"
+        f"const delayMs = {int(delay_ms)};\n"
+        "if (argv.join(' ') === '--version') { console.log('1.0.6-fake'); process.exit(0); }\n"
+        f"if (argv.join(' ') === '--help') {{ process.stdout.write({json.dumps(FAKE_AGY_HELP)}); process.exit(0); }}\n"
+        f"if (argv.join(' ') === 'models') {{ process.stdout.write({json.dumps(FAKE_AGY_MODELS)}); process.exit(0); }}\n"
+        "if (!argv.includes('--prompt')) { console.error('missing prompt'); process.exit(9); }\n"
+        "if (!argv.includes('--model')) { console.error('missing model'); process.exit(8); }\n"
+        "const prompt = argv[argv.indexOf('--prompt') + 1] || '';\n"
+        "const start = Date.now();\n"
+        "setTimeout(() => {\n"
+        "  const end = Date.now();\n"
+        "  const role = prompt.match(/<role_name>([^<]+)/)?.[1] || 'unknown';\n"
+        "  fs.appendFileSync(logFile, JSON.stringify({argv, prompt, role, cwd: process.cwd(), start, end}) + '\\n');\n"
+        "  fs.writeSync(1, `OK ${role}`);\n"
+        "  process.exit(0);\n"
+        "}, delayMs);\n",
+        encoding="utf8",
+    )
+    agy.chmod(0o755)
+    return agy
 
 
 def descendant_spawning_agy(tmp_path, descendant_pid_file):
@@ -2734,6 +2831,101 @@ def test_background_active_cap_rejects_new_distinct_job(tmp_path):
         run_companion(["cancel", first_id], repo, env)
 
 
+def test_global_governor_blocks_background_antigravity_when_at_capacity(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "antigravity-for-codex", "background-job")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="SHOULD_NOT_RUN"))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS"] = "1"
+
+    result = run_companion(["review", "--background", "blocked"], repo, env)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+
+
+def test_global_governor_blocks_foreground_antigravity_when_at_capacity(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "antigravity-for-codex", "model-call")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="SHOULD_NOT_RUN", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = run_companion(["review", "blocked"], repo, env)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert not argv_file.exists()
+
+
+def test_global_governor_reaps_stale_antigravity_lease(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "antigravity-for-codex", "model-call", pid=999999)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="OK", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = run_companion(["review", "allowed"], repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+    assert argv_file.exists()
+
+
+def test_global_governor_preserves_foreign_and_corrupt_antigravity_leases(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    foreign = write_resource_lease(lock_dir, "other-plugin", "model-call", pid=999999, expires_minutes=-5)
+    corrupt = lock_dir / "corrupt.json"
+    corrupt.write_text("{not-json", encoding="utf8")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="OK", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = run_companion(["review", "allowed"], repo, env)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "OK"
+    assert argv_file.exists()
+    assert foreign.exists()
+    assert corrupt.exists()
+
+
+def test_global_governor_preserves_corrupt_antigravity_mutex(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    lock_dir.mkdir()
+    mutex = lock_dir / ".governor.lock"
+    mutex.write_text("{not-json", encoding="utf8")
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="SHOULD_NOT_RUN", capture_argv=argv_file))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_WAIT_MS"] = "0"
+
+    result = run_companion(["review", "blocked"], repo, env)
+
+    assert result.returncode == 75
+    assert "capacity_blocked" in result.stderr
+    assert mutex.exists()
+    assert not argv_file.exists()
+
+
 def test_background_metadata_persistence_failure_does_not_start_worker(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3277,6 +3469,31 @@ def test_run_reserved_job_rechecks_active_cap_before_start(tmp_path):
     assert wait_for_job(repo, env, first_id)["status"] == "succeeded"
 
 
+def test_run_reserved_job_rolls_back_when_global_capacity_is_full(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    env = companion_env(tmp_path, fake_agy(tmp_path, response="SHOULD_NOT_RUN"))
+    reserve_env = dict(env)
+    reserve_env["ANTIGRAVITY_FOR_CODEX_RESOURCE_GOVERNOR"] = "off"
+    reserved = run_companion(["reserve-job", "review", "capacity reserved"], repo, reserve_env)
+    assert reserved.returncode == 0, reserved.stderr
+    job_id = json.loads(reserved.stdout)["jobId"]
+
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "antigravity-for-codex", "background-job")
+    run_env = dict(env)
+    run_env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    run_env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS"] = "1"
+    blocked = run_companion(["run-reserved-job", job_id], repo, run_env)
+
+    assert blocked.returncode == 75
+    assert "capacity_blocked" in blocked.stderr
+    status = json.loads(run_companion(["status", job_id], repo, env).stdout)
+    assert status["status"] == "reserved"
+    assert status["submissionState"] == "reserved"
+
+
 def test_reserved_job_cancel_is_metadata_only(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -3516,8 +3733,8 @@ def test_job_cancellation_confirms_sigterm_ignored_worker_exits(tmp_path):
 
         assert cancel.returncode == 0, cancel.stderr
         assert json.loads(cancel.stdout)["status"] == "cancelled"
-        assert not process_is_running(worker_pid)
-        assert not process_is_running(agy_pid)
+        assert wait_for_process_exit(worker_pid)
+        assert wait_for_process_exit(agy_pid)
     finally:
         if agy_pid_file.exists():
             agy_pid = int(agy_pid_file.read_text(encoding="utf8"))
@@ -4164,7 +4381,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.6.0\n"
+        "# antigravity-for-codex-v0.6.1\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -4203,7 +4420,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.6.0\n"
+        "          echo --ref antigravity-for-codex-v0.6.1\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
@@ -4373,6 +4590,31 @@ def test_multi_review_uses_role_pack(tmp_path):
     assert "## adversarial" in result.stdout
 
 
+def test_multi_review_degrades_to_sequential_under_global_antigravity_limit(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    log_file = tmp_path / "agy-calls.jsonl"
+    env = companion_env(tmp_path, fake_agy_jsonl(tmp_path, log_file, delay_ms=120))
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(tmp_path / "locks")
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+
+    result = subprocess.run(
+        [NODE, str(runtime), "multi-review", "--roles", "correctness,security", "focus"],
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log_file.read_text(encoding="utf8").splitlines()]
+    assert len(calls) == 2
+    assert calls[1]["start"] >= calls[0]["end"]
+    assert "sequential Antigravity role review" in result.stdout
+
+
 def test_review_gate_blocks_only_on_explicit_block(tmp_path):
     runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
     repo = tmp_path / "repo"
@@ -4419,6 +4661,29 @@ def test_review_gate_fail_open_on_invalid_output(tmp_path):
     assert result.returncode == 0
     assert result.stdout == ""
     assert "[antigravity-for-codex review-gate] invalid output; allowing stop" in result.stderr
+
+
+def test_review_gate_fails_open_when_global_antigravity_capacity_is_full(tmp_path):
+    runtime = PLUGIN / "scripts" / "antigravity-companion.mjs"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    init_git_repo(repo)
+    (repo / "change.txt").write_text("change\n", encoding="utf8")
+    argv_file = tmp_path / "agy-argv.json"
+    lock_dir = tmp_path / "locks"
+    write_resource_lease(lock_dir, "antigravity-for-codex", "model-call")
+    env = sanitized_env()
+    env["ANTIGRAVITY_FOR_CODEX_REVIEW_GATE"] = "on"
+    env["ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR"] = str(lock_dir)
+    env["ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS"] = "1"
+    env["AGY_CLI_PATH"] = str(fake_agy(tmp_path, response="BLOCK: should not run", capture_argv=argv_file))
+
+    result = subprocess.run([NODE, str(runtime), "review-gate"], cwd=repo, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert "capacity_blocked" in result.stderr
+    assert not argv_file.exists()
 
 
 def test_review_gate_sync_timeout_cleans_posix_descendant_process_group(tmp_path):
@@ -4970,6 +5235,8 @@ def test_release_check_passes():
     assert "PASS windows-descendant-cleanup" in result.stdout
     assert "PASS posix-sync-timeout-cleanup" in result.stdout
     assert "PASS reserved-job-resource-guard" in result.stdout
+    assert "PASS global-resource-governor" in result.stdout
+    assert "PASS spawn-retry-safety" in result.stdout
     assert "PASS no-unsupported-review-gate-setup-command" in result.stdout
     assert "PASS background-idempotency-fingerprint" in result.stdout
     assert "PASS skills-natural-language-routing-paths" in result.stdout
@@ -4998,7 +5265,7 @@ def test_release_check_passes():
 
 
 def test_release_check_passes_from_installed_plugin_layout(tmp_path):
-    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.6.0"
+    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.6.1"
     shutil.copytree(PLUGIN, installed)
     runtime = installed / "scripts" / "antigravity-companion.mjs"
 

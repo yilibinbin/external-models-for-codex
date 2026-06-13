@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - 2026-06-13
+
+- Add a file-backed global resource governor for foreground reviews, Stop gates, multi-review fan-out, background jobs, and reserved workers.
+- Add bounded spawn retry handling for transient local process pressure (`EAGAIN`, `EMFILE`, `ENFILE`, `ENOBUFS`), including POSIX supervisor retry for inner `agy` startup pressure.
+- Add release-check and pytest coverage for resource-governor and spawn-retry safety.
+
 ## 0.6.0 - 2026-06-12
 
 - Added agy-native capability, model catalog, and outcome classification modules.

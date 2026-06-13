@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { gitSignalTimeoutMs } from "./job-lifecycle.mjs";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 const STATE_HOME_ENV = "ANTIGRAVITY_FOR_CODEX_STATE_HOME";
 const CODEX_PLUGIN_DATA_ENV = "CODEX_PLUGIN_DATA";
@@ -25,6 +25,10 @@ const GIT_REPOSITORY_ENV_KEYS = new Set([
   "GIT_OBJECT_DIRECTORY",
   "GIT_WORK_TREE"
 ]);
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function canonicalPath(value) {
   try {

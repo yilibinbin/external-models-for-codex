@@ -1,9 +1,13 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 export const GIT_TIMEOUT_MS = 10 * 1000;
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function runGit(args, cwd) {
   const result = spawnSync("git", args, {

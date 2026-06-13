@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.3 - 2026-06-13
+
+- Add a file-backed global resource governor for foreground reviews, Stop gates, multi-review fan-out, background jobs, and reserved workers.
+- Add bounded spawn retry handling for transient local process pressure (`EAGAIN`, `EMFILE`, `ENFILE`, `ENOBUFS`).
+- Add release-check and pytest coverage for resource-governor and spawn-retry safety.
+
 ## 0.11.2 - 2026-06-08
 
 - Replace the Gemini plugin logo and composer icon with a dual-tile Gemini + Codex joint-brand design.

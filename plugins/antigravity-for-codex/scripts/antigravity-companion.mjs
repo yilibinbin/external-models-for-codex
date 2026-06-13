@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -8,8 +8,8 @@ import { fileURLToPath } from "node:url";
 import {
   antigravityPreflight,
   antigravityModelDiagnostics,
-  antigravityPrint,
-  antigravityPrintAsync,
+  antigravityPrint as rawAntigravityPrint,
+  antigravityPrintAsync as rawAntigravityPrintAsync,
   MODEL_PROVIDER_ENV,
   MODEL_ENV,
   normalizedModelProvider,
@@ -80,6 +80,16 @@ import {
   PLUGIN_VERSION,
   RELEASE_REF
 } from "./lib/version.mjs";
+import {
+  acquireResourceLease,
+  capacityBlockedMessage,
+  ensureResourceLease,
+  multiReviewConcurrency,
+  transferResourceLease,
+  withResourceLeaseAsync,
+  withResourceLeaseSync
+} from "./lib/resource-governor.mjs";
+import { spawnSyncWithRetry } from "./lib/spawn-retry.mjs";
 
 const VALID_COMMANDS = new Set([
   "setup",
@@ -141,6 +151,26 @@ const GIT_REPOSITORY_ENV_KEYS = new Set([
   "GIT_OBJECT_DIRECTORY",
   "GIT_WORK_TREE"
 ]);
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
+
+function antigravityPrint(prompt, options = {}, env = process.env) {
+  return withResourceLeaseSync("model-call", {
+    env,
+    command: "agy",
+    ttlMs: (options.timeout || DEFAULT_TIMEOUT_MS) + 60_000
+  }, () => rawAntigravityPrint(prompt, options, env));
+}
+
+async function antigravityPrintAsync(prompt, options = {}, env = process.env) {
+  return await withResourceLeaseAsync("model-call", {
+    env,
+    command: "agy",
+    ttlMs: (options.timeout || DEFAULT_TIMEOUT_MS) + 60_000
+  }, async () => rawAntigravityPrintAsync(prompt, options, env));
+}
 
 function usage(command = "") {
   if (command === "review") {
@@ -938,7 +968,7 @@ function writeJson(payload) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 }
 
-function spawnStoredJobWorker(job) {
+function spawnStoredJobWorker(job, resourceLeaseId = "") {
   const child = spawn(process.execPath, [COMPANION_PATH, "__run-job", job.id], {
     cwd: job.cwd,
     env: {
@@ -949,6 +979,9 @@ function spawnStoredJobWorker(job) {
     stdio: "ignore"
   });
   child.unref();
+  if (resourceLeaseId) {
+    transferResourceLease(resourceLeaseId, child.pid, process.env);
+  }
   return child;
 }
 
@@ -999,6 +1032,13 @@ function queueBackgroundJob(command, rawArgs) {
       };
     }
 
+    const resourceLease = acquireResourceLease("background-job", { env: process.env, command, transferable: true });
+    if (!resourceLease.ok) {
+      return {
+        exitCode: 75,
+        stderr: `${capacityBlockedMessage("antigravity-for-codex", resourceLease)}\n`
+      };
+    }
     const job = createJob({ command, args: cleanArgs, cwd }, process.env);
     const stamped = updateJob(job.id, (draft) => {
       const updatedAt = new Date().toISOString();
@@ -1007,18 +1047,35 @@ function queueBackgroundJob(command, rawArgs) {
       draft.executionControls = executionControls;
       draft.timeout = args.timeout;
       draft.submissionState = "queued";
+      draft.resourceLeaseId = resourceLease.lease?.id || "";
       draft.updatedAt = updatedAt;
       return draft;
     }, cwd, process.env);
     if (!stamped) {
       const message = "Metadata persistence failed before worker start.";
       markJobMetadataPersistenceFailed(job.id, message, cwd, process.env);
+      resourceLease.release();
       return {
         exitCode: 2,
         stderr: `Failed to queue background job: ${message}\n`
       };
     }
-    spawnStoredJobWorker(stamped);
+    try {
+      spawnStoredJobWorker(stamped, resourceLease.lease?.id || "");
+    } catch (error) {
+      const message = `Failed to start background job worker: ${error.message || String(error)}`;
+      finishJob(stamped.id, {
+        status: 1,
+        stdout: "",
+        stderr: `${message}\n`,
+        error: message
+      }, cwd, process.env);
+      resourceLease.release();
+      return {
+        exitCode: 2,
+        stderr: `Failed to queue background job: ${error.message || String(error)}\n`
+      };
+    }
     return { payload: { status: "queued", jobId: stamped.id, reused: false } };
   });
 
@@ -1469,6 +1526,13 @@ function runReserveJob(rawArgs) {
         stderr: activeCapFailure("reserve", cap)
       };
     }
+    const resourceLease = acquireResourceLease("background-job", { env: process.env, command, transferable: true });
+    if (!resourceLease.ok) {
+      return {
+        exitCode: 75,
+        stderr: `${capacityBlockedMessage("antigravity-for-codex", resourceLease)}\n`
+      };
+    }
     const job = reserveJob({ command, args: cleanArgs, cwd, timeout }, process.env);
     const stamped = updateJob(job.id, (draft) => {
       const updatedAt = new Date().toISOString();
@@ -1476,12 +1540,14 @@ function runReserveJob(rawArgs) {
       draft.workspaceFingerprint = fingerprint.fingerprint;
       draft.executionControls = executionControls;
       draft.submissionState = "reserved";
+      draft.resourceLeaseId = resourceLease.lease?.id || "";
       draft.updatedAt = updatedAt;
       return draft;
     }, cwd, process.env);
     if (!stamped) {
       const message = "Metadata persistence failed before reserved job start.";
       markJobMetadataPersistenceFailed(job.id, message, cwd, process.env);
+      resourceLease.release();
       return {
         exitCode: 2,
         stderr: `Failed to reserve background job: ${message}\n`
@@ -1498,6 +1564,24 @@ function runReserveJob(rawArgs) {
     process.exit(outcome.exitCode || 2);
   }
   writeJson(outcome.payload);
+}
+
+function rollbackReservedJobStart(jobId, cwd = process.cwd(), { clearResourceLease = false } = {}) {
+  updateJob(jobId, (draft) => {
+    if (isTerminalJobStatus(draft.status)) {
+      return draft;
+    }
+    draft.status = "reserved";
+    draft.submissionState = "reserved";
+    delete draft.worker;
+    delete draft.workerPid;
+    delete draft.supervisedWorker;
+    if (clearResourceLease) {
+      delete draft.resourceLeaseId;
+    }
+    draft.updatedAt = new Date().toISOString();
+    return draft;
+  }, cwd, process.env);
 }
 
 function runReservedJob(rawArgs) {
@@ -1529,7 +1613,32 @@ function runReservedJob(rawArgs) {
     process.stderr.write(outcome.stderr);
     process.exit(outcome.exitCode || 2);
   }
-  spawnStoredJobWorker(outcome.job);
+  const resourceLease = ensureResourceLease(outcome.job.resourceLeaseId, "background-job", { env: process.env, command: outcome.job.command, transferable: false });
+  if (!resourceLease.ok) {
+    rollbackReservedJobStart(outcome.job.id, cwd);
+    process.stderr.write(`${capacityBlockedMessage("antigravity-for-codex", resourceLease)}\n`);
+    process.exit(75);
+  }
+  const resourceLeaseId = resourceLease.lease?.id || outcome.job.resourceLeaseId || "";
+  const jobForWorker = {
+    ...outcome.job,
+    resourceLeaseId
+  };
+  if (resourceLeaseId && resourceLeaseId !== outcome.job.resourceLeaseId) {
+    updateJob(outcome.job.id, (draft) => {
+      draft.resourceLeaseId = resourceLeaseId;
+      draft.updatedAt = new Date().toISOString();
+      return draft;
+    }, cwd, process.env);
+  }
+  try {
+    spawnStoredJobWorker(jobForWorker, resourceLeaseId);
+  } catch (error) {
+    resourceLease.release();
+    rollbackReservedJobStart(outcome.job.id, cwd, { clearResourceLease: true });
+    process.stderr.write(`Failed to start reserved background job: ${error.message || String(error)}\n`);
+    process.exit(2);
+  }
   writeJson({ status: "queued", jobId: outcome.job.id });
 }
 
@@ -1558,6 +1667,20 @@ function childResultNeedsTreeCleanup(result) {
     result.stderr,
     result.error
   ].filter(Boolean).join("\n"));
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
 }
 
 function runChildProcessAsync(command, args, options = {}) {
@@ -1698,6 +1821,17 @@ async function runStoredJob(rawArgs) {
   if (isTerminalJobStatus(running.status)) {
     process.exit(0);
   }
+  const resourceLease = ensureResourceLease(running.resourceLeaseId, "background-job", { env: process.env, command: running.command, transferable: false });
+  if (!resourceLease.ok) {
+    const message = capacityBlockedMessage("antigravity-for-codex", resourceLease);
+    finishJob(jobId, {
+      status: 75,
+      stdout: "",
+      stderr: `${message}\n`,
+      error: message
+    }, running.cwd, process.env);
+    process.exit(75);
+  }
 
   const heartbeat = setInterval(() => {
     updateJob(jobId, (job) => {
@@ -1739,6 +1873,7 @@ async function runStoredJob(rawArgs) {
     }, running.cwd, process.env);
   } finally {
     clearInterval(heartbeat);
+    resourceLease.release();
   }
 }
 
@@ -1858,7 +1993,8 @@ async function runMultiReview(rawArgs) {
       }
     }
   }
-  const results = await Promise.all(roles.map(async (role) => {
+  const concurrency = multiReviewConcurrency(process.env);
+  const results = await mapWithConcurrency(roles, concurrency, async (role) => {
     const prompt = renderCommandPrompt("multi-review", {
       ROLE: role.name,
       ROLE_BRIEF: role.brief,
@@ -1869,9 +2005,10 @@ async function runMultiReview(rawArgs) {
     });
     const result = await antigravityPrintAsync(prompt, { ...args, preflight }, process.env);
     return { role: role.name, result };
-  }));
+  });
 
   let failed = false;
+  process.stdout.write(`## Orchestration\n${concurrency <= 1 ? "sequential Antigravity role review" : `parallel Antigravity role fan-out (bounded ${concurrency} max)`}\n\n`);
   for (const { role, result } of results) {
     const body = result.stdout || result.stderr || result.error;
     const timeoutNote = result.timedOut ? `${body ? "\n" : ""}[timed out]` : "";
@@ -1960,6 +2097,10 @@ function runReleaseCheck(rawArgs) {
   const jobs = readText("scripts/lib/jobs.mjs");
   const reports = readText("scripts/lib/reports.mjs");
   const state = readText("scripts/lib/state.mjs");
+  const resourceGovernor = readText("scripts/lib/resource-governor.mjs");
+  const spawnRetry = readText("scripts/lib/spawn-retry.mjs");
+  const processModule = readText("scripts/lib/process.mjs");
+  const worktreeFingerprintModule = readText("scripts/lib/worktree-fingerprint.mjs");
   const mailbox = readText("scripts/lib/mailbox.mjs");
   const leases = readText("scripts/lib/leases.mjs");
   const readme = readText("README.md");
@@ -2068,6 +2209,8 @@ function runReleaseCheck(rawArgs) {
   const reserveJobHotPath = sourceSlice(companion, "function runReserveJob", "function appendCapped");
   const activeJobsHotPath = sourceSlice(companion, "function activeBackgroundJobs", "function spawnStoredJobWorker");
   const backgroundSupervisorHotPath = sourceSlice(companion, "function childResultNeedsTreeCleanup", "function runReviewGate");
+  const resourceGovernorHotPath = sourceSlice(companion, "function antigravityPrint", "function usage");
+  const resourceGovernorBackgroundHotPath = `${sourceSlice(companion, "function spawnStoredJobWorker", "function queueBackgroundJob")}\n${sourceSlice(companion, "function queueBackgroundJob", "function writeReviewOperationReport")}\n${sourceSlice(companion, "function runReserveJob", "function appendCapped")}\n${sourceSlice(companion, "async function runStoredJob", "function runReviewGate")}\n${sourceSlice(companion, "async function mapWithConcurrency", "function runChildProcessAsync")}\n${sourceSlice(companion, "async function runMultiReview", "function releaseCheckResult")}`;
   const untrackedSymlinkSafeOk = [
     "fs.constants?.O_NOFOLLOW",
     "fs.lstatSync(filePath)",
@@ -2169,6 +2312,45 @@ function runReleaseCheck(rawArgs) {
       "[\"queued\", \"healthy\", \"suspect\"]",
       "excludeJobId"
     ].every((needle) => activeJobsHotPath.includes(needle));
+  const globalResourceGovernorOk = [
+    "ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR",
+    "ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS",
+    "ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS",
+    "ANTIGRAVITY_FOR_CODEX_MULTI_REVIEW_MAX_PARALLEL",
+    "global-resource-locks",
+    "transferable",
+    "capacity_blocked"
+  ].every((needle) => resourceGovernor.includes(needle))
+    && [
+      'withResourceLeaseSync("model-call"',
+      'withResourceLeaseAsync("model-call"'
+    ].every((needle) => resourceGovernorHotPath.includes(needle))
+    && [
+      'acquireResourceLease("background-job"',
+      'ensureResourceLease(running.resourceLeaseId, "background-job"',
+      "transferResourceLease(resourceLeaseId, child.pid",
+      "multiReviewConcurrency(process.env)",
+      "sequential Antigravity role review",
+      "capacityBlockedMessage(\"antigravity-for-codex\""
+    ].every((needle) => resourceGovernorBackgroundHotPath.includes(needle));
+  const spawnRetrySafetyOk = [
+    "EAGAIN",
+    "EMFILE",
+    "ENFILE",
+    "ENOBUFS",
+    "spawnSyncWithRetry"
+  ].every((needle) => spawnRetry.includes(needle))
+    && [
+      "POSIX_SYNC_SUPERVISOR_ATTEMPTS",
+      "isTransientRunCommandFailure"
+    ].every((needle) => runtime.includes(needle))
+    && [
+      companion,
+      runtime,
+      processModule,
+      state,
+      worktreeFingerprintModule
+    ].every((text) => text.includes("spawnSyncWithRetry"));
   const shippedTexts = shippedPluginTexts();
   const userFacingTexts = shippedPluginTexts(["README.md", "CHANGELOG.md", "skills", "assets"]);
   const unsupportedReviewGateSetupPatterns = [
@@ -2248,6 +2430,8 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(windowsDescendantCleanupOk, "windows-descendant-cleanup"),
     releaseCheckResult(posixSyncSupervisorOk, "posix-sync-timeout-cleanup"),
     releaseCheckResult(reservedJobResourceGuardOk, "reserved-job-resource-guard"),
+    releaseCheckResult(globalResourceGovernorOk, "global-resource-governor"),
+    releaseCheckResult(spawnRetrySafetyOk, "spawn-retry-safety"),
     releaseCheckResult(textScanPasses(userFacingTexts, unsupportedReviewGateSetupPatterns), "no-unsupported-review-gate-setup-command"),
     releaseCheckResult(companion.includes("deriveJobIdempotencyKey") && companion.includes("worktreeFingerprint"), "background-idempotency-fingerprint"),
     releaseCheckResult(githubActionsForbiddenPluginPathsExist, "skills-natural-language-routing-paths"),

@@ -1,9 +1,9 @@
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { gitSignalTimeoutMs, parsePositiveInteger } from "./job-lifecycle.mjs";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 const MAX_WORKTREE_FINGERPRINT_FILE_BYTES = 1024 * 1024;
 const DEFAULT_MAX_UNTRACKED_FINGERPRINT_BYTES = 4 * 1024 * 1024;
@@ -26,6 +26,10 @@ const GIT_REPOSITORY_ENV_KEYS = new Set([
   "GIT_OBJECT_DIRECTORY",
   "GIT_WORK_TREE"
 ]);
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function gitTimedOut(result) {
   return result?.errorCode === "ETIMEDOUT" || result?.errorCode === "ETERM";

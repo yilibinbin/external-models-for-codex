@@ -63,6 +63,30 @@ Use `--background` on long reviews. The skill reserves a job and dispatches exac
 gemini-result <job-id>
 ```
 
+## Global Resource Governor
+
+Gemini for Codex uses a file-backed global governor to avoid overwhelming the local Codex session when several conversations, Stop hooks, background jobs, or multi-role reviews run at the same time. The default lease directory is `~/.codex/gemini-for-codex/global-resource-locks`; set `GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR` to move it.
+
+Covered paths:
+
+- Foreground `review`, `adversarial-review`, `plan`, and `rescue`
+- Plugin-managed `multi-review`
+- Gemini native-agent orchestration as one bounded Gemini CLI call
+- Stop hook `review-gate`
+- `--background`, `reserve-job`, and `run-reserved-job`
+
+Defaults are conservative: at most two concurrent Gemini model calls and two background jobs per user account. Tune them with:
+
+```bash
+GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS=2
+GEMINI_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS=2
+GEMINI_FOR_CODEX_MULTI_REVIEW_MAX_PARALLEL=2
+```
+
+When capacity is full, foreground commands return `capacity_blocked` with exit status 75 before starting Gemini. Stop hooks fail open with stderr diagnostics. `multi-review` automatically uses bounded fan-out and becomes sequential when the configured/global model-call limit is 1. Set `GEMINI_FOR_CODEX_RESOURCE_GOVERNOR=off` only for local debugging.
+
+The plugin also retries short-lived local spawn pressure such as `EAGAIN`, `EMFILE`, `ENFILE`, and `ENOBUFS` with a bounded backoff. This does not raise concurrency limits; it only makes already-governed work more tolerant when the OS briefly cannot start a helper process.
+
 ## Real Gemini Smoke
 
 Real smoke is opt-in because it invokes the user's authenticated Gemini CLI.
@@ -183,7 +207,7 @@ Write the default workflow only when requested:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
 ```
 
-The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.11.2`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.11.3`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
 
 ## Stop Hook
 

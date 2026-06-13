@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -81,6 +81,16 @@ import {
 } from "./lib/leases.mjs";
 import { mailboxDirForCwd, leasesDirForCwd } from "./lib/state.mjs";
 import { formatProgressEvent, progressEventsFromStderr } from "./lib/progress.mjs";
+import {
+  acquireResourceLease,
+  capacityBlockedMessage,
+  ensureResourceLease,
+  multiReviewConcurrency,
+  transferResourceLease,
+  withResourceLeaseAsync,
+  withResourceLeaseSync
+} from "./lib/resource-governor.mjs";
+import { spawnSyncWithRetry } from "./lib/spawn-retry.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "real-smoke", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
@@ -97,6 +107,10 @@ const JSON_BLOCK_SCAN_LIMIT = 512 * 1024;
 const JSON_BLOCK_CANDIDATE_LIMIT = 32;
 const REVIEW_GIT_TIMEOUT_MS = 30 * 1000;
 let geminiHelpReportCache = null;
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function run(command, args, options = {}) {
   const isGit = command === "git";
@@ -955,6 +969,13 @@ function geminiPrintArgs(prompt, options = {}) {
 }
 
 function geminiPrint(prompt, options = {}) {
+  return withResourceLeaseSync("model-call", {
+    command: "gemini",
+    ttlMs: (options.timeout || 15 * 60 * 1000) + 60_000
+  }, () => geminiPrintUnguarded(prompt, options));
+}
+
+function geminiPrintUnguarded(prompt, options = {}) {
   const result = runGemini(geminiPrintArgs(prompt, options), { timeout: options.timeout, cwd: options.cwd });
   if (result.status !== 0) {
     return result;
@@ -1643,7 +1664,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.11.2") failures.push(`manifest version is ${manifest.version}, expected 0.11.2`);
+    if (manifest.version !== "0.11.3") failures.push(`manifest version is ${manifest.version}, expected 0.11.3`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1680,6 +1701,10 @@ function runReleaseCheck(rawArgs = []) {
   failures.push(...externalSurfaceChecks.failures);
   const gitTimeoutChecks = checkGitTimeoutSafety();
   failures.push(...gitTimeoutChecks.failures);
+  const resourceGovernorChecks = checkResourceGovernorSafety();
+  failures.push(...resourceGovernorChecks.failures);
+  const spawnRetryChecks = checkSpawnRetrySafety();
+  failures.push(...spawnRetryChecks.failures);
   const payload = {
     ok: failures.length === 0,
     checks: {
@@ -1693,12 +1718,54 @@ function runReleaseCheck(rawArgs = []) {
       githubActionsCi: githubActionsChecks.ok,
       rawOutputSafety: rawOutputChecks.ok,
       externalSurfaceSafety: externalSurfaceChecks.ok,
-      gitTimeoutSafety: gitTimeoutChecks.ok
+      gitTimeoutSafety: gitTimeoutChecks.ok,
+      resourceGovernorSafety: resourceGovernorChecks.ok,
+      spawnRetrySafety: spawnRetryChecks.ok
     },
     failures
   };
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.ok ? 0 : 1);
+}
+
+function checkResourceGovernorSafety() {
+  const failures = [];
+  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
+  const governorPath = path.join(ROOT_DIR, "scripts", "lib", "resource-governor.mjs");
+  if (!fs.existsSync(governorPath)) {
+    return { ok: false, failures: ["resource governor module missing"] };
+  }
+  const governor = fs.readFileSync(governorPath, "utf8");
+  const requiredGovernorTokens = [
+    "GEMINI_FOR_CODEX_RESOURCE_LOCK_DIR",
+    "GEMINI_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS",
+    "GEMINI_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS",
+    "GEMINI_FOR_CODEX_MULTI_REVIEW_MAX_PARALLEL",
+    "global-resource-locks",
+    "transferable",
+    "capacity_blocked"
+  ];
+  for (const token of requiredGovernorTokens) {
+    if (!governor.includes(token)) {
+      failures.push(`resource governor missing ${token}`);
+    }
+  }
+  const requiredCompanionTokens = [
+    'withResourceLeaseSync("model-call"',
+    'withResourceLeaseAsync("model-call"',
+    'acquireResourceLease("background-job"',
+    "transferResourceLease(resourceLease.lease?.id, child.pid)",
+    'ensureResourceLease(job.resourceLeaseId, "background-job"',
+    "multiReviewConcurrency()",
+    "sequential Gemini CLI role review",
+    "capacityBlockedMessage(\"gemini-for-codex\""
+  ];
+  for (const token of requiredCompanionTokens) {
+    if (!companion.includes(token)) {
+      failures.push(`companion resource governor hot path missing ${token}`);
+    }
+  }
+  return { ok: failures.length === 0, failures };
 }
 
 function checkGithubActionsCi() {
@@ -1715,7 +1782,7 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.11.2")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.11.3")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
@@ -1790,6 +1857,31 @@ function checkGitTimeoutSafety() {
   ];
   for (const file of gitFiles) {
     failures.push(...checkGitSpawnSafety(file));
+  }
+  return { ok: failures.length === 0, failures };
+}
+
+function checkSpawnRetrySafety() {
+  const failures = [];
+  const retryPath = path.join(ROOT_DIR, "scripts", "lib", "spawn-retry.mjs");
+  if (!fs.existsSync(retryPath)) {
+    return { ok: false, failures: ["spawn retry module missing"] };
+  }
+  const retry = fs.readFileSync(retryPath, "utf8");
+  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
+  const runtime = fs.readFileSync(path.join(ROOT_DIR, "scripts", "lib", "gemini-runtime.mjs"), "utf8");
+  const workspace = fs.readFileSync(path.join(ROOT_DIR, "scripts", "lib", "workspace.mjs"), "utf8");
+  const rolePacks = fs.readFileSync(path.join(ROOT_DIR, "scripts", "lib", "role-packs.mjs"), "utf8");
+  const processModule = fs.readFileSync(path.join(ROOT_DIR, "scripts", "lib", "process.mjs"), "utf8");
+  for (const token of ["EAGAIN", "EMFILE", "ENFILE", "ENOBUFS", "spawnSyncWithRetry"]) {
+    if (!retry.includes(token)) {
+      failures.push(`spawn retry missing ${token}`);
+    }
+  }
+  for (const [name, text] of Object.entries({ companion, runtime, workspace, rolePacks, processModule })) {
+    if (!text.includes("spawnSyncWithRetry")) {
+      failures.push(`${name} does not use spawnSyncWithRetry`);
+    }
   }
   return { ok: failures.length === 0, failures };
 }
@@ -2118,6 +2210,13 @@ function runGeminiAsync(args, options = {}) {
 }
 
 async function geminiPrintAsync(prompt, options = {}) {
+  return await withResourceLeaseAsync("model-call", {
+    command: "gemini",
+    ttlMs: (options.timeout || 15 * 60 * 1000) + 60_000
+  }, async () => geminiPrintAsyncUnguarded(prompt, options));
+}
+
+async function geminiPrintAsyncUnguarded(prompt, options = {}) {
   const result = await runGeminiAsync(geminiPrintArgs(prompt, options), { timeout: options.timeout, cwd: options.cwd });
   if (result.status !== 0) {
     return result;
@@ -2129,6 +2228,20 @@ async function geminiPrintAsync(prompt, options = {}) {
     stdout: parsed.response,
     stderr: parsed.ok ? result.stderr : parsed.error
   };
+}
+
+async function mapWithConcurrency(items, concurrency, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+  async function worker() {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, () => worker()));
+  return results;
 }
 
 function parseGeminiJson(stdout) {
@@ -2182,23 +2295,43 @@ function startBackgroundJob(command, rawArgs) {
   const cwd = process.cwd();
   const foregroundArgs = stripBackgroundArgs(rawArgs);
   const session = readJson(currentSessionFileForCwd(cwd), {});
+  const resourceLease = acquireResourceLease("background-job", { command, transferable: true });
+  if (!resourceLease.ok) {
+    console.error(capacityBlockedMessage("gemini-for-codex", resourceLease));
+    process.exit(75);
+  }
   const job = createJob(cwd, {
     command,
     args: foregroundArgs,
     cwd,
-    sessionId: session?.sessionId || ""
+    sessionId: session?.sessionId || "",
+    resourceLeaseId: resourceLease.lease?.id || ""
   });
-  const child = spawn(process.execPath, [process.argv[1], "__run-job", job.id], {
-    cwd,
-    env: process.env,
-    detached: true,
-    stdio: "ignore"
-  });
-  child.unref();
-  updateJob(cwd, job.id, {
-    workerPid: child.pid
-  });
-  return readJob(cwd, job.id) ?? job;
+  try {
+    const child = spawn(process.execPath, [process.argv[1], "__run-job", job.id], {
+      cwd,
+      env: process.env,
+      detached: true,
+      stdio: "ignore"
+    });
+    child.unref();
+    transferResourceLease(resourceLease.lease?.id, child.pid);
+    updateJob(cwd, job.id, {
+      workerPid: child.pid,
+      resourceLeaseId: resourceLease.lease?.id || ""
+    });
+    return readJob(cwd, job.id) ?? job;
+  } catch (error) {
+    const message = `Failed to start background job worker: ${error.message || String(error)}`;
+    finishJob(cwd, job.id, {
+      status: 1,
+      stdout: "",
+      stderr: `${message}\n`,
+      error: message
+    });
+    resourceLease.release();
+    throw error;
+  }
 }
 
 function waitForJob(jobId) {
@@ -2245,20 +2378,34 @@ function handleReserveJob(rawArgs) {
   }
   const commandArgs = stripBackgroundArgs(tokens.slice(1));
   const session = readJson(currentSessionFileForCwd(process.cwd()), {});
+  const resourceLease = acquireResourceLease("background-job", { command, transferable: true });
+  if (!resourceLease.ok) {
+    throw new Error(capacityBlockedMessage("gemini-for-codex", resourceLease));
+  }
   const workerCommand = [
     process.argv0 || process.execPath,
     process.argv[1],
     "run-reserved-job"
   ];
-  const job = reserveJob(process.cwd(), {
-    command,
-    args: commandArgs,
-    cwd: process.cwd(),
-    sessionId: session?.sessionId || "",
-    focus: commandArgs.join(" ")
-  }, workerCommand);
-  workerCommand.push("--job-id", job.id);
-  const updated = updateJob(process.cwd(), job.id, { workerCommand }) ?? job;
+  let job;
+  let updated;
+  try {
+    job = reserveJob(process.cwd(), {
+      command,
+      args: commandArgs,
+      cwd: process.cwd(),
+      sessionId: session?.sessionId || "",
+      focus: commandArgs.join(" ")
+    }, workerCommand);
+    workerCommand.push("--job-id", job.id);
+    updated = updateJob(process.cwd(), job.id, {
+      workerCommand,
+      resourceLeaseId: resourceLease.lease?.id || ""
+    }) ?? job;
+  } catch (error) {
+    resourceLease.release();
+    throw error;
+  }
 
   return {
     status: "reserved",
@@ -3686,7 +3833,8 @@ async function runGeminiMultiReview(rawArgs) {
         }
       }
     } else {
-      results = await Promise.all(args.reviewRoles.map(async (role) => {
+      const concurrency = multiReviewConcurrency();
+      results = await mapWithConcurrency(args.reviewRoles, concurrency, async (role) => {
         emitProgress(args, "role started", { role: role.name });
         writeMailbox({
           role: role.name,
@@ -3704,7 +3852,8 @@ async function runGeminiMultiReview(rawArgs) {
           summary: `Role ${role.name} ${result.status === 0 ? "succeeded" : "failed"} with exit status ${result.status}.`
         });
         return { role, result };
-      }));
+      });
+      args.orchestrationMode = concurrency <= 1 ? "sequential Gemini CLI role review" : `parallel Gemini CLI role fan-out (bounded ${concurrency} max)`;
     }
   } finally {
     releaseClaimedLeases();
@@ -3737,7 +3886,7 @@ async function runGeminiMultiReview(rawArgs) {
     ].filter(Boolean).join("\n")),
     "## Orchestration Summary",
     `roles requested: ${args.reviewRoles.map((role) => role.name).join(", ")}`,
-    `orchestration: ${args.nativeAgents ? "Gemini native subagents" : "parallel Gemini CLI role fan-out"}`,
+    `orchestration: ${args.nativeAgents ? "Gemini native subagents" : (args.orchestrationMode || "bounded Gemini CLI role fan-out")}`,
     `roles succeeded: ${succeeded.length ? succeeded.join(", ") : "(none)"}`,
     `roles failed: ${failed.length ? failed.join(", ") : "(none)"}`,
     args.advisoryLeases ? `advisory leases: ${leaseMetadata.claimed} claimed, ${leaseMetadata.conflicts} conflicts${leaseMetadata.degraded ? ", degraded" : ""}` : "",
@@ -3848,28 +3997,46 @@ function runJobWorker(rawArgs) {
     });
     process.exit(2);
   }
-  markJobRunning(process.cwd(), jobId, process.pid);
-  const result = spawnSync(process.execPath, [process.argv[1], job.command, ...(job.args ?? [])], {
-    cwd: job.cwd || process.cwd(),
-    env: {
-      ...process.env,
-      GEMINI_FOR_CODEX_JOB_WORKER: "1"
-    },
-    encoding: "utf8",
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 30 * 60 * 1000
-  });
-  const current = readJob(process.cwd(), jobId);
-  if (current?.status === "cancelled") {
-    process.exit(0);
+  const resourceLease = ensureResourceLease(job.resourceLeaseId, "background-job", { command: job.command, transferable: false });
+  if (!resourceLease.ok) {
+    const message = capacityBlockedMessage("gemini-for-codex", resourceLease);
+    finishJob(process.cwd(), jobId, {
+      status: 75,
+      stdout: "",
+      stderr: `${message}\n`,
+      error: message
+    });
+    process.exit(75);
   }
-  finishJob(process.cwd(), jobId, {
-    status: result.status ?? 1,
-    stdout: result.stdout ?? "",
-    stderr: result.stderr ?? "",
-    error: result.error ? String(result.error.message ?? result.error) : ""
-  });
-  process.exit(result.status ?? 1);
+  markJobRunning(process.cwd(), jobId, process.pid);
+  let exitStatus = 1;
+  try {
+    const result = spawnSync(process.execPath, [process.argv[1], job.command, ...(job.args ?? [])], {
+      cwd: job.cwd || process.cwd(),
+      env: {
+        ...process.env,
+        GEMINI_FOR_CODEX_JOB_WORKER: "1"
+      },
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+      timeout: 30 * 60 * 1000
+    });
+    const current = readJob(process.cwd(), jobId);
+    if (current?.status === "cancelled") {
+      exitStatus = 0;
+    } else {
+      finishJob(process.cwd(), jobId, {
+        status: result.status ?? 1,
+        stdout: result.stdout ?? "",
+        stderr: result.stderr ?? "",
+        error: result.error ? String(result.error.message ?? result.error) : ""
+      });
+      exitStatus = result.status ?? 1;
+    }
+  } finally {
+    resourceLease.release();
+  }
+  process.exit(exitStatus);
 }
 
 function runStoredJobCommand(job) {
@@ -3981,7 +4148,32 @@ async function runReservedJob(rawArgs) {
     process.exit(1);
   }
 
-  const result = await runStoredJobCommand(claim.job);
+  let resourceLease = ensureResourceLease(claim.job.resourceLeaseId, "background-job", { command: claim.job.command, transferable: false });
+  if (!resourceLease.ok) {
+    const message = capacityBlockedMessage("gemini-for-codex", resourceLease);
+    const finished = finishJob(process.cwd(), claim.job.id, {
+      status: 75,
+      stdout: "",
+      stderr: `${message}\n`,
+      error: message
+    });
+    process.stdout.write(`${JSON.stringify({
+      status: finished.status,
+      jobId: finished.id,
+      exitStatus: finished.exitStatus,
+      reason: "capacity_blocked"
+    }, null, 2)}\n`);
+    process.exit(75);
+  }
+  if (claim.job.resourceLeaseId) {
+    transferResourceLease(claim.job.resourceLeaseId, process.pid);
+  }
+  let result;
+  try {
+    result = await runStoredJobCommand(claim.job);
+  } finally {
+    resourceLease.release();
+  }
   const finished = finishJob(process.cwd(), claim.job.id, result);
   process.stdout.write(`${JSON.stringify({
     status: finished.status,
@@ -4080,7 +4272,7 @@ switch (command) {
       process.stdout.write(`${JSON.stringify(handleReserveJob(rawArgs), null, 2)}\n`);
     } catch (error) {
       console.error(error.message || String(error));
-      process.exit(2);
+      process.exit(String(error.message || error).includes("capacity_blocked") ? 75 : 2);
     }
     break;
   case "run-reserved-job":
