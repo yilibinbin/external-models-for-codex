@@ -1,9 +1,13 @@
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 export const GEMINI_CLI_PATH_ENV = "GEMINI_CLI_PATH";
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function isExecutable(filePath) {
   try {

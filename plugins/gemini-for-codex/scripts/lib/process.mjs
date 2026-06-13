@@ -1,5 +1,9 @@
-import { spawnSync } from "node:child_process";
 import process from "node:process";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function ps(pid) {
   const result = spawnSync("ps", ["-p", String(pid), "-o", "pid=", "-o", "ppid=", "-o", "pgid=", "-o", "command="], {

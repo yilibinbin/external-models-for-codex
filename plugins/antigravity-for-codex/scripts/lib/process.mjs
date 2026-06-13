@@ -1,5 +1,5 @@
-import { spawnSync } from "node:child_process";
 import process from "node:process";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 const DEFAULT_PS_TIMEOUT_MS = 2000;
 const MIN_PS_TIMEOUT_MS = 1;
@@ -13,6 +13,10 @@ const psProbeState = {
   failures: 0,
   lastFailure: null
 };
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 
 function boundedInteger(value, fallback, min, max) {
   const numericValue = Number(value);

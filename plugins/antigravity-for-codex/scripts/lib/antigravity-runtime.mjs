@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +12,7 @@ import {
   validateAgyModelForProvider
 } from "./agy-capabilities.mjs";
 import { classifyAgyOutcome, outcomeStderr } from "./agy-outcome.mjs";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 export const AGY_CLI_PATH_ENV = "AGY_CLI_PATH";
 export const ANTIGRAVITY_CLI_PATH_ENV = "ANTIGRAVITY_CLI_PATH";
@@ -28,6 +29,13 @@ const LOG_DIAGNOSTIC_BYTES = 128 * 1024;
 const WINDOWS_TREE_CLEANUP_TIMEOUT_MS = 5000;
 const POSIX_SYNC_SUPERVISOR_GRACE_MS = 5000;
 const FORCE_WINDOWS_TREE_CLEANUP_ENV = "ANTIGRAVITY_FOR_CODEX_TEST_FORCE_WINDOWS_TREE_CLEANUP";
+const TRANSIENT_SPAWN_ERROR_CODES = new Set(["EAGAIN", "EMFILE", "ENFILE", "ENOBUFS"]);
+const POSIX_SYNC_SUPERVISOR_ATTEMPTS = 4;
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
+
 const POSIX_SYNC_SUPERVISOR = `
 const { spawn } = require("node:child_process");
 const fs = require("node:fs");
@@ -259,7 +267,15 @@ function inputBase64(input) {
     : Buffer.from(String(input), "utf8").toString("base64");
 }
 
-function runCommandWithPosixSupervisor(command, args, options = {}, env = process.env) {
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isTransientRunCommandFailure(result) {
+  return TRANSIENT_SPAWN_ERROR_CODES.has(String(result?.errorCode || ""));
+}
+
+function runCommandWithPosixSupervisorOnce(command, args, options = {}, env = process.env) {
   const timeout = options.timeout || DEFAULT_TIMEOUT_MS;
   const result = spawnSync(process.execPath, ["-e", POSIX_SYNC_SUPERVISOR], {
     cwd: options.cwd || process.cwd(),
@@ -305,6 +321,18 @@ function runCommandWithPosixSupervisor(command, args, options = {}, env = proces
     signal: result.signal || "",
     timedOut: result.error?.code === "ETIMEDOUT"
   };
+}
+
+function runCommandWithPosixSupervisor(command, args, options = {}, env = process.env) {
+  let result = null;
+  for (let attempt = 1; attempt <= POSIX_SYNC_SUPERVISOR_ATTEMPTS; attempt += 1) {
+    result = runCommandWithPosixSupervisorOnce(command, args, options, env);
+    if (!isTransientRunCommandFailure(result) || attempt >= POSIX_SYNC_SUPERVISOR_ATTEMPTS) {
+      return result;
+    }
+    sleepMs(50 * (2 ** (attempt - 1)));
+  }
+  return result;
 }
 
 function expandExecutableCandidates(pattern) {

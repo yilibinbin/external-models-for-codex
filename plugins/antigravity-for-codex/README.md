@@ -1,6 +1,6 @@
 # Antigravity for Codex
 
-Version: 0.6.0
+Version: 0.6.1
 
 Codex plugin that invokes the local Antigravity CLI (`agy`) for independent read-only review, planning, adversarial critique, rescue diagnosis, multi-role review, structured reports, background jobs, advisory coordination, GitHub Actions workflow rendering, release checks, and an opt-in Stop hook gate.
 
@@ -23,6 +23,29 @@ This plugin absorbs mature workflow patterns from Claude for Codex only when the
 - Antigravity CLI available as `agy`, `AGY_CLI_PATH`, or `ANTIGRAVITY_CLI_PATH`
 - Node.js 20 or newer
 - Git repository for review context collection
+
+## Global Resource Governor
+
+Antigravity for Codex uses a file-backed global governor to keep several Codex conversations, Stop hooks, background jobs, and multi-role reviews from starting unlimited `agy` work at once. The default lease directory is `~/.codex/antigravity-for-codex/global-resource-locks`; set `ANTIGRAVITY_FOR_CODEX_RESOURCE_LOCK_DIR` to move it.
+
+Covered paths:
+
+- Foreground `review`, `adversarial-review`, `plan`, and `rescue`
+- Plugin-managed `multi-review`
+- Stop hook `review-gate`
+- `--background`, `reserve-job`, and `run-reserved-job`
+
+Defaults are conservative: at most two concurrent Antigravity model calls and two background jobs per user account. Tune them with:
+
+```bash
+ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_MODEL_CALLS=2
+ANTIGRAVITY_FOR_CODEX_GLOBAL_MAX_BACKGROUND_JOBS=2
+ANTIGRAVITY_FOR_CODEX_MULTI_REVIEW_MAX_PARALLEL=2
+```
+
+When capacity is full, foreground commands return `capacity_blocked` with exit status 75 before starting `agy`. Stop hooks fail open with stderr diagnostics. `multi-review` automatically uses bounded fan-out and becomes sequential when the configured/global model-call limit is 1. Set `ANTIGRAVITY_FOR_CODEX_RESOURCE_GOVERNOR=off` only for local debugging.
+
+The plugin also retries short-lived local spawn pressure such as `EAGAIN`, `EMFILE`, `ENFILE`, and `ENOBUFS` with a bounded backoff. This does not raise concurrency limits; it only makes already-governed work more tolerant when the OS briefly cannot start a helper process.
 
 ## Model Selection
 

@@ -2,8 +2,8 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { canonicalWorkspaceRoot } from "./state.mjs";
+import { spawnSyncWithRetry } from "./spawn-retry.mjs";
 
 const MAX_PACK_BYTES = 64 * 1024;
 const MAX_NESTING_DEPTH = 12;
@@ -36,6 +36,10 @@ const FORBIDDEN_FIELDS = new Set([
   "agentPath",
   "max_effort"
 ]);
+
+function spawnSync(command, args, options) {
+  return spawnSyncWithRetry(command, args, options);
+}
 const ALLOWED_PACK_FIELDS = new Set(["schema_version", "name", "description", "roles", "limits", "tags", "gate_compatible", "native_agents_compatible"]);
 const ALLOWED_LIMIT_FIELDS = new Set(["max_roles", "max_native_agents", "estimated_cost_warning_roles"]);
 const BOUNDARY_TAGS = [
