@@ -8,8 +8,8 @@ export function summariesDirForCwd(cwd = process.cwd(), env = process.env) {
 }
 
 function summaryFile(cwd, loopId, round, env) {
-  if (!Number.isInteger(round) || round < 0) {
-    throw new Error("Round must be a non-negative integer.");
+  if (!Number.isInteger(round) || round < 1) {
+    throw new Error(`Round must be a positive integer; received ${JSON.stringify(round)}.`);
   }
   const dir = summariesDirForCwd(cwd, env);
   const safeLoopId = assertSafeStateId(loopId, "loop id");

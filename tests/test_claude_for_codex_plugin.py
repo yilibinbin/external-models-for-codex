@@ -783,9 +783,9 @@ const cwd = {json.dumps(str(workspace))};
 const env = {{ CLAUDE_PLUGIN_DATA: {json.dumps(str(state_dir))} }};
 let roundRejected = false;
 try {{
-  writeRoundSummary(cwd, "loop-1", -1, {{ command: "review", blockingFindings: 1 }}, env);
+  writeRoundSummary(cwd, "loop-1", 0, {{ command: "review", blockingFindings: 1 }}, env);
 }} catch (error) {{
-  roundRejected = /non-negative integer/.test(error.message);
+  roundRejected = /positive integer/.test(error.message) && /0/.test(error.message);
 }}
 const summary = writeRoundSummary(cwd, "loop-1", 1, {{ command: "review", blockingFindings: -2 }}, env);
 console.log(JSON.stringify({{ roundRejected, blockingFindings: summary.blockingFindings }}));
