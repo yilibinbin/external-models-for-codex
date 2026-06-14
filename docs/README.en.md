@@ -15,7 +15,7 @@ Natural-language Claude routing rule: users should ask for Claude normally, for 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.1
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.3
@@ -111,7 +111,7 @@ Legacy Gemini CLI resolution order:
 - `gemini-mailbox`, `gemini-leases`: inspect sanitized Gemini coordination summaries and advisory path-attention leases.
 - `antigravity-review`, `antigravity-adversarial-review`, `antigravity-plan`, `antigravity-multi-review`, `antigravity-rescue`, `antigravity-review-gate`, `antigravity-github-actions-review`: Antigravity-backed mature plugin-managed review, planning, rescue, Stop gate, and workflow-risk review with explicit Gemini or Claude model-provider selection. Antigravity for Codex uses `agy` only, does not claim Claude SDK, Gemini native-agent, or ultrareview parity, and keeps Claude-through-Antigravity separate from `claude-for-codex`.
 
-Claude for Codex 0.20.0 adds advisory quality-feedback surfaces: `review --scorecard --json`, `multi-review --scorecard --json`, `plan --taskset`, `review --validation-log <file>`, `assisted-review --scorecard --max-review-rounds 2`, and `result --resume-plan <job-id>`. Scorecards are advisory, validation logs are user-provided, and Claude still does not edit files, run project commands, commit, push, create pull requests, merge, close issues, or invoke ultrareview unless the separate explicit ultrareview skill is used.
+Claude for Codex 0.20.1 adds advisory quality-feedback surfaces: `review --scorecard --json`, `multi-review --scorecard --json`, `plan --taskset`, `review --validation-log <file>`, `assisted-review --scorecard --max-review-rounds 2`, and `result --resume-plan <job-id>`. Scorecards are advisory, validation logs are user-provided, and Claude still does not edit files, run project commands, commit, push, create pull requests, merge, close issues, or invoke ultrareview unless the separate explicit ultrareview skill is used.
 
 ## Gemini for Codex
 

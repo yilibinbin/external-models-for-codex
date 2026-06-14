@@ -8,6 +8,9 @@ export function summariesDirForCwd(cwd = process.cwd(), env = process.env) {
 }
 
 function summaryFile(cwd, loopId, round, env) {
+  if (!Number.isInteger(round) || round < 1) {
+    throw new Error(`Round must be a positive integer; received ${JSON.stringify(round)}.`);
+  }
   const dir = summariesDirForCwd(cwd, env);
   const safeLoopId = assertSafeStateId(loopId, "loop id");
   const file = path.join(dir, `${safeLoopId}-${String(round).padStart(3, "0")}.json`);
@@ -28,7 +31,7 @@ export function writeRoundSummary(cwd, loopId, round, summary, env = process.env
     verdict: summary.verdict || "",
     scoreTotal: Number.isFinite(summary.scoreTotal) ? summary.scoreTotal : null,
     threshold: Number.isFinite(summary.threshold) ? summary.threshold : 85,
-    blockingFindings: Number.isInteger(summary.blockingFindings) ? summary.blockingFindings : 0,
+    blockingFindings: Number.isInteger(summary.blockingFindings) && summary.blockingFindings >= 0 ? summary.blockingFindings : 0,
     failureCategory: summary.failureCategory || "",
     acceptedFindingIds: Array.isArray(summary.acceptedFindingIds) ? summary.acceptedFindingIds.filter((item) => typeof item === "string") : []
   };
