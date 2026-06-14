@@ -15,7 +15,7 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.20.0";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.20.1";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-assisted-review",
@@ -180,9 +180,9 @@ function checkManifest(root) {
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.20.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.20.0"), "changelog-version", "CHANGELOG contains 0.20.0"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.20.0`"), "readme-current-version", "README current version is 0.20.0"),
+    result(manifest.version === "0.20.1", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.20.1"), "changelog-version", "CHANGELOG contains 0.20.1"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.20.1`"), "readme-current-version", "README current version is 0.20.1"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -201,7 +201,7 @@ function checkVersionSurfacesCurrent(root) {
     return [result(false, "version-surfaces-current", `manifest read failed: ${error.message || String(error)}`)];
   }
   const version = codexManifest.version;
-  const expectedVersion = "0.20.0";
+  const expectedVersion = "0.20.1";
   const releaseRef = `claude-for-codex-v${version}`;
   const pluginReadme = fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8");
   const releaseRefFiles = [

@@ -1,6 +1,6 @@
 {
   "name": "claude-for-codex-native-review",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Opt-in Claude Code native review agents exported by Claude for Codex.",
   "author": {
     "name": "fanghao",

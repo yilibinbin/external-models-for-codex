@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.20.1 - 2026-06-14
+
+### Fixed
+
+- Validate assisted-review round summary numbers before constructing state filenames.
+- Clamp invalid negative blocking-finding counts to zero when persisting assisted-review round summaries.
+
 ## 0.20.0 - 2026-06-14
 
 ### Added

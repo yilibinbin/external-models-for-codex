@@ -1,6 +1,6 @@
 {
   "name": "claude-for-codex",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Use Claude Code from Codex for read-only review, scorecard review, adversarial review, saved-plan review, taskset planning, bounded assisted review, opt-in Claude Code native review agents, native SDK subagent teams, role-pack review teams, advisory mailbox/leases, planning, optional SDK backend, GitHub Actions PR review templates, rescue, ultrareview, and tracked job workflows.",
   "author": {
     "name": "fanghao",
