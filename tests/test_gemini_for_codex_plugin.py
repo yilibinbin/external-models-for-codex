@@ -224,7 +224,7 @@ def fake_gemini_real_smoke(tmp_path, review=None, native=None, capture_argv=None
 def test_gemini_plugin_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "gemini-for-codex"
-    assert manifest["version"] == "0.11.3"
+    assert manifest["version"] == "0.12.0"
     assert "Antigravity" not in json.dumps(manifest)
     assert "antigravity" not in json.dumps(manifest).lower()
     assert manifest["skills"] == "./skills/"
@@ -243,7 +243,7 @@ def test_gemini_plugin_manifest_is_valid_json():
     assert "Real Gemini smoke diagnostics" in manifest["interface"]["capabilities"]
     assert "Gemini CLI extension and MCP capability diagnostics" in manifest["interface"]["capabilities"]
     github_actions = (PLUGIN / "scripts" / "lib" / "github-actions.mjs").read_text(encoding="utf8")
-    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.11.3";' in github_actions
+    assert 'const DEFAULT_RELEASE_REF = "gemini-for-codex-v0.12.0";' in github_actions
 
 
 def test_marketplace_lists_gemini_for_codex():
@@ -770,10 +770,19 @@ def test_real_smoke_rejects_review_json_beyond_block_scan_limit(tmp_path):
     shutil.copytree(PLUGIN, fake_plugin_root)
     runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
     companion = runtime.read_text(encoding="utf8")
+    review_json_output = (
+        'if (kind === "review" && args.jsonOutput) {\n'
+        "    try {\n"
+        "      const parsed = validateStructuredReview(extractJsonObject(result.stdout));\n"
+        "      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);"
+    )
     patched = companion.replace(
-        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
-        "process.stdout.write(`warning ${'x'.repeat(600000)} ${JSON.stringify(parsed)}\\n`);",
-        2
+        review_json_output,
+        review_json_output.replace(
+            "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+            "process.stdout.write(`warning ${'x'.repeat(600000)} ${JSON.stringify(parsed)}\\n`);",
+        ),
+        1,
     )
     assert patched != companion
     runtime.write_text(patched, encoding="utf8")
@@ -798,10 +807,19 @@ def test_real_smoke_reports_output_limit(tmp_path):
     shutil.copytree(PLUGIN, fake_plugin_root)
     runtime = fake_plugin_root / "scripts" / "gemini-companion.mjs"
     companion = runtime.read_text(encoding="utf8")
+    review_json_output = (
+        'if (kind === "review" && args.jsonOutput) {\n'
+        "    try {\n"
+        "      const parsed = validateStructuredReview(extractJsonObject(result.stdout));\n"
+        "      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);"
+    )
     patched = companion.replace(
-        "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
-        "process.stdout.write(`${'x'.repeat(21 * 1024 * 1024)}${JSON.stringify(parsed)}\\n`);",
-        2
+        review_json_output,
+        review_json_output.replace(
+            "process.stdout.write(`${JSON.stringify(parsed, null, 2)}\\n`);",
+            "process.stdout.write(`${'x'.repeat(21 * 1024 * 1024)}${JSON.stringify(parsed)}\\n`);",
+        ),
+        1,
     )
     assert patched != companion
     runtime.write_text(patched, encoding="utf8")
@@ -2696,7 +2714,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "pull_request_target" not in text
     assert "npm install -g @openai/codex" in text
     assert "codex plugin add gemini-for-codex@external-models-for-codex" in text
-    assert "--ref gemini-for-codex-v0.11.3" in text
+    assert "--ref gemini-for-codex-v0.12.0" in text
     assert "review --json --scope branch --base \"$BASE_SHA\"" in text
     assert "--context-provider off" in text
     assert "actions/upload-artifact@v4" in text

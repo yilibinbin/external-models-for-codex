@@ -92,3 +92,17 @@ export function workspaceSlug(cwd = process.cwd(), env = process.env) {
 export function stateDirForCwd(cwd = process.cwd(), env = process.env) {
   return path.join(stateRoot(env), workspaceSlug(cwd, env));
 }
+
+export function atomicWriteJson(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const tmpFile = `${filePath}.${process.pid}.${Date.now().toString(36)}.tmp`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+  fs.renameSync(tmpFile, filePath);
+}
+
+export function readJson(filePath, fallback = null) {
+  if (!fs.existsSync(filePath)) {
+    return fallback;
+  }
+  return JSON.parse(fs.readFileSync(filePath, "utf8"));
+}

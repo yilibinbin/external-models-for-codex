@@ -267,6 +267,38 @@ function inputBase64(input) {
     : Buffer.from(String(input), "utf8").toString("base64");
 }
 
+function splitShebang(line) {
+  const text = String(line || "").replace(/^#!/, "").trim();
+  if (!text) return null;
+  const parts = text.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) ?? [];
+  if (!parts.length) return null;
+  return parts;
+}
+
+function normalizePosixScriptInvocation(command, args = []) {
+  if (process.platform === "win32" || !path.isAbsolute(command)) {
+    return { command, args };
+  }
+  let header = "";
+  try {
+    header = fs.readFileSync(command, { encoding: "utf8", flag: "r" }).split(/\r?\n/, 1)[0] || "";
+  } catch {
+    return { command, args };
+  }
+  if (!header.startsWith("#!")) {
+    return { command, args };
+  }
+  const shebang = splitShebang(header);
+  if (!shebang) {
+    return { command, args };
+  }
+  const [interpreter, ...interpreterArgs] = shebang;
+  return {
+    command: interpreter,
+    args: [...interpreterArgs, command, ...args]
+  };
+}
+
 function sleepMs(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -427,10 +459,11 @@ export function agyCommand(env = process.env) {
 
 export function runCommand(command, args, options = {}) {
   const env = options.env || process.env;
+  const invocation = normalizePosixScriptInvocation(command, args);
   if (process.platform !== "win32" && !shouldUseWindowsTreeCleanup(env)) {
-    return runCommandWithPosixSupervisor(command, args, options, env);
+    return runCommandWithPosixSupervisor(invocation.command, invocation.args, options, env);
   }
-  const result = spawnSync(command, args, {
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd || process.cwd(),
     env,
     encoding: "utf8",
@@ -737,7 +770,8 @@ export function antigravityPrintAsync(prompt, options = {}, env = process.env) {
   }
   return new Promise((resolve) => {
     const detached = process.platform !== "win32";
-    const child = spawn(invocation.command, invocation.args, {
+    const commandInvocation = normalizePosixScriptInvocation(invocation.command, invocation.args);
+    const child = spawn(commandInvocation.command, commandInvocation.args, {
       cwd: options.cwd || process.cwd(),
       env,
       detached,

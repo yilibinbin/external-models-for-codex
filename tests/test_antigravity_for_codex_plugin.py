@@ -114,7 +114,7 @@ def test_sanitized_env_removes_antigravity_runtime_flags(monkeypatch):
 def test_antigravity_manifest_is_valid_json():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
     assert manifest["name"] == "antigravity-for-codex"
-    assert manifest["version"] == "0.6.1"
+    assert manifest["version"] == "0.7.0"
     assert manifest["skills"] == "./skills/"
     assert "antigravity" in manifest["keywords"]
     assert "gemini" in manifest["keywords"]
@@ -122,6 +122,8 @@ def test_antigravity_manifest_is_valid_json():
     assert manifest["interface"]["capabilities"] == [
         "Read-only Antigravity CLI review",
         "Explicit Gemini or Claude model selection",
+        "Normalized scorecard quality loops",
+        "Taskset planning and plan-file review",
         "Adversarial review",
         "Implementation planning",
         "Read-only rescue diagnosis",
@@ -199,22 +201,32 @@ def test_antigravity_package_only_ships_wired_runtime_files():
         "agy-capabilities.mjs",
         "agy-outcome.mjs",
         "antigravity-runtime.mjs",
+        "assisted-review.mjs",
         "doctor.mjs",
+        "failure-taxonomy.mjs",
         "github-actions.mjs",
         "hook-compat.mjs",
         "job-lifecycle.mjs",
         "jobs.mjs",
         "leases.mjs",
         "mailbox.mjs",
+        "plan-review-file.mjs",
         "prompt-template.mjs",
         "process.mjs",
+        "project-instructions.mjs",
         "render-review.mjs",
         "reports.mjs",
         "resource-governor.mjs",
         "role-packs.mjs",
+        "sanitize.mjs",
+        "scorecard.mjs",
         "spawn-retry.mjs",
         "state.mjs",
+        "state-ids.mjs",
         "structured-output.mjs",
+        "summary-index.mjs",
+        "tasksets.mjs",
+        "validation-evidence.mjs",
         "version.mjs",
         "worktree-fingerprint.mjs",
     }
@@ -222,15 +234,23 @@ def test_antigravity_package_only_ships_wired_runtime_files():
     assert actual_libs == expected_libs
     expected_prompts = {
         "adversarial-review.md",
+        "assisted-review.md",
         "multi-review-role.md",
         "plan.md",
+        "plan-review-role.md",
         "rescue.md",
         "review-gate-role.md",
         "review.md",
+        "scorecard.md",
+        "taskset.md",
     }
     actual_prompts = {path.name for path in (PLUGIN / "prompts").glob("*.md")}
     assert actual_prompts == expected_prompts
-    assert {path.name for path in (PLUGIN / "schemas").glob("*.json")} == {"review-output.schema.json"}
+    assert {path.name for path in (PLUGIN / "schemas").glob("*.json")} == {
+        "review-output.schema.json",
+        "scorecard-output.schema.json",
+        "taskset.schema.json",
+    }
 
 
 def test_antigravity_skills_exist_and_use_antigravity_commands():
@@ -241,6 +261,8 @@ def test_antigravity_skills_exist_and_use_antigravity_commands():
         "antigravity-adversarial-review",
         "antigravity-multi-review",
         "antigravity-plan",
+        "antigravity-plan-review",
+        "antigravity-assisted-review",
         "antigravity-rescue",
         "antigravity-review-gate",
         "antigravity-github-actions-review",
@@ -4381,7 +4403,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "# npm install -g @openai/codex\n"
         "# codex plugin marketplace add yilibinbin/external-models-for-codex\n"
         "# codex plugin add antigravity-for-codex@external-models-for-codex\n"
-        "# antigravity-for-codex-v0.6.1\n"
+        "# antigravity-for-codex-v0.7.0\n"
         "# ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER:\n"
         "# antigravity-companion.mjs review\n"
         "on:\n"
@@ -4420,7 +4442,7 @@ def test_github_actions_rejects_mutable_ref_and_validates_path(tmp_path):
         "      - run: |\n"
         "          npm install -g @openai/codex\n"
         "          codex plugin marketplace add yilibinbin/external-models-for-codex --ref develop\n"
-        "          echo --ref antigravity-for-codex-v0.6.1\n"
+        "          echo --ref antigravity-for-codex-v0.7.0\n"
         "          codex plugin add antigravity-for-codex@external-models-for-codex\n"
         "          ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER=gemini node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review\n",
         encoding="utf8",
@@ -5265,7 +5287,7 @@ def test_release_check_passes():
 
 
 def test_release_check_passes_from_installed_plugin_layout(tmp_path):
-    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.6.1"
+    installed = tmp_path / "plugins" / "cache" / "external-models-for-codex" / "antigravity-for-codex" / "0.7.0"
     shutil.copytree(PLUGIN, installed)
     runtime = installed / "scripts" / "antigravity-companion.mjs"
 

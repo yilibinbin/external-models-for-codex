@@ -3,6 +3,8 @@
 <role_directive>{{ROLE_DIRECTIVE}}</role_directive>
 {{GIT_CONTEXT}}
 {{GEMINI_CONTEXT}}
+{{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
 <rules>
 - Do not edit files.
 - Do not suggest that you are about to apply fixes.
@@ -15,9 +17,5 @@
 - Focus only on this role's directive; do not broaden into unrelated review areas.
 </rules>
 {{FOCUS}}
-<output_contract>
-## Findings
-- [Severity] file:line - issue, evidence, impact, suggested direction
-## Open Questions
-## Residual Risk
-</output_contract>
+{{SCORECARD_BLOCK}}
+{{OUTPUT_CONTRACT}}

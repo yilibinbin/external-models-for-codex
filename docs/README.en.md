@@ -5,7 +5,7 @@ External Models for Codex is a Codex plugin marketplace for external model CLI w
 Included plugins:
 
 - Claude for Codex lets Codex call the local Claude Code CLI for independent review, scorecard review, taskset planning, validation-evidence review, bounded assisted review, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates. It also includes a dynamic model alias registry, request-local outcome classification, a global Claude work-slot governor, cheap `doctor --json` diagnostics, and fork-safe CI dogfood.
-- Gemini for Codex lets Codex call the legacy Gemini CLI (`gemini`) for Gemini-only read-only review, planning, rescue diagnosis, structured review output, and Gemini CLI-native session capability checks.
+- Gemini for Codex lets Codex call the legacy Gemini CLI (`gemini`) for Gemini-only read-only review, scorecard review, taskset planning, plan-file review, bounded assisted review, planning, rescue diagnosis, structured review output, role packs, background jobs, and Gemini CLI-native session capability checks.
 - Antigravity for Codex lets Codex call Google Antigravity CLI (`agy`) for mature plugin-managed review workflows: read-only review, adversarial critique, planning, rescue diagnosis, multi-role review, structured reports, role packs, background jobs, mailbox/leases, lifecycle hooks, GitHub Actions workflow rendering, release checks, opt-in real smoke, and an opt-in Stop hook gate with explicit Gemini or Claude model-provider selection.
 
 Natural-language Claude routing rule: users should ask for Claude normally, for example "Use Claude for a strict multi-role release review" or "Use the strongest local Claude review." Codex maps the request to Claude for Codex quality, model, effort, backend, role, and background-job arguments. Generic strict or strong review language never selects ultrareview; ultrareview remains explicit because it may use remote/cloud execution and usage-credit billing.
@@ -18,10 +18,10 @@ Install from GitHub:
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.1
 codex plugin add claude-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.3
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.12.0
 codex plugin add gemini-for-codex@external-models-for-codex
 
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.6.1
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref antigravity-for-codex-v0.7.0
 codex plugin add antigravity-for-codex@external-models-for-codex
 ```
 

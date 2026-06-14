@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -91,10 +91,18 @@ import {
   withResourceLeaseSync
 } from "./lib/resource-governor.mjs";
 import { spawnSyncWithRetry } from "./lib/spawn-retry.mjs";
+import { normalizeScorecardOutput } from "./lib/scorecard.mjs";
+import { saveTaskset, readTaskset } from "./lib/tasksets.mjs";
+import { loadValidationEvidence, renderValidationEvidenceBlock } from "./lib/validation-evidence.mjs";
+import { DEFAULT_PROJECT_INSTRUCTION_FILES, renderProjectInstructionsBlock } from "./lib/project-instructions.mjs";
+import { readWorkspaceBoundPlanFile } from "./lib/plan-review-file.mjs";
+import { writeRoundSummary } from "./lib/summary-index.mjs";
+import { nextAssistedReviewAction } from "./lib/assisted-review.mjs";
+import { classifyProviderFailure } from "./lib/failure-taxonomy.mjs";
 
 const ROOT_DIR = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
-const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "real-smoke", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
-const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "report", "real-smoke", "release-check", "github-actions", "roles", "mailbox", "leases", "review", "adversarial-review", "multi-review", "plan-review", "plan", "assisted-review", "status", "review-gate", "jobs", "result", "cancel", "rescue", "recommend-execution-mode", "sessions", "__run-job", "reserve-job", "run-reserved-job"]);
+const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "assisted-review", "rescue"]);
 const VALID_SCOPES = new Set(["auto", "working-tree", "branch"]);
 const VALID_REVIEW_GATE_MODES = new Set(["multi-role"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "native-agents"]);
@@ -158,6 +166,34 @@ function findOnPath(commandName) {
     }
   }
   return "";
+}
+
+function splitShebang(line) {
+  const text = String(line || "").replace(/^#!/, "").trim();
+  if (!text) return null;
+  const parts = text.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) ?? [];
+  return parts.length ? parts : null;
+}
+
+function normalizePosixScriptInvocation(command, args = []) {
+  if (process.platform === "win32" || !path.isAbsolute(command)) {
+    return { command, args };
+  }
+  let header = "";
+  try {
+    header = fs.readFileSync(command, { encoding: "utf8", flag: "r" }).split(/\r?\n/, 1)[0] || "";
+  } catch {
+    return { command, args };
+  }
+  if (!header.startsWith("#!")) {
+    return { command, args };
+  }
+  const shebang = splitShebang(header);
+  if (!shebang) {
+    return { command, args };
+  }
+  const [interpreter, ...interpreterArgs] = shebang;
+  return { command: interpreter, args: [...interpreterArgs, command, ...args] };
 }
 
 function expandExecutableCandidates(pattern) {
@@ -255,7 +291,8 @@ function geminiCommand() {
 }
 
 function runGemini(args, options = {}) {
-  return run(geminiCommand(), args, options);
+  const invocation = normalizePosixScriptInvocation(geminiCommand(), args);
+  return run(invocation.command, invocation.args, options);
 }
 
 function hasBinary(name) {
@@ -396,6 +433,36 @@ function parseArgs(argv) {
       parsed.wait = true;
     } else if (arg === "--json" || arg === "--json-output") {
       parsed.jsonOutput = true;
+    } else if (arg === "--scorecard") {
+      parsed.scorecard = true;
+      parsed.jsonOutput = true;
+    } else if (["--validation-log", "--test-summary", "--ci-summary", "--screenshot-summary"].includes(arg)) {
+      parsed.validationEvidence = [...(parsed.validationEvidence ?? []), {
+        kind: arg.slice(2),
+        file: readOptionValue(tokens, index, arg)
+      }];
+      index += 1;
+    } else if (arg === "--rules") {
+      parsed.rules = [...(parsed.rules ?? []), readOptionValue(tokens, index, arg)];
+      index += 1;
+    } else if (arg === "--plan") {
+      parsed.plan = readOptionValue(tokens, index, arg);
+      index += 1;
+    } else if (arg === "--taskset") {
+      const maybeTasksetId = tokens[index + 1];
+      if (maybeTasksetId === undefined || maybeTasksetId.startsWith("--") || !maybeTasksetId.startsWith("ts-")) {
+        parsed.taskset = true;
+      } else {
+        parsed.tasksetId = readOptionValue(tokens, index, arg);
+        index += 1;
+      }
+    } else if (arg === "--max-review-rounds") {
+      const value = Number(readOptionValue(tokens, index, arg));
+      if (!Number.isInteger(value) || value < 1 || value > 3) {
+        throw new Error("--max-review-rounds must be an integer from 1 to 3.");
+      }
+      parsed.maxReviewRounds = value;
+      index += 1;
     } else if (arg === "--structured" || arg === "--review-json") {
       parsed.structuredReview = true;
     } else if (arg === "--agent-team") {
@@ -540,6 +607,37 @@ function normalizeAgentTeam(args, command) {
   args.nativeAgents = args.agentTeam === "native-agents";
 }
 
+const SCORECARD_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan-review", "assisted-review"]);
+const VALIDATION_EVIDENCE_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan", "plan-review", "assisted-review"]);
+const RULE_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan", "plan-review", "assisted-review", "rescue"]);
+
+function validateQualityLoopArgs(command, args) {
+  if (args.scorecard && !SCORECARD_COMMANDS.has(command)) {
+    throw new Error("--scorecard is only valid for review, multi-review, adversarial-review, plan-review, and assisted-review.");
+  }
+  if (command === "plan-review" && args.jsonOutput && !args.scorecard) {
+    throw new Error("--json is only valid for plan-review when --scorecard is also set.");
+  }
+  if (args.validationEvidence && !VALIDATION_EVIDENCE_COMMANDS.has(command)) {
+    throw new Error("--validation-log, --test-summary, --ci-summary, and --screenshot-summary are only valid for review, multi-review, adversarial-review, plan, plan-review, and assisted-review.");
+  }
+  if (args.rules && !RULE_COMMANDS.has(command)) {
+    throw new Error("--rules is only valid for prompt commands.");
+  }
+  if (args.plan !== undefined && command !== "plan-review") {
+    throw new Error("--plan is only valid for plan-review.");
+  }
+  if (args.taskset && command !== "plan") {
+    throw new Error("--taskset without an id is only valid for plan.");
+  }
+  if (args.tasksetId && command !== "assisted-review") {
+    throw new Error("--taskset <id> is only valid for assisted-review.");
+  }
+  if (args.maxReviewRounds !== undefined && command !== "assisted-review") {
+    throw new Error("--max-review-rounds is only valid for assisted-review.");
+  }
+}
+
 function readOptionValue(tokens, index, optionName) {
   const value = tokens[index + 1];
   if (value === undefined || value === "" || value.startsWith("--")) {
@@ -582,7 +680,15 @@ function printUsage(commandName = "") {
       break;
     case "multi-review":
       process.stdout.write("Run Gemini role-based read-only review without editing files.\n");
-      process.stdout.write("Options: [--roles <list>|--role-pack <pack>] [--agent-team plugin|native-agents] [--scope auto|working-tree|branch] [--base <ref>] [--path <path>] [focus]\n");
+      process.stdout.write("Options: [--roles <list>|--role-pack <pack>] [--scorecard] [--agent-team plugin|native-agents] [--scope auto|working-tree|branch] [--base <ref>] [--path <path>] [focus]\n");
+      break;
+    case "plan-review":
+      process.stdout.write("Run Gemini role-based read-only review of a saved plan file.\n");
+      process.stdout.write("Options: --plan <file> [--roles <list>|--role-pack <pack>] [--scorecard [--json]] [focus]\n");
+      break;
+    case "assisted-review":
+      process.stdout.write("Run a bounded advisory Gemini scorecard review loop.\n");
+      process.stdout.write("Options: [--taskset <id>] [--max-review-rounds 1..3] [--validation-log <file>] [focus]\n");
       break;
     case "review-gate":
       process.stdout.write("Run the opt-in Stop hook review gate for current git changes.\n");
@@ -1664,7 +1770,7 @@ function runReleaseCheck(rawArgs = []) {
   try {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.name !== "gemini-for-codex") failures.push("manifest name mismatch");
-    if (manifest.version !== "0.11.3") failures.push(`manifest version is ${manifest.version}, expected 0.11.3`);
+    if (manifest.version !== "0.12.0") failures.push(`manifest version is ${manifest.version}, expected 0.12.0`);
     const legacyPluginName = ["claude", "for", "codex"].join("-");
     if (JSON.stringify(manifest).includes(legacyPluginName)) failures.push(`manifest contains ${legacyPluginName}`);
   } catch (error) {
@@ -1705,6 +1811,8 @@ function runReleaseCheck(rawArgs = []) {
   failures.push(...resourceGovernorChecks.failures);
   const spawnRetryChecks = checkSpawnRetrySafety();
   failures.push(...spawnRetryChecks.failures);
+  const qualityLoopChecks = checkQualityLoopSurface();
+  failures.push(...qualityLoopChecks.failures);
   const payload = {
     ok: failures.length === 0,
     checks: {
@@ -1720,12 +1828,58 @@ function runReleaseCheck(rawArgs = []) {
       externalSurfaceSafety: externalSurfaceChecks.ok,
       gitTimeoutSafety: gitTimeoutChecks.ok,
       resourceGovernorSafety: resourceGovernorChecks.ok,
-      spawnRetrySafety: spawnRetryChecks.ok
+      spawnRetrySafety: spawnRetryChecks.ok,
+      qualityLoopSurface: qualityLoopChecks.ok
     },
     failures
   };
   process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
   process.exit(payload.ok ? 0 : 1);
+}
+
+function checkQualityLoopSurface() {
+  const failures = [];
+  const companion = fs.readFileSync(path.join(ROOT_DIR, "scripts", "gemini-companion.mjs"), "utf8");
+  const runtime = fs.readFileSync(path.join(ROOT_DIR, "scripts", "lib", "gemini-runtime.mjs"), "utf8");
+  const readme = fs.readFileSync(path.join(ROOT_DIR, "README.md"), "utf8");
+  const expectedFiles = [
+    "prompts/scorecard.md",
+    "prompts/taskset.md",
+    "prompts/assisted-review.md",
+    "prompts/plan-review-role.md",
+    "schemas/scorecard-output.schema.json",
+    "schemas/taskset.schema.json",
+    "scripts/lib/assisted-review.mjs",
+    "scripts/lib/failure-taxonomy.mjs",
+    "scripts/lib/plan-review-file.mjs",
+    "scripts/lib/project-instructions.mjs",
+    "scripts/lib/scorecard.mjs",
+    "scripts/lib/state-ids.mjs",
+    "scripts/lib/summary-index.mjs",
+    "scripts/lib/tasksets.mjs",
+    "scripts/lib/validation-evidence.mjs",
+    "skills/gemini-plan-review/SKILL.md",
+    "skills/gemini-assisted-review/SKILL.md"
+  ];
+  for (const relativePath of expectedFiles) {
+    if (!fs.existsSync(path.join(ROOT_DIR, relativePath))) {
+      failures.push(`quality-loop file missing: ${relativePath}`);
+    }
+  }
+  for (const token of ["\"plan-review\"", "\"assisted-review\"", "--scorecard", "--taskset", "normalizePosixScriptInvocation"]) {
+    if (!companion.includes(token)) {
+      failures.push(`companion quality-loop surface missing ${token}`);
+    }
+  }
+  if (!runtime.includes("normalizePosixScriptInvocation")) {
+    failures.push("gemini runtime missing POSIX script invocation normalization");
+  }
+  for (const token of ["plan-review", "assisted-review", "--scorecard", "--taskset"]) {
+    if (!readme.includes(token)) {
+      failures.push(`README missing ${token} docs`);
+    }
+  }
+  return { ok: failures.length === 0, failures };
 }
 
 function checkResourceGovernorSafety() {
@@ -1782,7 +1936,7 @@ function checkGithubActionsCi() {
       failures.push(...annotationValidation.checks.filter((check) => !check.ok).map((check) => `github actions annotations failed: ${check.name}`));
     }
     if (!plain.includes("npm install -g @openai/codex")) failures.push("github actions missing Codex CLI install");
-    if (!plain.includes("--ref gemini-for-codex-v0.11.3")) failures.push("github actions missing immutable Gemini release ref");
+    if (!plain.includes("--ref gemini-for-codex-v0.12.0")) failures.push("github actions missing immutable Gemini release ref");
     if (plain.includes("pull_request_target")) failures.push("github actions contains pull_request_target");
   } catch (error) {
     failures.push(`github actions CI simulation failed: ${error.message || String(error)}`);
@@ -2160,7 +2314,8 @@ function expectContextFixtureFailure(label, options, cwd, env, failures) {
 
 function runGeminiAsync(args, options = {}) {
   return new Promise((resolve) => {
-    const child = spawn(geminiCommand(), args, {
+    const invocation = normalizePosixScriptInvocation(geminiCommand(), args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: options.cwd ?? process.cwd(),
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"]
@@ -2501,6 +2656,9 @@ function adversarialJsonContract() {
 }
 
 function reviewOutputContract(args) {
+  if (args.scorecard) {
+    return "";
+  }
   if (args.structuredReview || args.jsonOutput) {
     return [
       "<output_contract>",
@@ -2528,6 +2686,176 @@ function reviewOutputContract(args) {
   ].join("\n");
 }
 
+function minifiedJsonFile(relativePath) {
+  const fullPath = path.join(pluginRoot(), relativePath);
+  return JSON.stringify(JSON.parse(fs.readFileSync(fullPath, "utf8")));
+}
+
+function promptPartial(name, variables = {}) {
+  return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, name), variables);
+}
+
+function scorecardPromptBlock(args) {
+  if (!args.scorecard) {
+    return "";
+  }
+  return promptPartial("scorecard", {
+    SCORECARD_OUTPUT_SCHEMA_JSON: minifiedJsonFile(path.join("schemas", "scorecard-output.schema.json"))
+  });
+}
+
+function tasksetPromptBlock(args) {
+  if (!args.taskset) {
+    return "";
+  }
+  return promptPartial("taskset", {
+    TASKSET_SCHEMA_JSON: minifiedJsonFile(path.join("schemas", "taskset.schema.json"))
+  });
+}
+
+function validationEvidencePromptBlock(args) {
+  if (args.validationEvidenceBlock !== undefined) {
+    return args.validationEvidenceBlock;
+  }
+  const evidence = loadValidationEvidence({
+    cwd: process.cwd(),
+    files: args.validationEvidence ?? []
+  });
+  args.validationEvidenceSummary = {
+    items: evidence.items.length,
+    skipped: evidence.skipped.length,
+    kinds: [...new Set(evidence.items.map((item) => item.kind))]
+  };
+  args.validationEvidenceBlock = renderValidationEvidenceBlock(evidence);
+  return args.validationEvidenceBlock;
+}
+
+function projectInstructionsPromptBlock(args) {
+  if (args.projectInstructionsBlock !== undefined) {
+    return args.projectInstructionsBlock;
+  }
+  const files = [...DEFAULT_PROJECT_INSTRUCTION_FILES, ...(args.rules ?? [])];
+  return renderProjectInstructionsBlock(process.cwd(), { files });
+}
+
+function tasksetOutputContract(args) {
+  return [
+    tasksetPromptBlock(args),
+    "<output_contract>",
+    "Return exactly one taskset JSON object and no Markdown.",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
+function standardPlanOutputContract() {
+  return [
+    "<output_contract>",
+    "## Observed Facts",
+    "## Inferences",
+    "## Independent Implementation Plan",
+    "## Tests",
+    "## Risks And Blind Spots",
+    "## Reconciliation Checklist",
+    "</output_contract>"
+  ].join("\n");
+}
+
+function escapeXmlText(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeXmlAttribute(value) {
+  return escapeXmlText(value)
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function escapeCdata(value) {
+  return String(value ?? "").replaceAll("]]>", "]]]]><![CDATA[>");
+}
+
+function parseScorecardResult(stdout) {
+  return normalizeScorecardOutput(extractJsonObject(stdout));
+}
+
+function scorecardRoundSummary(command, scorecard, failureCategory = "") {
+  const blockingFindings = Array.isArray(scorecard?.findings)
+    ? scorecard.findings.filter((finding) => finding.blocking).length
+    : 0;
+  return {
+    command,
+    verdict: scorecard?.verdict ?? "",
+    scoreTotal: Number.isFinite(scorecard?.score?.total) ? scorecard.score.total : null,
+    threshold: Number.isFinite(scorecard?.score?.threshold) ? scorecard.score.threshold : 85,
+    blockingFindings,
+    failureCategory,
+    acceptedFindingIds: []
+  };
+}
+
+function blockingFindingIds(scorecard) {
+  return new Set((scorecard?.findings ?? [])
+    .filter((finding) => finding.blocking)
+    .map((finding) => [
+      finding.severity,
+      finding.file,
+      finding.line,
+      finding.description
+    ].join("|")));
+}
+
+function hasRepeatedBlockingFinding(rounds) {
+  if (rounds.length < 2) {
+    return false;
+  }
+  const previous = rounds.at(-2).blockingFindingIds ?? [];
+  const current = new Set(rounds.at(-1).blockingFindingIds ?? []);
+  return previous.some((id) => current.has(id));
+}
+
+function scorecardMultiReviewPayload(results, args) {
+  const roleResults = results.map(({ role, result }) => {
+    if (result.status !== 0) {
+      return {
+        role: role.name,
+        status: "error",
+        error: (result.stderr || result.error || "Gemini role review failed").trim()
+      };
+    }
+    try {
+      return {
+        role: role.name,
+        status: "ok",
+        scorecard: parseScorecardResult(result.stdout)
+      };
+    } catch (error) {
+      return {
+        role: role.name,
+        status: "error",
+        error: `Invalid scorecard output: ${error.message || String(error)}`
+      };
+    }
+  });
+  const okScorecards = roleResults.filter((entry) => entry.status === "ok").map((entry) => entry.scorecard);
+  const blockingFindings = okScorecards.reduce((sum, scorecard) => sum + scorecard.findings.filter((finding) => finding.blocking).length, 0);
+  const scoreTotal = okScorecards.length
+    ? Math.round(okScorecards.reduce((sum, scorecard) => sum + scorecard.score.total, 0) / okScorecards.length)
+    : null;
+  const errors = roleResults.filter((entry) => entry.status !== "ok");
+  return {
+    mode: "plugin-managed",
+    roles: args.reviewRoles.map((role) => role.name),
+    verdict: errors.length || blockingFindings || okScorecards.some((scorecard) => scorecard.verdict !== "approve") ? "needs-attention" : "approve",
+    scoreTotal,
+    threshold: 85,
+    blockingFindings,
+    role_results: roleResults
+  };
+}
+
 function reviewPrompt(kind, args, contextBlock = "") {
   const focus = args._.join(" ").trim();
   const gitContext = collectGitContext(args);
@@ -2541,17 +2869,23 @@ function reviewPrompt(kind, args, contextBlock = "") {
     return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "adversarial-review"), {
       GIT_CONTEXT: gitContext,
       GEMINI_CONTEXT: contextBlock,
+      PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+      VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
       ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
       FOCUS: focus ? `<focus>${focus}</focus>` : "",
-      OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
+      SCORECARD_BLOCK: scorecardPromptBlock(args),
+      OUTPUT_CONTRACT: args.scorecard ? "" : args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
     });
   }
 
   return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "review"), {
     GIT_CONTEXT: gitContext,
     GEMINI_CONTEXT: contextBlock,
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
     REVIEW_ROLES: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     FOCUS: focus ? `<focus>${focus}</focus>` : "",
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
     OUTPUT_CONTRACT: reviewOutputContract(args)
   });
 }
@@ -2564,7 +2898,11 @@ function multiReviewRolePrompt(role, args, gitContext, contextBlock = "") {
     ROLE_DIRECTIVE: role.directive,
     GIT_CONTEXT: gitContext,
     GEMINI_CONTEXT: contextBlock,
-    FOCUS: focus ? `<focus>${focus}</focus>` : ""
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    FOCUS: focus ? `<focus>${focus}</focus>` : "",
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    OUTPUT_CONTRACT: reviewOutputContract(args)
   });
 }
 
@@ -2768,6 +3106,8 @@ function planPrompt(args) {
   return [
     "<task>Create an independent implementation plan for Codex to compare against its own plan.</task>",
     gitContext,
+    projectInstructionsPromptBlock(args),
+    validationEvidencePromptBlock(args),
     "<rules>",
     "- Do not edit files.",
     "- Separate observed facts from inferences.",
@@ -2777,15 +3117,40 @@ function planPrompt(args) {
     "- End with a reconciliation checklist Codex can use against its own plan.",
     "</rules>",
     focus ? `<planning_request>${focus}</planning_request>` : "",
-    "<output_contract>",
-    "## Observed Facts",
-    "## Inferences",
-    "## Independent Implementation Plan",
-    "## Tests",
-    "## Risks And Blind Spots",
-    "## Reconciliation Checklist",
-    "</output_contract>"
+    args.taskset ? tasksetOutputContract(args) : standardPlanOutputContract()
   ].filter(Boolean).join("\n");
+}
+
+function planReviewRolePrompt(role, args) {
+  const focus = args._.join(" ").trim();
+  const planFile = args.planFile;
+  const reviewedFile = planFile?.relative ?? args.reviewedFile ?? "";
+
+  return renderPromptTemplate(loadPromptTemplate(ROOT_DIR, "plan-review-role"), {
+    ROLE_NAME: escapeXmlText(role.name),
+    ROLE_DIRECTIVE: escapeXmlText(role.directive),
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    FOCUS_BLOCK: focus ? `<focus>${escapeXmlText(focus)}</focus>` : "",
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    OUTPUT_CONTRACT: reviewOutputContract(args),
+    REVIEWED_FILE_PATH_ATTR: escapeXmlAttribute(reviewedFile),
+    REVIEWED_FILE_JSON_PATH: escapeXmlText(JSON.stringify(reviewedFile)),
+    PLAN_TEXT_CDATA: escapeCdata(planFile?.text ?? "")
+  });
+}
+
+function assistedReviewPrompt(args, round) {
+  const taskset = args.tasksetLoaded?.ok ? args.tasksetLoaded.taskset : null;
+  const tasksetBlock = taskset
+    ? `<assisted_review_taskset trust="untrusted">\n${escapeXmlText(JSON.stringify(taskset, null, 2))}\n</assisted_review_taskset>`
+    : "";
+  return [
+    promptPartial("assisted-review"),
+    `<assisted_review_round>${round}</assisted_review_round>`,
+    tasksetBlock,
+    reviewPrompt("review", args, args.assistedContextBlock || "")
+  ].filter(Boolean).join("\n\n");
 }
 
 function rescuePrompt(args) {
@@ -3516,6 +3881,7 @@ async function runGeminiTask(kind, rawArgs) {
   try {
     args = parseArgs(rawArgs);
     normalizeAgentTeam(args, kind);
+    validateQualityLoopArgs(kind, args);
     if (kind !== "multi-review" && args.roles !== undefined) {
       throw new Error("--roles is only valid for multi-review; use --adversarial-lenses for adversarial-review.");
     }
@@ -3530,6 +3896,9 @@ async function runGeminiTask(kind, rawArgs) {
     }
     if (kind === "review" && args.jsonOutput && args.structuredReview) {
       throw new Error("--json and --structured cannot be combined for review.");
+    }
+    if (args.scorecard && args.structuredReview) {
+      throw new Error("--scorecard and --structured cannot be combined.");
     }
     if (kind === "adversarial-review") {
       args.resolvedAdversarialLenses = resolveAdversarialLenses(args);
@@ -3586,6 +3955,34 @@ async function runGeminiTask(kind, rawArgs) {
     process.stderr.write(result.stderr || result.error || "gemini review failed\n");
     process.exit(result.status);
   }
+  if (kind === "plan" && args.taskset) {
+    try {
+      const taskset = saveTaskset(process.cwd(), extractJsonObject(result.stdout), process.env);
+      const payload = {
+        ok: true,
+        tasksetId: taskset.id,
+        statePath: taskset.path,
+        taskset
+      };
+      process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`Invalid taskset output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
+  if (args.scorecard) {
+    try {
+      const parsed = parseScorecardResult(result.stdout);
+      process.stdout.write(`${JSON.stringify(parsed, null, 2)}\n`);
+    } catch (error) {
+      process.stderr.write(`Invalid scorecard output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
   if (kind === "adversarial-review" && args.jsonOutput) {
     try {
       const parsed = validateAdversarialJson(extractJsonObject(result.stdout));
@@ -3630,6 +4027,7 @@ async function runGeminiMultiReview(rawArgs) {
   try {
     args = parseArgs(rawArgs);
     normalizeAgentTeam(args, "multi-review");
+    validateQualityLoopArgs("multi-review", args);
     if (args.write) {
       throw new Error("Gemini for Codex is read-only; --write is not supported.");
     }
@@ -3639,6 +4037,9 @@ async function runGeminiMultiReview(rawArgs) {
     parseContextOptions(args);
     if (args.structuredReview) {
       throw new Error("--structured is only valid for review.");
+    }
+    if (args.scorecard && args.nativeAgents) {
+      throw new Error("--scorecard is currently supported for plugin-managed multi-review only.");
     }
     validateGeminiSessionOptions(args);
     args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
@@ -3870,6 +4271,20 @@ async function runGeminiMultiReview(rawArgs) {
     process.exit(nativeStructuredExit.status);
   }
 
+  if (args.scorecard) {
+    const payload = scorecardMultiReviewPayload(results, args);
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    writeOperationReport({
+      command: "multi-review",
+      cwd: process.cwd(),
+      status: payload.verdict === "approve" ? 0 : 1,
+      geminiAvailable: hasGemini(),
+      contextMetadata: context.metadata,
+      rolePack: args.rolePackSummary
+    });
+    process.exit(payload.verdict === "approve" ? 0 : 1);
+  }
+
   const succeeded = results.filter(({ result }) => result.status === 0).map(({ role }) => role.name);
   const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
   const leaseMetadata = leaseSummary(leaseResults);
@@ -3913,6 +4328,187 @@ async function runGeminiMultiReview(rawArgs) {
     leases: args.advisoryLeases ? leaseMetadata : undefined
   });
   process.exit(failed.length ? 1 : 0);
+}
+
+async function runGeminiPlanReview(rawArgs) {
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+    normalizeAgentTeam(args, "plan-review");
+    validateQualityLoopArgs("plan-review", args);
+    if (args.background || args.wait) {
+      throw new Error("plan-review does not support --background.");
+    }
+    if (args.write) {
+      throw new Error("plan-review does not support --write.");
+    }
+    if (args.nativeAgents) {
+      throw new Error("plan-review currently supports plugin-managed roles only.");
+    }
+    if (!args.plan) {
+      throw new Error("--plan is required for plan-review.");
+    }
+    args.reviewRoles = (args.roles === undefined && args.rolePack === undefined)
+      ? defaultRoleObjects()
+      : resolveReviewRoles(args);
+    args.planFile = readWorkspaceBoundPlanFile(args.plan, process.cwd());
+    args.reviewedFile = args.planFile.relative;
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+
+  const concurrency = multiReviewConcurrency();
+  const results = await mapWithConcurrency(args.reviewRoles, concurrency, async (role) => {
+    const prompt = planReviewRolePrompt(role, args);
+    const result = await geminiPrintAsync(prompt, args);
+    return { role, result };
+  });
+
+  if (args.scorecard) {
+    const payload = scorecardMultiReviewPayload(results, args);
+    payload.mode = "plan-review";
+    payload.reviewedFile = args.reviewedFile;
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    writeOperationReport({
+      command: "plan-review",
+      cwd: process.cwd(),
+      status: payload.verdict === "approve" ? 0 : 1,
+      geminiAvailable: hasGemini(),
+      rolePack: args.rolePackSummary
+    });
+    process.exit(payload.verdict === "approve" ? 0 : 1);
+  }
+
+  const failed = results.filter(({ result }) => result.status !== 0).map(({ role }) => role.name);
+  const sections = [
+    "# Gemini Plan Review",
+    `reviewed plan: ${args.reviewedFile}`,
+    ...results.map(({ role, result }) => [
+      `## Role: ${role.name}`,
+      result.stdout.trim() || "(no stdout)",
+      result.status === 0 ? "" : [
+        "",
+        `Role failed with exit status ${result.status}.`,
+        result.stderr || result.error ? `stderr: ${(result.stderr || result.error).trim()}` : ""
+      ].filter(Boolean).join("\n")
+    ].filter(Boolean).join("\n")),
+    "## Orchestration Summary",
+    `roles requested: ${args.reviewRoles.map((role) => role.name).join(", ")}`,
+    `orchestration: ${concurrency <= 1 ? "sequential Gemini CLI plan review" : `parallel Gemini CLI plan review (bounded ${concurrency} max)`}`,
+    "exit policy: exits non-zero if any role fails; completed role output remains visible."
+  ];
+  process.stdout.write(`${sections.join("\n\n")}\n`);
+  writeOperationReport({
+    command: "plan-review",
+    cwd: process.cwd(),
+    status: failed.length ? 1 : 0,
+    geminiAvailable: hasGemini(),
+    rolePack: args.rolePackSummary
+  });
+  process.exit(failed.length ? 1 : 0);
+}
+
+async function runGeminiAssistedReview(rawArgs) {
+  if (maybeStartBackground("assisted-review", rawArgs)) {
+    return;
+  }
+  let args;
+  try {
+    args = parseArgs(rawArgs);
+    validateQualityLoopArgs("assisted-review", args);
+    if (args.write) {
+      throw new Error("Gemini for Codex is read-only; --write is not supported.");
+    }
+    if (args.effort) {
+      throw new Error("--effort is not supported by Gemini for Codex.");
+    }
+    if (args.structuredReview) {
+      throw new Error("--structured is not supported for assisted-review.");
+    }
+    args.scorecard = true;
+    args.jsonOutput = true;
+    args.maxReviewRounds = args.maxReviewRounds ?? 2;
+    if (args.tasksetId) {
+      args.tasksetLoaded = readTaskset(process.cwd(), args.tasksetId, process.env);
+      if (!args.tasksetLoaded.ok) {
+        throw new Error(`Unable to read taskset ${args.tasksetId}: ${args.tasksetLoaded.error}`);
+      }
+    }
+    parseContextOptions(args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+
+  let context = { block: "", metadata: defaultContextMetadata() };
+  try {
+    context = await resolveCommandContext(args);
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+  if (args.contextStrict && context.metadata.contextStatus !== "available" && context.metadata.contextStatus !== "disabled") {
+    console.error(`Context provider unavailable in strict mode: ${context.metadata.contextFailureReason}`);
+    writeOperationReport({ command: "assisted-review", cwd: process.cwd(), status: 2, geminiAvailable: hasGemini(), contextMetadata: context.metadata });
+    process.exit(2);
+  }
+  args.assistedContextBlock = context.block;
+
+  const loopId = `loop-${randomUUID()}`;
+  const rounds = [];
+  let finalAction = { action: "review" };
+  for (let round = 1; round <= args.maxReviewRounds; round += 1) {
+    const prompt = assistedReviewPrompt(args, round);
+    const result = await geminiPrintAsync(prompt, args);
+    let scorecard = null;
+    let roundFailureCategory = "";
+    if (result.status === 0) {
+      try {
+        scorecard = parseScorecardResult(result.stdout);
+      } catch (error) {
+        process.stderr.write(`Invalid assisted-review scorecard output: ${error.message || String(error)}\n`);
+        process.stdout.write(result.stdout);
+        process.exit(1);
+      }
+    } else {
+      roundFailureCategory = classifyProviderFailure(result);
+    }
+    const summary = {
+      ...scorecardRoundSummary("assisted-review", scorecard, roundFailureCategory),
+      blockingFindingIds: scorecard ? [...blockingFindingIds(scorecard)] : []
+    };
+    rounds.push(summary);
+    writeRoundSummary(process.cwd(), loopId, round, summary, process.env);
+    finalAction = nextAssistedReviewAction({
+      maxRounds: args.maxReviewRounds,
+      rounds,
+      repeatedBlockingFinding: hasRepeatedBlockingFinding(rounds)
+    });
+    if (finalAction.action === "stop") {
+      break;
+    }
+  }
+  const latest = rounds.at(-1) ?? {};
+  const payload = {
+    status: finalAction.reason === "threshold_met" ? "approved" : "needs_attention",
+    loopId,
+    rounds: rounds.length,
+    stopReason: finalAction.reason ?? "max_rounds",
+    scoreTotal: latest.scoreTotal ?? null,
+    threshold: latest.threshold ?? 85,
+    blockingFindings: latest.blockingFindings ?? 0,
+    nextSuggestedCommand: "node plugins/gemini-for-codex/scripts/gemini-companion.mjs review --scorecard --json"
+  };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  writeOperationReport({
+    command: "assisted-review",
+    cwd: process.cwd(),
+    status: payload.status === "approved" ? 0 : 1,
+    geminiAvailable: hasGemini(),
+    contextMetadata: context.metadata
+  });
+  process.exit(payload.status === "approved" ? 0 : 1);
 }
 
 function printJobs() {
@@ -4237,8 +4833,14 @@ switch (command) {
   case "multi-review":
     await runGeminiMultiReview(rawArgs);
     break;
+  case "plan-review":
+    await runGeminiPlanReview(rawArgs);
+    break;
   case "plan":
     await runGeminiTask("plan", rawArgs);
+    break;
+  case "assisted-review":
+    await runGeminiAssistedReview(rawArgs);
     break;
   case "rescue":
     await runGeminiTask("rescue", rawArgs);

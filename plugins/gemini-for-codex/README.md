@@ -48,12 +48,27 @@ The plugin sends bounded inline git context and does not depend on Gemini MCP or
 - `leases`: list, claim, and release advisory path-attention leases.
 - `adversarial-review`: skeptical multi-lens review.
 - `multi-review`: parallel role fan-out across correctness, security, tests, release, and adversarial review. Add `--role-pack <pack>` to select a built-in reviewer team, or `--agent-team native-agents` to use Gemini CLI native subagents through temporary `gfc_*` agent definitions. Existing `--native-agents` remains a compatibility alias.
-- `plan`: independent implementation plan for Codex to reconcile.
+- `plan`: independent implementation plan for Codex to reconcile. Add `--taskset` to store a normalized read-only taskset for later assisted review.
+- `plan-review`: read-only multi-role review of a workspace-local plan file. Add `--scorecard` for normalized approval/needs-attention output.
+- `assisted-review`: bounded advisory scorecard review loop over current git changes. Add `--taskset <id>` to include a stored taskset and `--max-review-rounds 1..3` to cap review rounds.
 - `rescue`: read-only diagnosis for stuck implementation work. Explicit `--resume`, `--session-id`, and `--worktree` are forwarded only when the installed Gemini CLI reports support.
 - `recommend-execution-mode`: return JSON guidance for foreground versus background review sizing.
 - `sessions`: list Gemini CLI sessions when the installed Gemini CLI reports `--list-sessions`.
 - `jobs`, `result`, `cancel`: tracked job lifecycle.
 - `review-gate`: internal Stop hook runner.
+
+## Quality Loop
+
+Gemini for Codex includes a provider-native quality loop for release work:
+
+```bash
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs review --scorecard --json
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs plan --taskset "Plan the remaining release work."
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs plan-review --plan task_plan.md --scorecard --roles correctness,security,tests,release
+node plugins/gemini-for-codex/scripts/gemini-companion.mjs assisted-review --taskset ts-example --max-review-rounds 2
+```
+
+The scorecard contract is normalized locally before Codex consumes it. Tasksets are stored outside the repository under the plugin state directory and contain advisory subtasks only. Plan review reads only regular files inside the current workspace and rejects symlinks or paths outside the repo. Assisted review never edits files, commits, pushes, opens PRs, or closes issues; it stops when the score threshold is met, a repeated blocker/no-improvement condition appears, a provider failure is classified, or the round cap is reached.
 
 ## Background Jobs
 
@@ -207,7 +222,7 @@ Write the default workflow only when requested:
 node plugins/gemini-for-codex/scripts/gemini-companion.mjs github-actions init --write
 ```
 
-The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.11.3`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
+The generated workflow uses `pull_request`, skips Gemini execution on fork PRs by default, installs the Codex CLI before plugin installation, pins `gemini-for-codex-v0.12.0`, uploads the structured review artifact, and can optionally publish Checks annotations with `--annotations`. Default CI workflows intentionally do not enable native-agent mode, `--native-structured`, or `--stream-progress`.
 
 ## Stop Hook
 

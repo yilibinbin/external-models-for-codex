@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 - 2026-06-14
+
+- Add normalized scorecard review contracts for `review`, plugin-managed `multi-review`, `adversarial-review`, and `plan-review`.
+- Add `plan --taskset`, `plan-review`, and bounded advisory `assisted-review` quality-loop commands.
+- Add workspace-bound plan-file reading, repo-external taskset state, validation-evidence blocks, project-instruction advisory context, and round summary indexes.
+- Harden `agy` script-wrapper execution by resolving POSIX shebang scripts through their interpreters before spawning.
+- Add quality-loop skills, natural-language routing guards, release-check guards, and fake-CLI regression tests.
+
 ## 0.6.1 - 2026-06-13
 
 - Add a file-backed global resource governor for foreground reviews, Stop gates, multi-review fan-out, background jobs, and reserved workers.

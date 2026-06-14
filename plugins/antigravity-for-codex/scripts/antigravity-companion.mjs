@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -90,6 +91,14 @@ import {
   withResourceLeaseSync
 } from "./lib/resource-governor.mjs";
 import { spawnSyncWithRetry } from "./lib/spawn-retry.mjs";
+import { normalizeScorecardOutput } from "./lib/scorecard.mjs";
+import { saveTaskset, readTaskset } from "./lib/tasksets.mjs";
+import { loadValidationEvidence, renderValidationEvidenceBlock } from "./lib/validation-evidence.mjs";
+import { DEFAULT_PROJECT_INSTRUCTION_FILES, renderProjectInstructionsBlock } from "./lib/project-instructions.mjs";
+import { readWorkspaceBoundPlanFile } from "./lib/plan-review-file.mjs";
+import { writeRoundSummary } from "./lib/summary-index.mjs";
+import { nextAssistedReviewAction } from "./lib/assisted-review.mjs";
+import { classifyProviderFailure } from "./lib/failure-taxonomy.mjs";
 
 const VALID_COMMANDS = new Set([
   "setup",
@@ -98,8 +107,10 @@ const VALID_COMMANDS = new Set([
   "review",
   "adversarial-review",
   "multi-review",
+  "plan-review",
   "roles",
   "plan",
+  "assisted-review",
   "rescue",
   "report",
   "jobs",
@@ -174,10 +185,16 @@ async function antigravityPrintAsync(prompt, options = {}, env = process.env) {
 
 function usage(command = "") {
   if (command === "review") {
-    return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [--structured] [--json] [focus]\n";
+    return "Usage: antigravity-companion.mjs review [--model-provider gemini|claude] [--model <label>] [--scorecard] [--structured] [--json] [focus]\n";
   }
   if (command === "multi-review") {
-    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [--role-pack default|security|release] [--use-mailbox] [--advisory-leases] [focus]\n";
+    return "Usage: antigravity-companion.mjs multi-review [--model-provider gemini|claude] [--model <label>] [--scorecard] [--roles correctness,security,tests,release,adversarial] [--role-pack default|security|release] [--use-mailbox] [--advisory-leases] [focus]\n";
+  }
+  if (command === "plan-review") {
+    return "Usage: antigravity-companion.mjs plan-review --plan <file> [--model-provider gemini|claude] [--model <label>] [--roles correctness,security,tests,release,adversarial] [--scorecard [--json]] [focus]\n";
+  }
+  if (command === "assisted-review") {
+    return "Usage: antigravity-companion.mjs assisted-review [--model-provider gemini|claude] [--model <label>] [--taskset <id>] [--max-review-rounds 1..3] [focus]\n";
   }
   if (command === "roles") {
     return "Usage: antigravity-companion.mjs roles --json\n";
@@ -197,7 +214,7 @@ function usage(command = "") {
   if (command === "github-actions") {
     return "Usage: antigravity-companion.mjs github-actions <render|init|validate> [--force] [--model-provider gemini|claude] [--model <label>] [--ref <tag>] [--timeout-minutes <n>] [--path <workflow-path>]\n";
   }
-  return "Usage: antigravity-companion.mjs <setup|capabilities|doctor|review|adversarial-review|multi-review|roles|plan|rescue|report|jobs|status|result|cancel|mailbox|leases|github-actions|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
+  return "Usage: antigravity-companion.mjs <setup|capabilities|doctor|review|adversarial-review|multi-review|plan-review|roles|plan|assisted-review|rescue|report|jobs|status|result|cancel|mailbox|leases|github-actions|reserve-job|run-reserved-job|review-gate|real-smoke|release-check> [args]\n";
 }
 
 function readOptionValue(tokens, index, option) {
@@ -221,6 +238,13 @@ function parseArgs(rawArgs) {
     full: false,
     structured: false,
     json: false,
+    scorecard: false,
+    validationEvidence: undefined,
+    rules: undefined,
+    plan: "",
+    taskset: false,
+    tasksetId: "",
+    maxReviewRounds: undefined,
     latest: false,
     background: false,
     useMailbox: false,
@@ -274,6 +298,35 @@ function parseArgs(rawArgs) {
     } else if (token === "--json") {
       args.json = true;
       args.structured = true;
+    } else if (token === "--scorecard") {
+      args.scorecard = true;
+    } else if (["--validation-log", "--test-summary", "--ci-summary", "--screenshot-summary"].includes(token)) {
+      args.validationEvidence = [...(args.validationEvidence ?? []), {
+        kind: token.slice(2),
+        file: readOptionValue(rawArgs, index, token)
+      }];
+      index += 1;
+    } else if (token === "--rules") {
+      args.rules = [...(args.rules ?? []), readOptionValue(rawArgs, index, token)];
+      index += 1;
+    } else if (token === "--plan") {
+      args.plan = readOptionValue(rawArgs, index, token);
+      index += 1;
+    } else if (token === "--taskset") {
+      const maybeTasksetId = rawArgs[index + 1];
+      if (maybeTasksetId === undefined || maybeTasksetId.startsWith("--") || !maybeTasksetId.startsWith("ts-")) {
+        args.taskset = true;
+      } else {
+        args.tasksetId = readOptionValue(rawArgs, index, token);
+        index += 1;
+      }
+    } else if (token === "--max-review-rounds") {
+      const value = Number(readOptionValue(rawArgs, index, token));
+      if (!Number.isInteger(value) || value < 1 || value > 3) {
+        throw new Error("--max-review-rounds must be an integer from 1 to 3.");
+      }
+      args.maxReviewRounds = value;
+      index += 1;
     } else if (token === "--latest") {
       args.latest = true;
     } else if (token === "--background") {
@@ -349,6 +402,216 @@ function parseArgs(rawArgs) {
     }
   }
   return args;
+}
+
+const SCORECARD_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan-review", "assisted-review"]);
+const VALIDATION_EVIDENCE_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan", "plan-review", "assisted-review"]);
+const RULE_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan", "plan-review", "assisted-review", "rescue"]);
+
+function validateQualityLoopArgs(command, args) {
+  if (args.scorecard && !SCORECARD_COMMANDS.has(command)) {
+    throw new Error("--scorecard is only valid for review, multi-review, adversarial-review, plan-review, and assisted-review.");
+  }
+  if (command === "plan-review" && args.json && !args.scorecard) {
+    throw new Error("--json is only valid for plan-review when --scorecard is also set.");
+  }
+  if (args.validationEvidence && !VALIDATION_EVIDENCE_COMMANDS.has(command)) {
+    throw new Error("--validation-log, --test-summary, --ci-summary, and --screenshot-summary are only valid for review, multi-review, adversarial-review, plan, plan-review, and assisted-review.");
+  }
+  if (args.rules && !RULE_COMMANDS.has(command)) {
+    throw new Error("--rules is only valid for prompt commands.");
+  }
+  if (args.plan && command !== "plan-review") {
+    throw new Error("--plan is only valid for plan-review.");
+  }
+  if (args.taskset && command !== "plan") {
+    throw new Error("--taskset without an id is only valid for plan.");
+  }
+  if (args.tasksetId && command !== "assisted-review") {
+    throw new Error("--taskset <id> is only valid for assisted-review.");
+  }
+  if (args.maxReviewRounds !== undefined && command !== "assisted-review") {
+    throw new Error("--max-review-rounds is only valid for assisted-review.");
+  }
+}
+
+function minifiedJsonFile(relativePath) {
+  const fullPath = path.join(ROOT_DIR, relativePath);
+  return JSON.stringify(JSON.parse(fs.readFileSync(fullPath, "utf8")));
+}
+
+function promptPartial(name, variables = {}) {
+  return renderTemplate(readPromptTemplate(ROOT_DIR, name), variables);
+}
+
+function scorecardPromptBlock(args) {
+  if (!args.scorecard) {
+    return "";
+  }
+  return promptPartial("scorecard", {
+    SCORECARD_OUTPUT_SCHEMA_JSON: minifiedJsonFile(path.join("schemas", "scorecard-output.schema.json"))
+  });
+}
+
+function tasksetPromptBlock(args) {
+  if (!args.taskset) {
+    return "";
+  }
+  return promptPartial("taskset", {
+    TASKSET_SCHEMA_JSON: minifiedJsonFile(path.join("schemas", "taskset.schema.json"))
+  });
+}
+
+function validationEvidencePromptBlock(args) {
+  if (args.validationEvidenceBlock !== undefined) {
+    return args.validationEvidenceBlock;
+  }
+  const evidence = loadValidationEvidence({
+    cwd: process.cwd(),
+    files: args.validationEvidence ?? []
+  });
+  args.validationEvidenceBlock = renderValidationEvidenceBlock(evidence);
+  return args.validationEvidenceBlock;
+}
+
+function projectInstructionsPromptBlock(args) {
+  if (args.projectInstructionsBlock !== undefined) {
+    return args.projectInstructionsBlock;
+  }
+  const files = [...DEFAULT_PROJECT_INSTRUCTION_FILES, ...(args.rules ?? [])];
+  return renderProjectInstructionsBlock(process.cwd(), { files });
+}
+
+function reviewOutputContract(args) {
+  if (args.scorecard) {
+    return "";
+  }
+  return [
+    "<output_contract>",
+    "## Findings",
+    "- [Severity] file:line - issue, evidence, impact, suggested direction",
+    "## Open Questions",
+    "## Residual Risk",
+    "</output_contract>"
+  ].join("\n");
+}
+
+function tasksetOutputContract(args) {
+  return [
+    tasksetPromptBlock(args),
+    "<output_contract>",
+    "Return exactly one taskset JSON object and no Markdown.",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
+function standardPlanOutputContract() {
+  return [
+    "<output_contract>",
+    "## Observed Facts",
+    "## Inferences",
+    "## Independent Implementation Plan",
+    "## Tests",
+    "## Risks And Blind Spots",
+    "## Reconciliation Checklist",
+    "</output_contract>"
+  ].join("\n");
+}
+
+function escapeXmlText(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function escapeXmlAttribute(value) {
+  return escapeXmlText(value)
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function escapeCdata(value) {
+  return String(value ?? "").replaceAll("]]>", "]]]]><![CDATA[>");
+}
+
+function parseScorecardResult(stdout) {
+  return normalizeScorecardOutput(extractJsonObject(stdout));
+}
+
+function scorecardRoundSummary(command, scorecard, failureCategory = "") {
+  const blockingFindings = Array.isArray(scorecard?.findings)
+    ? scorecard.findings.filter((finding) => finding.blocking).length
+    : 0;
+  return {
+    command,
+    verdict: scorecard?.verdict ?? "",
+    scoreTotal: Number.isFinite(scorecard?.score?.total) ? scorecard.score.total : null,
+    threshold: Number.isFinite(scorecard?.score?.threshold) ? scorecard.score.threshold : 85,
+    blockingFindings,
+    failureCategory,
+    acceptedFindingIds: []
+  };
+}
+
+function blockingFindingIds(scorecard) {
+  return new Set((scorecard?.findings ?? [])
+    .filter((finding) => finding.blocking)
+    .map((finding) => [
+      finding.severity,
+      finding.file,
+      finding.line,
+      finding.description
+    ].join("|")));
+}
+
+function hasRepeatedBlockingFinding(rounds) {
+  if (rounds.length < 2) {
+    return false;
+  }
+  const previous = rounds.at(-2).blockingFindingIds ?? [];
+  const current = new Set(rounds.at(-1).blockingFindingIds ?? []);
+  return previous.some((id) => current.has(id));
+}
+
+function scorecardMultiReviewPayload(results, args, mode = "plugin-managed") {
+  const roleResults = results.map(({ role, result }) => {
+    if (result.status !== 0) {
+      return {
+        role,
+        status: "error",
+        error: (result.stderr || result.error || "Antigravity role review failed").trim()
+      };
+    }
+    try {
+      return {
+        role,
+        status: "ok",
+        scorecard: parseScorecardResult(result.stdout)
+      };
+    } catch (error) {
+      return {
+        role,
+        status: "error",
+        error: `Invalid scorecard output: ${error.message || String(error)}`
+      };
+    }
+  });
+  const okScorecards = roleResults.filter((entry) => entry.status === "ok").map((entry) => entry.scorecard);
+  const blockingFindings = okScorecards.reduce((sum, scorecard) => sum + scorecard.findings.filter((finding) => finding.blocking).length, 0);
+  const scoreTotal = okScorecards.length
+    ? Math.round(okScorecards.reduce((sum, scorecard) => sum + scorecard.score.total, 0) / okScorecards.length)
+    : null;
+  const errors = roleResults.filter((entry) => entry.status !== "ok");
+  return {
+    mode,
+    roles: results.map((entry) => entry.role),
+    verdict: errors.length || blockingFindings || okScorecards.some((scorecard) => scorecard.verdict !== "approve") ? "needs-attention" : "approve",
+    scoreTotal,
+    threshold: 85,
+    blockingFindings,
+    role_results: roleResults
+  };
 }
 
 function readText(relativePath) {
@@ -870,7 +1133,12 @@ function templatePromptFor(kind, args, preflight) {
     MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
     MODEL: preflight?.model || args.model || "",
     GIT_CONTEXT: gitContext(),
-    FOCUS_BLOCK: focusBlock(args)
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    FOCUS_BLOCK: focusBlock(args),
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    TASKSET_BLOCK: args.taskset ? tasksetPromptBlock(args) : "",
+    OUTPUT_CONTRACT: kind === "plan" && args.taskset ? tasksetOutputContract(args) : kind === "plan" ? standardPlanOutputContract() : reviewOutputContract(args)
   });
 }
 
@@ -883,7 +1151,11 @@ function renderCommandPrompt(command, values) {
     MODEL_PROVIDER: values.MODEL_PROVIDER ?? "",
     MODEL: values.MODEL ?? "",
     GIT_CONTEXT: values.GIT_CONTEXT ?? "",
-    FOCUS_BLOCK: values.TASK ?? ""
+    PROJECT_INSTRUCTIONS_BLOCK: values.PROJECT_INSTRUCTIONS_BLOCK ?? "",
+    VALIDATION_EVIDENCE_BLOCK: values.VALIDATION_EVIDENCE_BLOCK ?? "",
+    FOCUS_BLOCK: values.TASK ?? "",
+    SCORECARD_BLOCK: values.SCORECARD_BLOCK ?? "",
+    OUTPUT_CONTRACT: values.OUTPUT_CONTRACT ?? reviewOutputContract({})
   });
 }
 
@@ -1119,6 +1391,7 @@ function runReview(kind, rawArgs) {
   let args;
   try {
     args = parseArgs(rawArgs);
+    validateQualityLoopArgs(kind, args);
   } catch (error) {
     const stderr = error.message || String(error);
     const result = { status: 2, stdout: "", stderr, error: "", errorCode: "" };
@@ -1143,7 +1416,7 @@ function runReview(kind, rawArgs) {
     process.exit(2);
   }
   let prompt = templatePromptFor(kind, args, preflight);
-  if (args.structured || args.json) {
+  if ((args.structured || args.json) && !args.scorecard) {
     prompt = appendStructuredReviewInstructions(prompt);
   }
   const result = antigravityPrint(prompt, { ...args, preflight }, process.env);
@@ -1152,6 +1425,39 @@ function runReview(kind, rawArgs) {
     writeReviewOperationReport(kind, args, result, startedAt, endedAt);
     process.stderr.write(`${result.stderr || result.error || "Antigravity review failed."}\n`);
     process.exit(result.status);
+  }
+  if (kind === "plan" && args.taskset) {
+    try {
+      const taskset = saveTaskset(process.cwd(), extractJsonObject(result.stdout), process.env);
+      const stdout = `${JSON.stringify({
+        ok: true,
+        tasksetId: taskset.id,
+        statePath: taskset.path,
+        taskset
+      }, null, 2)}\n`;
+      writeReviewOperationReport(kind, args, { ...result, stdout }, startedAt, endedAt);
+      process.stdout.write(stdout);
+    } catch (error) {
+      writeReviewOperationReport(kind, args, { ...result, status: 1, stderr: error.message || String(error) }, startedAt, new Date().toISOString());
+      process.stderr.write(`Invalid taskset output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
+  if (args.scorecard) {
+    try {
+      const parsed = parseScorecardResult(result.stdout);
+      const stdout = `${JSON.stringify(parsed, null, 2)}\n`;
+      writeReviewOperationReport(kind, args, { ...result, stdout }, startedAt, endedAt, parsed);
+      process.stdout.write(stdout);
+    } catch (error) {
+      writeReviewOperationReport(kind, args, { ...result, status: 1, stderr: error.message || String(error) }, startedAt, new Date().toISOString());
+      process.stderr.write(`Invalid scorecard output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
   }
   let parsed;
   if (args.structured || args.json) {
@@ -1953,6 +2259,12 @@ async function runMultiReview(rawArgs) {
     process.stdout.write(usage("multi-review"));
     return;
   }
+  try {
+    validateQualityLoopArgs("multi-review", args);
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
   if (args.background) {
     return queueBackgroundJob("multi-review", rawArgs);
   }
@@ -2001,11 +2313,21 @@ async function runMultiReview(rawArgs) {
       TASK: task,
       GIT_CONTEXT: sharedGitContext,
       MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
-      MODEL: preflight?.model || args.model || ""
+      MODEL: preflight?.model || args.model || "",
+      PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+      VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+      SCORECARD_BLOCK: scorecardPromptBlock(args),
+      OUTPUT_CONTRACT: reviewOutputContract(args)
     });
     const result = await antigravityPrintAsync(prompt, { ...args, preflight }, process.env);
     return { role: role.name, result };
   });
+
+  if (args.scorecard) {
+    const payload = scorecardMultiReviewPayload(results, args);
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    process.exit(payload.verdict === "approve" ? 0 : 1);
+  }
 
   let failed = false;
   process.stdout.write(`## Orchestration\n${concurrency <= 1 ? "sequential Antigravity role review" : `parallel Antigravity role fan-out (bounded ${concurrency} max)`}\n\n`);
@@ -2027,6 +2349,170 @@ async function runMultiReview(rawArgs) {
   process.exit(failed ? 1 : 0);
 }
 
+function planReviewRolePrompt(role, args, preflight) {
+  const template = readPromptTemplate(ROOT_DIR, "plan-review-role");
+  const reviewedFile = args.planFile?.relative ?? "";
+  return renderTemplate(template, {
+    ROLE_NAME: escapeXmlText(role.name),
+    ROLE_DIRECTIVE: escapeXmlText(role.brief || role.directive || ""),
+    MODEL_PROVIDER: preflight?.modelProvider || args.modelProvider || process.env.ANTIGRAVITY_FOR_CODEX_MODEL_PROVIDER || "gemini",
+    MODEL: preflight?.model || args.model || "",
+    PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    FOCUS_BLOCK: focusBlock(args),
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    OUTPUT_CONTRACT: reviewOutputContract(args),
+    REVIEWED_FILE_PATH_ATTR: escapeXmlAttribute(reviewedFile),
+    REVIEWED_FILE_JSON_PATH: escapeXmlText(JSON.stringify(reviewedFile)),
+    PLAN_TEXT_CDATA: escapeCdata(args.planFile?.text ?? "")
+  });
+}
+
+async function runPlanReview(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write(usage("plan-review"));
+    return;
+  }
+  try {
+    validateQualityLoopArgs("plan-review", args);
+    if (args.background) {
+      throw new Error("plan-review does not support --background.");
+    }
+    if (!args.plan) {
+      throw new Error("--plan is required for plan-review.");
+    }
+    args.planFile = readWorkspaceBoundPlanFile(args.plan, process.cwd(), process.env);
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  const preflight = antigravityPreflight(process.env, args);
+  if (!preflight.ok) {
+    process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
+    process.exit(2);
+  }
+  let roles;
+  try {
+    roles = resolveRoles({ roles: args.roles, rolePack: args.rolePack });
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  const results = [];
+  for (const role of roles) {
+    const prompt = planReviewRolePrompt(role, args, preflight);
+    const result = antigravityPrint(prompt, { ...args, preflight }, process.env);
+    results.push({ role: role.name, result });
+  }
+  if (args.scorecard) {
+    const payload = scorecardMultiReviewPayload(results, args, "plan-review");
+    payload.reviewedFile = args.planFile.relative;
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    process.exit(payload.verdict === "approve" ? 0 : 1);
+  }
+  let failed = false;
+  process.stdout.write(`# Antigravity Plan Review\n\nreviewed plan: ${args.planFile.relative}\n\n`);
+  for (const { role, result } of results) {
+    const body = result.stdout || result.stderr || result.error;
+    process.stdout.write(`## ${role}\n${body || "No output."}\n\n`);
+    if (result.status !== 0) {
+      failed = true;
+    }
+  }
+  process.exit(failed ? 1 : 0);
+}
+
+function assistedReviewPrompt(args, round) {
+  const taskset = args.tasksetLoaded?.ok ? args.tasksetLoaded.taskset : null;
+  const tasksetBlock = taskset
+    ? `<assisted_review_taskset trust="untrusted">\n${escapeXmlText(JSON.stringify(taskset, null, 2))}\n</assisted_review_taskset>`
+    : "";
+  return [
+    promptPartial("assisted-review"),
+    `<assisted_review_round>${round}</assisted_review_round>`,
+    tasksetBlock,
+    templatePromptFor("review", args, args.preflight)
+  ].filter(Boolean).join("\n\n");
+}
+
+async function runAssistedReview(rawArgs) {
+  const args = parseArgsOrExit(rawArgs);
+  if (args.help) {
+    process.stdout.write(usage("assisted-review"));
+    return;
+  }
+  try {
+    validateQualityLoopArgs("assisted-review", args);
+    if (args.background) {
+      throw new Error("assisted-review does not support --background.");
+    }
+    args.scorecard = true;
+    args.maxReviewRounds = args.maxReviewRounds ?? 2;
+    if (args.tasksetId) {
+      args.tasksetLoaded = readTaskset(process.cwd(), args.tasksetId, process.env);
+      if (!args.tasksetLoaded.ok) {
+        throw new Error(`Unable to read taskset ${args.tasksetId}: ${args.tasksetLoaded.error}`);
+      }
+    }
+  } catch (error) {
+    process.stderr.write(`${error.message || String(error)}\n`);
+    process.exit(2);
+  }
+  const preflight = antigravityPreflight(process.env, args);
+  if (!preflight.ok) {
+    process.stderr.write(`${preflight.error || `Antigravity CLI is unavailable; missing ${preflight.missing.join(", ")}.`}\n`);
+    process.exit(2);
+  }
+  args.preflight = preflight;
+  const loopId = `loop-${randomUUID()}`;
+  const rounds = [];
+  let finalAction = { action: "review" };
+  for (let round = 1; round <= args.maxReviewRounds; round += 1) {
+    const result = antigravityPrint(assistedReviewPrompt(args, round), { ...args, preflight }, process.env);
+    let scorecard = null;
+    let roundFailureCategory = "";
+    if (result.status === 0) {
+      try {
+        scorecard = parseScorecardResult(result.stdout);
+      } catch (error) {
+        process.stderr.write(`Invalid assisted-review scorecard output: ${error.message || String(error)}\n`);
+        process.stdout.write(result.stdout);
+        process.exit(1);
+      }
+    } else {
+      roundFailureCategory = classifyProviderFailure({ ...result, outcome: classifyAgyOutcome(result) });
+    }
+    const summary = {
+      ...scorecardRoundSummary("assisted-review", scorecard, roundFailureCategory),
+      blockingFindingIds: scorecard ? [...blockingFindingIds(scorecard)] : []
+    };
+    rounds.push(summary);
+    writeRoundSummary(process.cwd(), loopId, round, summary, process.env);
+    finalAction = nextAssistedReviewAction({
+      maxRounds: args.maxReviewRounds,
+      rounds,
+      repeatedBlockingFinding: hasRepeatedBlockingFinding(rounds)
+    });
+    if (finalAction.action === "stop") {
+      break;
+    }
+  }
+  const latest = rounds.at(-1) ?? {};
+  const payload = {
+    status: finalAction.reason === "threshold_met" ? "approved" : "needs_attention",
+    loopId,
+    rounds: rounds.length,
+    stopReason: finalAction.reason ?? "max_rounds",
+    scoreTotal: latest.scoreTotal ?? null,
+    threshold: latest.threshold ?? 85,
+    blockingFindings: latest.blockingFindings ?? 0,
+    nextSuggestedCommand: "node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review --scorecard --json"
+  };
+  process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+  process.exit(payload.status === "approved" ? 0 : 1);
+}
+
 function releaseCheckResult(ok, name, detail = "") {
   return { ok, name, detail };
 }
@@ -2037,6 +2523,8 @@ function expectedSkills() {
     "antigravity-adversarial-review",
     "antigravity-multi-review",
     "antigravity-plan",
+    "antigravity-plan-review",
+    "antigravity-assisted-review",
     "antigravity-rescue",
     "antigravity-review-gate",
     "antigravity-github-actions-review",
@@ -2057,6 +2545,8 @@ function expectedPublicCommands() {
     "multi-review",
     "doctor",
     "plan",
+    "plan-review",
+    "assisted-review",
     "rescue",
     "review-gate",
     "real-smoke",
@@ -2292,7 +2782,8 @@ function runReleaseCheck(rawArgs) {
     "process.kill(-child.pid, signal)",
     "parentPid: process.pid",
     "parentMonitor",
-    "return runCommandWithPosixSupervisor(command, args, options, env)"
+    "normalizePosixScriptInvocation(command, args)",
+    "return runCommandWithPosixSupervisor(invocation.command, invocation.args, options, env)"
   ].every((needle) => runtime.includes(needle));
   const reservedJobResourceGuardOk = [
     "RESERVABLE_COMMANDS.has(command)",
@@ -2392,6 +2883,28 @@ function runReleaseCheck(rawArgs) {
     /(?:^|[\s"'=])\/(?:Users|home|private\/var\/folders|root|Volumes)[^\r\n"'`<>|]*/,
     /(?:^|[\s"'=])[A-Za-z]:(?:\\{1,2}|\/)[^\r\n"'`<>|]*/
   ];
+  const qualityLoopSurfaceOk = [
+    "prompts/scorecard.md",
+    "prompts/taskset.md",
+    "prompts/assisted-review.md",
+    "prompts/plan-review-role.md",
+    "schemas/scorecard-output.schema.json",
+    "schemas/taskset.schema.json",
+    "scripts/lib/assisted-review.mjs",
+    "scripts/lib/failure-taxonomy.mjs",
+    "scripts/lib/plan-review-file.mjs",
+    "scripts/lib/project-instructions.mjs",
+    "scripts/lib/scorecard.mjs",
+    "scripts/lib/state-ids.mjs",
+    "scripts/lib/summary-index.mjs",
+    "scripts/lib/tasksets.mjs",
+    "scripts/lib/validation-evidence.mjs",
+    "skills/antigravity-plan-review/SKILL.md",
+    "skills/antigravity-assisted-review/SKILL.md"
+  ].every((relativePath) => exists(relativePath))
+    && ["\"plan-review\"", "\"assisted-review\"", "--scorecard", "--taskset"].every((needle) => companion.includes(needle))
+    && runtime.includes("normalizePosixScriptInvocation")
+    && ["plan-review", "assisted-review", "--scorecard", "--taskset"].every((needle) => antigravityDocs.includes(needle));
   const checks = [
     releaseCheckResult(manifest.name === "antigravity-for-codex", "manifest-name"),
     releaseCheckResult(manifest.version === PLUGIN_VERSION, "manifest-version"),
@@ -2432,6 +2945,7 @@ function runReleaseCheck(rawArgs) {
     releaseCheckResult(reservedJobResourceGuardOk, "reserved-job-resource-guard"),
     releaseCheckResult(globalResourceGovernorOk, "global-resource-governor"),
     releaseCheckResult(spawnRetrySafetyOk, "spawn-retry-safety"),
+    releaseCheckResult(qualityLoopSurfaceOk, "quality-loop-surface"),
     releaseCheckResult(textScanPasses(userFacingTexts, unsupportedReviewGateSetupPatterns), "no-unsupported-review-gate-setup-command"),
     releaseCheckResult(companion.includes("deriveJobIdempotencyKey") && companion.includes("worktreeFingerprint"), "background-idempotency-fingerprint"),
     releaseCheckResult(githubActionsForbiddenPluginPathsExist, "skills-natural-language-routing-paths"),
@@ -2638,6 +3152,12 @@ async function main() {
   }
   if (command === "multi-review") {
     return runMultiReview(rest);
+  }
+  if (command === "plan-review") {
+    return runPlanReview(rest);
+  }
+  if (command === "assisted-review") {
+    return runAssistedReview(rest);
   }
   if (command === "review-gate") {
     return runReviewGate(rest);
