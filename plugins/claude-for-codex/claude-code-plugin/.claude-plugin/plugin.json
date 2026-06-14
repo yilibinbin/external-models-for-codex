@@ -1,0 +1,12 @@
+{
+  "name": "claude-for-codex-native-review",
+  "version": "0.19.0",
+  "description": "Opt-in Claude Code native review agents exported by Claude for Codex.",
+  "author": {
+    "name": "fanghao",
+    "url": "https://github.com/yilibinbin"
+  },
+  "homepage": "https://github.com/yilibinbin/external-models-for-codex",
+  "repository": "https://github.com/yilibinbin/external-models-for-codex",
+  "license": "MIT"
+}

@@ -487,7 +487,17 @@ export function finishJob(cwd, jobId, result, env = process.env) {
       return null;
     }
     const succeeded = result.status === 0;
+    const capacityBlocked = result.status === 75
+      || result.capacityStatus === "capacity_blocked"
+      || result.metadata?.capacity?.status === "capacity_blocked";
     const cancelledByRequest = hasEffectiveCancelRequest(current);
+    const terminalStatus = cancelledByRequest
+      ? "cancelled"
+      : capacityBlocked
+      ? "capacity_blocked"
+      : succeeded
+      ? "succeeded"
+      : "failed";
     const stdout = storedOutput(result.stdout ?? "", cwd, {
       bytes: result.stdoutBytes,
       truncated: result.stdoutTruncated
@@ -498,9 +508,9 @@ export function finishJob(cwd, jobId, result, env = process.env) {
     });
     return {
       ...current,
-      status: cancelledByRequest ? "cancelled" : succeeded ? "succeeded" : "failed",
-      phase: cancelledByRequest ? "cancelled" : succeeded ? "succeeded" : "failed",
-      submissionState: cancelledByRequest ? "cancelled" : succeeded ? "completed" : "failed",
+      status: terminalStatus,
+      phase: terminalStatus,
+      submissionState: cancelledByRequest ? "cancelled" : succeeded ? "completed" : terminalStatus,
       exitStatus: result.status,
       stdout: stdout.text,
       stderr: stderr.text,

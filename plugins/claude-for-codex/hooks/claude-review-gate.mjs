@@ -5,6 +5,7 @@ import path from "node:path";
 import process from "node:process";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { CAPACITY_BLOCKED_STATUS } from "../scripts/lib/resource-governor.mjs";
 
 if (String(process.env.CLAUDE_FOR_CODEX_REVIEW_GATE ?? "").toLowerCase() === "off") {
   process.exit(0);
@@ -31,6 +32,9 @@ if (result.stderr) {
 }
 if (result.error) {
   process.stderr.write(`[claude-for-codex review-gate] wrapper failed; allowing stop: ${result.error.message}\n`);
+}
+if (result.status === 75 || String(result.stderr || result.stdout || "").includes(CAPACITY_BLOCKED_STATUS)) {
+  process.stderr.write(`[claude-for-codex review-gate] ${CAPACITY_BLOCKED_STATUS}; allowing stop\n`);
 }
 
 process.exitCode = 0;

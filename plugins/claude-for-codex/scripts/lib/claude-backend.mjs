@@ -24,6 +24,10 @@ export const WRITE_DANGER_CANDIDATES = WRITE_DENY_TOOLS;
 export const DENY_TOOLS_ENV = "CLAUDE_FOR_CODEX_DENY_TOOLS";
 export const SDK_NATIVE_PARENT_TOOL = "Agent";
 
+const DEFAULT_SDK_ORCHESTRATOR_MAX_TURNS = 8;
+const STRONG_SDK_ORCHESTRATOR_MAX_TURNS = 12;
+const MAX_SDK_ORCHESTRATOR_MAX_TURNS = 16;
+const ABSOLUTE_SDK_ORCHESTRATOR_MAX_TURNS = 32;
 const SDK_PACKAGES = Object.freeze([
   "@anthropic-ai/claude-agent-sdk",
   "@anthropic-ai/claude-code"
@@ -406,7 +410,7 @@ function metadataFromEvents(events) {
   };
   for (const event of events) {
     if (event && typeof event === "object") {
-      if (typeof event.subtype === "string") {
+      if (event.type === "result" && typeof event.subtype === "string") {
         metadata.sdkResultSubtype = event.subtype;
       }
       if (typeof event.session_id === "string") {
@@ -447,6 +451,21 @@ function textFromEvent(event) {
       .join("");
   }
   return "";
+}
+
+function redactLiteral(text, value) {
+  if (!value) {
+    return text;
+  }
+  return text.split(String(value)).join("[redacted-sdk-session]");
+}
+
+function redactSdkSessionText(text, event) {
+  let redacted = String(text ?? "");
+  if (event && typeof event === "object" && typeof event.session_id === "string") {
+    redacted = redactLiteral(redacted, event.session_id);
+  }
+  return redacted.replace(/\bsession_id=[^\s,;)\]}]+/g, "session_id=[redacted-sdk-session]");
 }
 
 function sanitizedSdkProgressLine(event) {
@@ -492,7 +511,7 @@ async function collectSdkOutput(queryResult, options = {}) {
     for await (const event of queryResult) {
       events.push(event);
       maybeWriteSdkProgress(event, options);
-      const text = shouldCollectSdkText(event, options) ? textFromEvent(event) : "";
+      const text = shouldCollectSdkText(event, options) ? redactSdkSessionText(textFromEvent(event), event) : "";
       if (text) {
         chunks.push(text);
       }
@@ -500,7 +519,7 @@ async function collectSdkOutput(queryResult, options = {}) {
   } else {
     events.push(queryResult);
     maybeWriteSdkProgress(queryResult, options);
-    const text = shouldCollectSdkText(queryResult, options) ? textFromEvent(queryResult) : "";
+    const text = shouldCollectSdkText(queryResult, options) ? redactSdkSessionText(textFromEvent(queryResult), queryResult) : "";
     if (text) {
       chunks.push(text);
     }
@@ -604,7 +623,7 @@ function applySdkReviewOptions(sdkOptions, args = {}, options = {}) {
       sdkOptions.allowedTools = [...sdkOptions.allowedTools, SDK_NATIVE_PARENT_TOOL];
     }
   }
-  if (args.nativeStructured && options.outputSchema) {
+  if ((args.nativeStructured || options.nativeStructured) && options.outputSchema) {
     sdkOptions.outputFormat = {
       type: "json_schema",
       schema: options.outputSchema
@@ -622,6 +641,31 @@ function applySdkReviewOptions(sdkOptions, args = {}, options = {}) {
   return sdkOptions;
 }
 
+function boundedPositiveInteger(value, fallback) {
+  const numeric = Number(value);
+  if (!Number.isInteger(numeric) || numeric <= 0) {
+    return fallback;
+  }
+  return Math.min(numeric, ABSOLUTE_SDK_ORCHESTRATOR_MAX_TURNS);
+}
+
+function sdkOrchestratorMaxTurns(args = {}, options = {}) {
+  if (!args.nativeAgents || typeof args.nativeAgents !== "object" || Array.isArray(args.nativeAgents)) {
+    return undefined;
+  }
+  if (options.maxTurns !== undefined || args.maxTurns !== undefined) {
+    return boundedPositiveInteger(options.maxTurns ?? args.maxTurns, DEFAULT_SDK_ORCHESTRATOR_MAX_TURNS);
+  }
+  const roleCount = Object.keys(args.nativeAgents).length;
+  const resolvedQuality = String(args.qualityPolicy?.resolvedQuality || args.quality || "").trim().toLowerCase();
+  const base = resolvedQuality === "max"
+    ? MAX_SDK_ORCHESTRATOR_MAX_TURNS
+    : resolvedQuality === "strong"
+    ? STRONG_SDK_ORCHESTRATOR_MAX_TURNS
+    : DEFAULT_SDK_ORCHESTRATOR_MAX_TURNS;
+  return Math.min(ABSOLUTE_SDK_ORCHESTRATOR_MAX_TURNS, Math.max(base, roleCount + 6));
+}
+
 async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disallowedTools, onMcpConfig, onMcpConfigCleanup }) {
   let mcpConfig = null;
   try {
@@ -635,11 +679,13 @@ async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disa
       throw new Error("Claude SDK read-only tool restrictions are unavailable.");
     }
     applySdkReviewOptions(sdkOptions, args, options);
+    const maxTurns = sdkOrchestratorMaxTurns(args, options);
     const queryResult = query({
       prompt,
       cwd: options.cwd ?? process.cwd(),
       model: args.model || undefined,
       effort: args.effort || undefined,
+      maxTurns,
       signal: abortSignal,
       options: sdkOptions,
       permissionMode: sdkOptions.permissionMode,
@@ -681,6 +727,12 @@ async function runSdkQueryOnce({ query, prompt, args, options, abortSignal, disa
 }
 
 export async function runSdkPrompt(prompt, args = {}, options = {}) {
+  if (options.capacityChecked !== undefined || args.capacityChecked !== undefined) {
+    throw new Error("Internal error: Claude SDK backend requires canonical capacityLease; capacityChecked is not supported.");
+  }
+  if (!options.capacityLease) {
+    throw new Error("Internal error: Claude SDK backend requires capacityLease before loading the SDK module.");
+  }
   const resolved = resolveSdkModule(process.env, options.cwd ?? process.cwd());
   if (!resolved) {
     return {
@@ -695,6 +747,15 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
   }
 
   const abortController = new AbortController();
+  const unsubscribeLeaseLost = typeof options.capacityLease?.onLost === "function"
+    ? options.capacityLease.onLost(() => {
+        try {
+          abortController.abort();
+        } catch {
+          // AbortController may already be settled.
+        }
+      })
+    : null;
   const previousSigint = process.listeners("SIGINT");
   const previousSigterm = process.listeners("SIGTERM");
   const signalHandler = () => abortController.abort();
@@ -770,6 +831,9 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
     }
     return sdkErrorResult(error, abortController);
   } finally {
+    if (typeof unsubscribeLeaseLost === "function") {
+      unsubscribeLeaseLost();
+    }
     process.removeListener("SIGINT", signalHandler);
     process.removeListener("SIGTERM", signalHandler);
     for (const listener of previousSigint) process.on("SIGINT", listener);
@@ -778,6 +842,12 @@ export async function runSdkPrompt(prompt, args = {}, options = {}) {
 }
 
 export async function runSdkNativeReview(prompt, args = {}, options = {}) {
+  if (options.capacityChecked !== undefined || args.capacityChecked !== undefined) {
+    throw new Error("Internal error: Claude SDK backend requires canonical capacityLease; capacityChecked is not supported.");
+  }
+  if (!options.capacityLease) {
+    throw new Error("Internal error: Claude SDK backend requires capacityLease before loading the SDK module.");
+  }
   const resolved = resolveSdkModule(process.env, options.cwd ?? process.cwd());
   if (!resolved) {
     return {

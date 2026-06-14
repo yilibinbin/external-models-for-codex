@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 
-export const TERMINAL_JOB_STATUSES = Object.freeze(["succeeded", "failed", "cancelled", "cancel_failed"]);
+export const TERMINAL_JOB_STATUSES = Object.freeze(["succeeded", "failed", "cancelled", "cancel_failed", "capacity_blocked"]);
 export const TERMINAL_JOB_STATUS_SET = new Set(TERMINAL_JOB_STATUSES);
 export const JOB_HEARTBEAT_INTERVAL_MS = 15_000;
 export const JOB_SUSPECT_AFTER_MS = 3 * 60 * 1000;

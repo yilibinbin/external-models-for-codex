@@ -379,7 +379,10 @@ def test_sdk_retry_omits_unknown_deny_candidate_and_keeps_allowlist_invariant(tm
 
     source = f"""
       import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
-      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))} }});
+      const result = await runSdkPrompt("prompt", {{}}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        capacityLease: {{ leaseId: "test" }}
+      }});
       console.log(JSON.stringify(result));
     """
     output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
@@ -420,7 +423,10 @@ def test_sdk_retry_parses_prefixed_multiline_unknown_deny_error(tmp_path):
 
     source = f"""
       import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
-      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))} }});
+      const result = await runSdkPrompt("prompt", {{}}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        capacityLease: {{ leaseId: "test" }}
+      }});
       console.log(JSON.stringify(result));
     """
     output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
@@ -465,7 +471,11 @@ def test_sdk_prompt_timeout_aborts_query_and_reports_timeout(tmp_path):
     source = f"""
       import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
       const started = Date.now();
-      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 25 }});
+      const result = await runSdkPrompt("prompt", {{}}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        timeout: 25,
+        capacityLease: {{ leaseId: "test" }}
+      }});
       result.elapsedMs = Date.now() - started;
       console.log(JSON.stringify(result));
     """
@@ -494,7 +504,11 @@ def test_sdk_provider_timeout_text_is_not_reclassified_as_deadline_timeout(tmp_p
 
     source = f"""
       import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
-      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 1000 }});
+      const result = await runSdkPrompt("prompt", {{}}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        timeout: 1000,
+        capacityLease: {{ leaseId: "test" }}
+      }});
       console.log(JSON.stringify(result));
     """
     output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
@@ -535,7 +549,11 @@ def test_sdk_write_prompt_timeout_aborts_query_and_reports_timeout(tmp_path):
 
     source = f"""
       import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
-      const result = await runSdkPrompt("prompt", {{ write: true }}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 25 }});
+      const result = await runSdkPrompt("prompt", {{ write: true }}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        timeout: 25,
+        capacityLease: {{ leaseId: "test" }}
+      }});
       console.log(JSON.stringify(result));
     """
     output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))
@@ -592,7 +610,11 @@ def test_sdk_timeout_budget_is_shared_across_deny_tool_retries(tmp_path):
     source = f"""
       import {{ runSdkPrompt }} from {json.dumps(BACKEND.as_uri())};
       const started = Date.now();
-      const result = await runSdkPrompt("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, timeout: 250 }});
+      const result = await runSdkPrompt("prompt", {{}}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        timeout: 250,
+        capacityLease: {{ leaseId: "test" }}
+      }});
       result.elapsedMs = Date.now() - started;
       console.log(JSON.stringify(result));
     """
@@ -639,7 +661,11 @@ def test_sdk_native_retry_updates_agent_disallowed_tools(tmp_path):
       import {{ runSdkNativeReview }} from {json.dumps(BACKEND.as_uri())};
       import {{ buildNativeReviewAgents }} from {json.dumps(NATIVE_REVIEW.as_uri())};
       const agents = buildNativeReviewAgents([{{ name: "security", description: "security", prompt: "review security" }}]);
-      const result = await runSdkNativeReview("prompt", {{}}, {{ cwd: {json.dumps(str(tmp_path))}, agents }});
+      const result = await runSdkNativeReview("prompt", {{}}, {{
+        cwd: {json.dumps(str(tmp_path))},
+        agents,
+        capacityLease: {{ leaseId: "test" }}
+      }});
       console.log(JSON.stringify(result));
     """
     output = json.loads(node_eval(source, env={"CLAUDE_FOR_CODEX_SDK_MODULE": str(fake_sdk)}))

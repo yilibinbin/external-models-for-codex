@@ -1,13 +1,21 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { renderWorkflow, validateWorkflow } from "./github-actions.mjs";
 import { installedEntry as installedClaudePluginEntry } from "./install-consistency.mjs";
+import {
+  nativeAgentProfiles,
+  renderNativeAgentMarkdown,
+  sdkAgentsFromNativeProfiles,
+  validateNativeAgentMarkdown
+} from "./native-agent-profiles.mjs";
+import { validateClaudeCodePluginPack } from "./claude-plugin-pack.mjs";
 import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.18.2";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.19.0";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
   "claude-cancel",
@@ -17,6 +25,7 @@ const EXPECTED_SKILLS = [
   "claude-mailbox",
   "claude-multi-review",
   "claude-plan",
+  "claude-plan-review",
   "claude-rescue",
   "claude-result",
   "claude-review",
@@ -170,14 +179,153 @@ function checkManifest(root) {
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.18.2", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.18.2"), "changelog-version", "CHANGELOG contains 0.18.2"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.18.2`"), "readme-current-version", "README current version is 0.18.2"),
+    result(manifest.version === "0.19.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.19.0"), "changelog-version", "CHANGELOG contains 0.19.0"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.19.0`"), "readme-current-version", "README current version is 0.19.0"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
   ];
   return checks;
+}
+
+function checkVersionSurfacesCurrent(root) {
+  const { pluginRoot, repoRoot, installedPluginOnly = false } = resolveLayout(root);
+  let codexManifest;
+  let claudeManifest;
+  try {
+    codexManifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+    claudeManifest = readJson(path.join(pluginRoot, "claude-code-plugin", ".claude-plugin", "plugin.json"));
+  } catch (error) {
+    return [result(false, "version-surfaces-current", `manifest read failed: ${error.message || String(error)}`)];
+  }
+  const version = codexManifest.version;
+  const expectedVersion = "0.19.0";
+  const releaseRef = `claude-for-codex-v${version}`;
+  const pluginReadme = fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8");
+  const releaseRefFiles = [
+    path.join(pluginRoot, "scripts", "lib", "release-check.mjs"),
+    path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"),
+    path.join(pluginRoot, "README.md")
+  ];
+  if (!installedPluginOnly && repoRoot) {
+    releaseRefFiles.push(
+      path.join(repoRoot, "README.md"),
+      path.join(repoRoot, "docs", "README.en.md"),
+      path.join(repoRoot, "docs", "README.zh-CN.md")
+    );
+  }
+  const missingReleaseRefFiles = releaseRefFiles.filter((file) => !fs.existsSync(file));
+  const releaseRefTexts = releaseRefFiles
+    .filter((file) => fs.existsSync(file))
+    .map((file) => fs.readFileSync(file, "utf8"));
+  const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
+  const changelogHeading = new RegExp(`## ${version} - \\d{4}-\\d{2}-\\d{2}`);
+  const ok = version === expectedVersion
+    && claudeManifest.version === version
+    && missingReleaseRefFiles.length === 0
+    && releaseRefTexts.every((text) => text.includes(releaseRef))
+    && pluginReadme.includes(`Current version: \`${version}\``)
+    && changelogHeading.test(changelog);
+  const layout = installedPluginOnly ? "plugin-only" : "repo";
+  const mismatchDetail = claudeManifest.version === version ? "" : `; claudePluginVersion=${claudeManifest.version}`;
+  const detail = missingReleaseRefFiles.length
+    ? `releaseRef=${releaseRef}; layout=${layout}${mismatchDetail}; missing=${missingReleaseRefFiles.map((file) => path.relative(pluginRoot, file)).join(",")}`
+    : `releaseRef=${releaseRef}; layout=${layout}${mismatchDetail}`;
+  return [result(ok, "version-surfaces-current", detail)];
+}
+
+function filesForStaleReleaseScan(root) {
+  const { pluginRoot, repoRoot, installedPluginOnly = false } = resolveLayout(root);
+  const ignore = (file) => /(^|\/)(CHANGELOG\.md|tests\/|docs\/superpowers\/)/.test(file.split(path.sep).join("/"));
+  if (!installedPluginOnly && repoRoot) {
+    const listed = spawnSync("git", ["ls-files"], { cwd: repoRoot, encoding: "utf8", maxBuffer: 1024 * 1024 });
+    if (listed.status === 0) {
+      return listed.stdout
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((file) => path.join(repoRoot, file))
+        .filter((file) => fs.existsSync(file) && fs.statSync(file).isFile() && !ignore(path.relative(repoRoot, file)));
+    }
+  }
+  return listFiles(pluginRoot, ["."])
+    .filter((file) => fs.existsSync(file) && fs.statSync(file).isFile() && !ignore(path.relative(pluginRoot, file)));
+}
+
+function checkNoStaleReleaseRef(root) {
+  const { pluginRoot } = resolveLayout(root);
+  const currentVersion = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json")).version;
+  const currentParts = String(currentVersion).split(".").map((part) => Number.parseInt(part, 10));
+  const releasePatterns = [
+    /claude-for-codex-v(\d+\.\d+\.\d+)/g,
+    /Claude for Codex (\d+\.\d+\.\d+)/g,
+    /Current version:\s*`?(\d+\.\d+\.\d+)/g
+  ];
+  const compareVersionParts = (left, right) => {
+    for (let index = 0; index < 3; index += 1) {
+      const difference = left[index] - right[index];
+      if (difference !== 0) return difference;
+    }
+    return 0;
+  };
+  const isNonCurrentReleaseVersion = (version) => {
+    const parts = String(version).split(".").map((part) => Number.parseInt(part, 10));
+    if (parts.length !== 3 || !parts.every(Number.isInteger) || currentParts.length !== 3 || !currentParts.every(Number.isInteger)) {
+      return false;
+    }
+    return compareVersionParts(parts, currentParts) !== 0;
+  };
+  const matches = [];
+  for (const file of filesForStaleReleaseScan(root)) {
+    const text = fs.readFileSync(file, "utf8");
+    for (const pattern of releasePatterns) {
+      pattern.lastIndex = 0;
+      for (const match of text.matchAll(pattern)) {
+        if (isNonCurrentReleaseVersion(match[1])) {
+          matches.push(`${path.relative(pluginRoot, file)}:${match[0]}`);
+        }
+      }
+    }
+  }
+  return [result(matches.length === 0, "no-stale-release-ref", matches.length ? `stale refs in ${matches.join(",")}` : "no stale release refs outside changelog/history fixtures")];
+}
+
+function checkManifestMetadataCurrent(root) {
+  const { pluginRoot } = resolveLayout(root);
+  const manifest = readJson(path.join(pluginRoot, ".codex-plugin", "plugin.json"));
+  const iface = manifest.interface ?? {};
+  const capabilities = Array.isArray(iface.capabilities) ? iface.capabilities : [];
+  const prompts = Array.isArray(iface.defaultPrompt) ? iface.defaultPrompt : [];
+  const requiredCapabilities = [
+    "Saved implementation plan review",
+    "Opt-in Claude Code native reviewer plugin pack",
+    "Renderer-validated Claude Code Markdown agents"
+  ];
+  const ok = String(manifest.description ?? "").includes("saved-plan review")
+    && String(manifest.description ?? "").includes("opt-in Claude Code native review agents")
+    && String(iface.longDescription ?? "").includes("first-class plan-review command")
+    && String(iface.longDescription ?? "").includes("opt-in Claude Code plugin pack")
+    && requiredCapabilities.every((capability) => capabilities.includes(capability))
+    && prompts.some((prompt) => String(prompt).includes("saved implementation plan"));
+  return [result(ok, "manifest-metadata-current", ok ? "marketplace metadata mentions plan-review and native plugin pack" : "manifest metadata missing plan-review/native plugin pack copy")];
+}
+
+function checkClaudeNativeUniversality(root) {
+  const { pluginRoot } = resolveLayout(root);
+  const profiles = nativeAgentProfiles();
+  const agents = sdkAgentsFromNativeProfiles(profiles, { model: "opus", effort: "high" });
+  const markdownValid = profiles.every((profile) =>
+    validateNativeAgentMarkdown(renderNativeAgentMarkdown(profile), `${profile.markdownAgentName.replaceAll("_", "-")}.md`).ok
+  );
+  const pack = validateClaudeCodePluginPack(pluginRoot);
+  const companion = fs.readFileSync(path.join(pluginRoot, "scripts", "claude-companion.mjs"), "utf8");
+  return [
+    result(profiles.length === 5 && Object.keys(agents).length === 5 && markdownValid, "native-agent-profiles", `profiles=${profiles.length}`),
+    result(pack.ok, "claude-code-plugin-pack", pack.ok ? "agent files match renderNativeAgentMarkdown output" : pack.errors.join("; ")),
+    result(!fs.existsSync(path.join(pluginRoot, ".claude-plugin", "plugin.json")), "no-root-claude-plugin-manifest"),
+    result(companion.includes('"plan-review"'), "plan-review-command", companion.includes('"plan-review"') ? "registered" : "missing"),
+    ...checkManifestMetadataCurrent(root)
+  ];
 }
 
 function semanticFixtureSafe(parsed) {
@@ -250,7 +398,11 @@ function checkNativeReleaseAssets(root) {
   const modelRegistry = fs.existsSync(modelRegistryPath) ? fs.readFileSync(modelRegistryPath, "utf8") : "";
   const githubActions = fs.readFileSync(path.join(pluginRoot, "scripts", "lib", "github-actions.mjs"), "utf8");
   const nativeHelper = path.join(pluginRoot, "scripts", "lib", "claude-native-review.mjs");
-  const nativeReview = fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "";
+  const nativeProfiles = path.join(pluginRoot, "scripts", "lib", "native-agent-profiles.mjs");
+  const nativeReview = [
+    fs.existsSync(nativeHelper) ? fs.readFileSync(nativeHelper, "utf8") : "",
+    fs.existsSync(nativeProfiles) ? fs.readFileSync(nativeProfiles, "utf8") : ""
+  ].join("\n");
   const hookCompat = path.join(pluginRoot, "scripts", "lib", "hook-compat.mjs");
   const doctor = path.join(pluginRoot, "scripts", "lib", "doctor.mjs");
   const ultrareviewSkill = path.join(pluginRoot, "skills", "claude-ultrareview", "SKILL.md");
@@ -311,7 +463,7 @@ function checkNativeReleaseAssets(root) {
     result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "project-instructions.mjs")), "project-instructions-module"),
     result(qualityPolicy.includes("explanation:"), "quality-policy-explanation"),
     result(
-      ["review.md", "multi-review-role.md", "adversarial-review.md", "plan.md", "rescue.md"].every((prompt) =>
+      ["review.md", "multi-review-role.md", "adversarial-review.md", "plan.md", "plan-review-role.md", "rescue.md"].every((prompt) =>
         fs.readFileSync(path.join(pluginRoot, "prompts", prompt), "utf8").includes("PROJECT_INSTRUCTIONS_BLOCK")
       ),
       "project-instructions-prompts"
@@ -328,7 +480,7 @@ function checkNativeReleaseAssets(root) {
     ),
     result(backend.includes("@anthropic-ai/claude-agent-sdk"), "native-sdk-package-compat", "@anthropic-ai/claude-agent-sdk"),
     result(docsOk, "native-docs", detail),
-    result(v018DocsOk, "native-maturity-docs", "0.18 docs include model alias registry, outcome classification, doctor, SDK isolation, and CI dogfood"),
+    result(v018DocsOk, "native-maturity-docs", "docs include model alias registry, outcome classification, doctor, SDK isolation, and CI dogfood"),
     result(
       outcomeClassifier.includes("unknownOnly") &&
         outcomeClassifier.includes("const failureText = status === 0") &&
@@ -640,6 +792,61 @@ function longRunningLifecycleChecks(pluginRoot) {
   ];
 }
 
+function resourceGovernorChecks(pluginRoot) {
+  const governorPath = path.join(pluginRoot, "scripts", "lib", "resource-governor.mjs");
+  const companionPath = path.join(pluginRoot, "scripts", "claude-companion.mjs");
+  const backendPath = path.join(pluginRoot, "scripts", "lib", "claude-backend.mjs");
+  const hookPath = path.join(pluginRoot, "hooks", "claude-review-gate.mjs");
+  const governor = fs.existsSync(governorPath) ? fs.readFileSync(governorPath, "utf8") : "";
+  const companion = fs.existsSync(companionPath) ? fs.readFileSync(companionPath, "utf8") : "";
+  const backend = fs.existsSync(backendPath) ? fs.readFileSync(backendPath, "utf8") : "";
+  const hook = fs.existsSync(hookPath) ? fs.readFileSync(hookPath, "utf8") : "";
+  const requiredExports = [
+    "CAPACITY_BLOCKED_STATUS",
+    "CAPACITY_BLOCKED_EXIT_CODE",
+    "defaultResourceLockRoot",
+    "acquireClaudeCapacity",
+    "withClaudeCapacity",
+    "availableClaudeCapacity",
+    "capacityBlockedResult",
+    "inspectResourceGovernor",
+    "refreshLeaseForTest",
+    "setResourceGovernorTestHooksForTest"
+  ];
+  const directBypasses = [];
+  const directClaudePattern = /(?:^|[^\w.])(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*["']claude["']|\.((?:spawn|spawnSync|execFile|execFileSync))\s*\(\s*["']claude["']|(?:spawn|spawnSync|execFile|execFileSync)\s*\(\s*["']sh["'][\s\S]{0,220}\bclaude\b|\.((?:spawn|spawnSync|execFile|execFileSync))\s*\(\s*["']sh["'][\s\S]{0,220}\bclaude\b/;
+  for (const file of listFiles(pluginRoot, ["scripts", "hooks"])) {
+    if (!file.endsWith(".mjs")) {
+      continue;
+    }
+    const relative = path.relative(pluginRoot, file);
+    if (relative === path.join("scripts", "lib", "release-check.mjs")) {
+      continue;
+    }
+    const text = fs.readFileSync(file, "utf8");
+    if (directClaudePattern.test(text)) {
+      directBypasses.push(relative);
+    }
+  }
+  const ok = fs.existsSync(governorPath)
+    && requiredExports.every((name) => governor.includes(`export function ${name}`) || governor.includes(`export async function ${name}`) || governor.includes(`export const ${name}`))
+    && companion.includes('RESOURCE_GOVERNOR_COMPANION_WIRING = "resource-governor:companion-v1"')
+    && companion.includes("acquireClaudeCapacity({")
+    && companion.includes("capacityBlockedClaudeResult")
+    && companion.includes("writeCapacityBlockedAndExit")
+    && companion.includes("runParallelRoleReviews(args.reviewRoles")
+    && companion.includes("function sdkSubagentCapacitySlots(args, env = process.env)")
+    && companion.includes("slots: sdkSubagentCapacitySlots(args, process.env)")
+    && backend.includes("requires capacityLease before loading the SDK module")
+    && !/capacityLease\s*\|\|\s*capacityChecked/.test(backend)
+    && hook.includes("CAPACITY_BLOCKED_STATUS")
+    && hook.includes("allowing stop")
+    && directBypasses.length === 0;
+  return [
+    result(ok, "resource-governor", directBypasses.length ? `direct Claude spawn bypass: ${directBypasses.join(", ")}` : "global Claude work-slot governor is wired")
+  ];
+}
+
 function checkSecrets(root) {
   const { repoRoot, pluginRoot, installedPluginOnly } = resolveLayout(root);
   const scanRoot = installedPluginOnly ? pluginRoot : repoRoot;
@@ -816,8 +1023,17 @@ function checkGithubActionsCi(root) {
           ciText.includes("pytest -q tests/test_claude_permission_compat.py") &&
           ciText.includes('pytest -q tests/test_claude_for_codex_plugin.py -k "') &&
           ciText.includes("release_check") &&
+          ciText.includes("plan_review") &&
+          ciText.includes("multi_review") &&
+          ciText.includes("native_plugin") &&
+          ciText.includes("claude_code_plugin_pack") &&
+          ciText.includes("native_agent_profiles") &&
+          ciText.includes("review_uses_stdin_prompt_transport") &&
+          ciText.includes("resource_governor") &&
+          ciText.includes("capacity_blocked") &&
           ciText.includes("outcome_classifier") &&
           ciText.includes("doctor_json") &&
+          ciText.includes("doctor_reports") &&
           ciText.includes("hook_compat") &&
           !ciText.includes("pytest -q tests/test_claude_for_codex_plugin.py tests/test_claude_permission_compat.py")
         ),
@@ -866,7 +1082,7 @@ function remoteInstallSmoke(root, options) {
     return [result(!options.requireRemoteInstall, "remote-install-smoke", "codex unavailable")];
   }
   const timeout = options.timeoutMs ?? 30000;
-  const tmp = fs.mkdtempSync(path.join(fs.realpathSync("/tmp"), "cfc-release-check-"));
+  const tmp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "cfc-release-check-"));
   const env = {
     ...process.env,
     HOME: tmp,
@@ -911,11 +1127,15 @@ function remoteInstallSmoke(root, options) {
 export function runReleaseCheck(root, options = {}) {
   const checks = [
     ...checkManifest(root),
+    ...checkVersionSurfacesCurrent(root),
+    ...checkNoStaleReleaseRef(root),
     ...checkHooks(root),
     ...checkDocs(root),
+    ...checkClaudeNativeUniversality(root),
     ...checkNativeReleaseAssets(root),
     ...checkReadOnlyIsolation(root),
     ...longRunningLifecycleChecks(resolveLayout(root).pluginRoot),
+    ...resourceGovernorChecks(resolveLayout(root).pluginRoot),
     ...checkSecrets(root),
     ...checkSkills(root),
     ...checkSubagentReviewDocs(root),
