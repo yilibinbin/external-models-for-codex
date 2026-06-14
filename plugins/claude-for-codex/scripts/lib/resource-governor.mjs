@@ -352,8 +352,11 @@ function sameClaim(slot, identity) {
   return readJsonFile(claimPath(slot))?.identity === identity;
 }
 
-function removeSlotIfDirectoryIdentity(slot, expectedDirectoryIdentity) {
+function removeSlotIfClaimIdentity(slot, expectedDirectoryIdentity, expectedClaimIdentity = "") {
   if (!expectedDirectoryIdentity || slotDirectoryIdentity(slot) !== expectedDirectoryIdentity) {
+    return false;
+  }
+  if (expectedClaimIdentity && !sameClaim(slot, expectedClaimIdentity)) {
     return false;
   }
   fs.rmSync(slot, { recursive: true, force: true });
@@ -653,7 +656,7 @@ function tryClaimSlot(store, slotIndex, options) {
       try {
         writeLease(slot, lease, { expectedDirectoryIdentity: claimedDirectoryIdentity, expectedClaimIdentity: claimIdentity, exclusive: true });
       } catch (error) {
-        removeSlotIfDirectoryIdentity(slot, claimedDirectoryIdentity);
+        removeSlotIfClaimIdentity(slot, claimedDirectoryIdentity, claimIdentity);
         throw error;
       }
       return createSlotToken({ store, slotIndex, lease, ttlMs: options.ttlMs, directoryIdentity: claimedDirectoryIdentity, claimIdentity });
