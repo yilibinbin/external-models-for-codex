@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.19.0 - 2026-06-13
+
+### Added
+
+- Add an opt-in Claude Code native review plugin pack with read-only reviewer agents.
+- Add shared native agent profiles used by both SDK subagents and exported Markdown agents.
+- Add `plan-review` for saved implementation plan files, including explicit SDK native subagent mode.
+- Add a global resource governor that bounds concurrent Claude launches across foreground reviews, background jobs, multi-role fan-out, SDK subagents, Stop hooks, and Codex subagents.
+
+### Fixed
+
+- Keep Claude Code plugin compatibility isolated from the Codex plugin root so Codex skills and hooks are not loaded by Claude Code accidentally.
+- Return `capacity_blocked` or downgrade to sequential instead of launching unbounded Claude processes when global capacity is exhausted.
+
 ## 0.18.2 - 2026-06-12
 
 ### Added

@@ -1,8 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { backendCapabilities } from "./claude-backend.mjs";
+import { validateClaudeCodePluginPack } from "./claude-plugin-pack.mjs";
 import { hookCompatibilityReport } from "./hook-compat.mjs";
 import { installConsistencyReport } from "./install-consistency.mjs";
+import { inspectResourceGovernor } from "./resource-governor.mjs";
 import { semanticCapabilities } from "./semantic-context.mjs";
 
 function hookFiles(pluginRoot = "") {
@@ -16,6 +18,8 @@ function doctorOk(report) {
   return Boolean(
     report.checks.hookFiles.hooksJson &&
     report.checks.hookFiles.stopGate &&
+    report.checks.nativePluginPack?.ok !== false &&
+    report.checks.resourceGovernor?.ok !== false &&
     report.checks.hooks.unsupportedInstalledEvents.length === 0
   );
 }
@@ -39,6 +43,8 @@ export function doctorReport({
       listSupported: Boolean(claude.fallbackModelList)
     },
     backend: capabilities.backend ?? backendCapabilities(env, cwd),
+    nativePluginPack: validateClaudeCodePluginPack(pluginRoot),
+    resourceGovernor: inspectResourceGovernor({ env }),
     hooks: hookCompatibilityReport({ installedEvents: hookEvents.length ? hookEvents : undefined }),
     hookFiles: hookFiles(pluginRoot),
     reviewGate: state.reviewGate ?? {},
@@ -71,6 +77,8 @@ export function renderDoctorText(report) {
     `claude: ${report.checks.claude.available ? "available" : "missing"}`,
     `model aliases: ${aliases || "unknown"}`,
     `sdk: ${report.checks.backend?.claudeSdk?.available ? "available" : "missing"}`,
+    `native plugin pack: ${report.checks.nativePluginPack?.ok === false ? "attention" : "ok"} (${report.checks.nativePluginPack?.agentCount ?? 0} agents)`,
+    `resource governor: ${report.checks.resourceGovernor?.ok === false ? "attention" : "ok"} (${report.checks.resourceGovernor?.lockRootClass ?? "unknown"}, max ${report.checks.resourceGovernor?.effectiveMax ?? "unknown"}, active ${(report.checks.resourceGovernor?.activeLeases ?? []).length})`,
     `hooks: ${(report.checks.hooks.installedEvents ?? []).join(", ")}`,
     `review gate: ${report.checks.reviewGate.enabled ? "enabled" : "disabled"}`,
     `install: ${report.checks.installConsistency?.ok === false ? "attention" : report.checks.installConsistency?.status || "unknown"}`

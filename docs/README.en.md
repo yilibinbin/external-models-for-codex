@@ -4,7 +4,7 @@ External Models for Codex is a Codex plugin marketplace for external model CLI w
 
 Included plugins:
 
-- Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates. It also includes a dynamic model alias registry, request-local outcome classification, cheap `doctor --json` diagnostics, and fork-safe CI dogfood.
+- Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates. It also includes a dynamic model alias registry, request-local outcome classification, a global Claude work-slot governor, cheap `doctor --json` diagnostics, and fork-safe CI dogfood.
 - Gemini for Codex lets Codex call the legacy Gemini CLI (`gemini`) for Gemini-only read-only review, planning, rescue diagnosis, structured review output, and Gemini CLI-native session capability checks.
 - Antigravity for Codex lets Codex call Google Antigravity CLI (`agy`) for mature plugin-managed review workflows: read-only review, adversarial critique, planning, rescue diagnosis, multi-role review, structured reports, role packs, background jobs, mailbox/leases, lifecycle hooks, GitHub Actions workflow rendering, release checks, opt-in real smoke, and an opt-in Stop hook gate with explicit Gemini or Claude model-provider selection.
 
@@ -15,7 +15,7 @@ Natural-language Claude routing rule: users should ask for Claude normally, for 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.3
@@ -97,6 +97,7 @@ Legacy Gemini CLI resolution order:
 - `claude-review`: read-only Claude review of local git changes or branch diffs.
 - `claude-adversarial-review`: challenge assumptions, tradeoffs, rollback paths, and hidden failure modes.
 - `claude-plan`: request an independent implementation plan before Codex edits.
+- `claude-plan-review`: asks Claude to review a saved implementation plan file. Native SDK subagents are explicit via `--backend sdk --agent-team sdk-subagents`; ultrareview remains explicit-cost only.
 - `claude-multi-review`: run parallel role reviews for correctness, security, tests, release, and adversarial perspectives.
 - `claude-multi-review --backend sdk --agent-team sdk-subagents`: run a Claude native SDK subagent review team.
 - `claude-ultrareview`: run Claude cloud ultrareview only after explicit `--confirm-cost` consent for possible usage-credit billing.
@@ -173,6 +174,20 @@ SDK native subagent structured reviews use nested per-role review objects and re
 Claude for Codex supports `--quality auto|fast|standard|strong|max`. `auto` is the default and scores command type, JSON output, role count, risky roles, backend, SDK subagent teams, semantic context, and diff size. `fast` maps to `sonnet` plus low effort, `standard` maps to `sonnet` plus high effort, `strong` maps to `opus` plus xhigh effort, and `max` maps to the strongest advertised local Claude alias with max effort, preferring `best`, then `fable`, then `opus`. Explicit `--model` and `--effort` always win. The policy uses Claude Code aliases instead of concrete model ids such as `claude-opus-4-8`; `ultracode` is not passed as `--effort`, and `ultrareview` remains a separate explicit-cost command. The shared model alias registry covers aliases such as `best`, `fable`, `opus`, `sonnet`, `haiku`, `opusplan`, `opus[1m]`, `sonnet[1m]`, and `inherit` without duplicated hardcoded allowlists. `review-gate` remains capped to `standard` unless manually run with explicit `--quality strong|max`.
 
 Claude for Codex diagnostics include install consistency between the running plugin manifest and Codex's enabled registry entry. Review, multi-review, adversarial review, plan, and rescue prompts include bounded advisory project rules from `CLAUDE.md`, `REVIEW.md`, `.claude/review.md`, and `.claude/CLAUDE.md`; symlinks and outside-workspace files are ignored. `capabilities --json` includes an explanation for adaptive quality routing.
+
+## Global Claude Process Governor
+
+Claude for Codex bounds all plugin-owned Claude work with a global resource governor. It covers foreground review, background jobs, plugin-managed multi-role parallel fan-out, SDK subagent teams, Stop hooks, and Codex subagent delegation.
+
+The default lock store is outside repositories at `~/.codex/claude-for-codex/global-resource-locks`. To move it, set `CLAUDE_FOR_CODEX_GLOBAL_RESOURCE_LOCK_DIR=<absolute-private-dir>`. The override must point to an absolute, private, non-symlink directory owned by the current user; unsafe roots are rejected rather than silently used.
+
+Set `CLAUDE_FOR_CODEX_MAX_CLAUDE_PROCESSES=<n>` to tune the global process cap. The default follows the host's detected available parallelism up to a small cap; typical 5+ core hosts preserve normal five-role parallel review, while constrained hosts scale down automatically. `0` blocks new Claude launches and is useful as an emergency escape hatch or test setting.
+
+Capacity exhaustion returns `capacity_blocked` instead of starting more Claude work. JSON foreground commands print `{"status":"capacity_blocked", ...}` and exit `75`; human foreground commands print stderr and exit `75`; background jobs become terminal `capacity_blocked`; Stop hooks fail open with a warning. When a plugin-managed parallel role review has some capacity but not enough for every role, it downgrades to sequential and records `executionMode: "sequential"`. SDK subagent teams reserve up to one slot per requested role, capped by the effective host limit, and return `capacity_blocked` when the whole native-agent team cannot be admitted safely.
+
+Resource leases refresh while Claude work is running. If a command has a known long timeout, the runtime raises that lease's TTL floor to at least the operation timeout plus a refresh margin; an expired lease whose owner PID is still live or whose liveness is inconclusive is preserved rather than reclaimed.
+
+`setup`, `status`, `doctor --json`, and sanitized reports expose `resourceGovernor`, `capacityStatus`, `lockRootClass`, requested slots, effective max, and available slots without exposing raw lock-root paths.
 
 ### Fable / top-model routing
 

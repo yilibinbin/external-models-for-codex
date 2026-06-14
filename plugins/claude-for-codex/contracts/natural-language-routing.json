@@ -4,6 +4,7 @@
     "claude-adversarial-review",
     "claude-multi-review",
     "claude-plan",
+    "claude-plan-review",
     "claude-rescue",
     "claude-github-actions-review",
     "claude-role-packs",
@@ -25,6 +26,9 @@
     "claude-multi-review": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
     "claude-adversarial-review": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
     "claude-plan": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
+    "claude-plan-review": [
+      "Use this skill when the user asks Claude to review, challenge, audit, approve, or adversarially inspect a saved implementation plan file."
+    ],
     "claude-rescue": ["Default to `--quality auto` for manual Claude review, plan, rescue, and multi-review unless the command documents a stricter default."],
     "claude-github-actions-review": ["Default generated workflows to `--quality standard` even if the local environment requests stronger manual review."],
     "claude-role-packs": ["Keep Codex responsible for reconciling Claude output before edits."],
@@ -37,6 +41,7 @@
     "claude-multi-review": ["routing:multi-review"],
     "claude-adversarial-review": ["routing:adversarial-review"],
     "claude-plan": ["routing:plan"],
+    "claude-plan-review": ["routing:plan-review"],
     "claude-rescue": ["routing:rescue"],
     "claude-github-actions-review": ["routing:github-actions-review"],
     "claude-role-packs": ["routing:role-packs"],

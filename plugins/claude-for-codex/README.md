@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.18.2`
+- Current version: `0.19.0`
 
 Published capabilities:
 
@@ -30,6 +30,7 @@ Published capabilities:
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
 - Native structured output and sanitized streaming progress with `--native-structured` and `--stream-progress`.
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
+- Global Claude work-slot governor that bounds foreground review, background jobs, plugin-managed role fan-out, SDK subagents, Stop hooks, and delegated Codex subagent launches.
 - Capability diagnostics and cheap `doctor --json` health checks for Claude CLI, SDK package resolution, Git, GitHub CLI, hooks, MCP, state, review-gate, and optional semantic providers.
 - Optional semantic context for review commands, disabled by default.
 - Optional Claude SDK backend for explicitly selected review, gate, plan, and rescue flows.
@@ -57,6 +58,7 @@ Safety and operating model:
 - Codex remains responsible for applying or rejecting Claude findings.
 - The Stop gate is disabled by default after installation.
 - Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
+- Claude work-slot capacity exhaustion returns `capacity_blocked` instead of spawning unbounded extra work. Plugin-managed role fan-out downgrades to sequential when partial capacity is available; SDK subagent teams reserve one slot per requested role and return `capacity_blocked` when the whole team cannot be admitted safely.
 - The Stop gate reviews current git working-tree changes, not an exact previous-turn file list.
 - Generated GitHub Actions workflows use `pull_request`, avoid default `pull_request_target`, pin immutable release refs, and skip fork PR Claude/comment/annotation steps by default.
 
@@ -130,6 +132,11 @@ Expected output includes:
   "reviewGate": {
     "enabled": false,
     "mode": "multi-role"
+  },
+  "resourceGovernor": {
+    "ok": true,
+    "enabled": true,
+    "lockRootClass": "user-codex-data"
   }
 }
 ```
@@ -171,7 +178,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -212,6 +219,7 @@ Then remove or downgrade the plugin through Codex. If Codex Settings > Hooks sti
 - `claude-review-gate`: configure the opt-in Stop-time Claude review gate.
 - `claude-github-actions-review`: generate or validate fork-safe GitHub Actions PR review workflows.
 - `claude-plan`: independent Claude implementation plan for Codex reconciliation.
+- `claude-plan-review`: review a saved implementation plan file with Claude role agents; use `--backend sdk --agent-team sdk-subagents` only when explicitly requesting Claude SDK native subagents.
 - `claude-collaboration-loop`: full plan, reconcile, implement, adversarial review, report workflow.
 
 ## Direct Runtime Commands
@@ -228,6 +236,10 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base m
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --json --native-structured --stream-progress --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles correctness,security --scope branch --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs plan-review --plan "docs/superpowers/plans/example.md" --json
+node plugins/claude-for-codex/scripts/claude-companion.mjs plan-review --plan "docs/superpowers/plans/example.md" --backend sdk --agent-team sdk-subagents --json --native-structured
+node plugins/claude-for-codex/scripts/claude-companion.mjs native-plugin validate --json
+node plugins/claude-for-codex/scripts/claude-companion.mjs native-plugin path
 node plugins/claude-for-codex/scripts/claude-companion.mjs ultrareview --confirm-cost --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs rescue diagnose the failing release validation
 node plugins/claude-for-codex/scripts/claude-companion.mjs rescue --write fix the failing test
@@ -270,9 +282,21 @@ Claude for Codex starts at most three active tracked background jobs per workspa
 
 If the same background command, arguments, and workspace are submitted again while the original job is queued or running, Claude for Codex returns the existing job id with `reusedExisting: true` and does not spawn another Claude process. This is the runtime enforcement behind the no-resubmit rule.
 
+## Global Claude Resource Governor
+
+Claude for Codex also has a process-level governor that applies across workspaces and launch surfaces. It stores portable process leases under `~/.codex/claude-for-codex/global-resource-locks` by default, outside repositories and outside plugin checkout paths. Override the location only with an absolute, private directory through `CLAUDE_FOR_CODEX_GLOBAL_RESOURCE_LOCK_DIR`; unsafe, symlinked, group-writable, world-writable, file, or wrong-owner roots are rejected instead of being silently used.
+
+Set `CLAUDE_FOR_CODEX_MAX_CLAUDE_PROCESSES=<n>` to cap all plugin-owned Claude work slots for foreground reviews, background jobs, plugin-managed multi-role/adversarial fan-out, SDK subagent teams, Stop hooks, and Codex subagent delegation. The default follows detected host parallelism up to a small cap; typical 5+ core hosts preserve normal five-role parallel review, while constrained hosts scale down automatically. `0` is an emergency/test setting that blocks new Claude launches.
+
+When no slot is available, foreground JSON commands return `{"status":"capacity_blocked", ...}` and exit `75`; human foreground commands print a concise stderr message and exit `75`; background jobs become terminal `capacity_blocked`; Stop hooks fail open and warn. If a plugin-managed parallel role review has at least one slot but not enough for the whole role set, it automatically runs sequentially and records `executionMode: "sequential"` in reports. SDK subagent teams reserve up to one slot per requested role, capped by the effective host limit, and return `capacity_blocked` when the whole native-agent team cannot be admitted safely.
+
+Leases refresh while Claude work is running. When a command has a known long timeout, Claude for Codex raises that lease's TTL floor to cover the operation timeout plus a refresh margin. An expired lease whose owner PID is still live, or whose liveness is inconclusive, is preserved rather than reclaimed; dead-PID leases remain reclaimable.
+
+`setup`, `status`, `doctor --json`, and sanitized reports expose `resourceGovernor`, `capacityStatus`, `lockRootClass`, requested slots, effective max, and available slots without leaking raw lock-root paths.
+
 Stop hook never starts background jobs, never calls `reserve-job`, and never invokes ultrareview. If review-gate work exceeds its bounded role timeout or Claude is unavailable, it fails open and tells you to run an explicit tracked review.
 
-`capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. `doctor --json` is the cheap first-stop diagnostic for installed setups: it reports CLI, SDK, hook compatibility, review-gate state, state-file health, and semantic-provider configuration without running a Claude prompt or initializing providers.
+`capabilities` prints JSON diagnostics for the resolved Claude CLI, supported Claude flags, optional SDK availability, Git/GitHub CLI availability, hook trust, the bundled Git MCP server, and path-only detection of future semantic context providers. `doctor --json` is the cheap first-stop diagnostic for installed setups: it reports CLI, SDK, hook compatibility, review-gate state, resource-governor capacity, state-file health, and semantic-provider configuration without running a Claude prompt or initializing providers.
 
 `--backend sdk` opts into the Claude SDK backend when `@anthropic-ai/claude-agent-sdk` or `@anthropic-ai/claude-code` is importable locally or through a controlled global npm resolution fallback. SDK review mode uses explicit read-only allowed tools, denies configured write-tool candidates such as `Edit`, `Write`, `MultiEdit`, and `Bash` when the installed Claude runtime recognizes them, disables SDK settings sources, skills, hooks, plugins, and session persistence, and reuses the strict read-only Git MCP config. SDK-backed background and reserved jobs automatically enable sanitized stream progress so `jobs` and `result` can show progress previews without raw model chunks. If the SDK cannot be resolved or cannot provide the required safety controls, the command fails before Claude invocation. Unset `CLAUDE_FOR_CODEX_BACKEND` or pass `--backend cli` to return to the default CLI backend.
 
@@ -284,9 +308,9 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`. This repository also ships a fork-safe CI dogfood workflow that runs syntax checks, focused pytest, `release-check --ci-simulate --json`, and `git diff --check` for Claude for Codex changes.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.18.2`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.18.2` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.18.2` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, resource-governor wiring, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.19.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.19.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

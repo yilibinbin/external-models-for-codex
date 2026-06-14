@@ -55,7 +55,7 @@ Internal routing procedure:
 Rules:
 - Default generated workflows use `pull_request`, not `pull_request_target`.
 - Fork pull requests skip Claude invocation, comments, annotations, and secret use by default.
-- Generated release workflows must pin an immutable release ref such as `claude-for-codex-v0.10.0`; do not default to mutable `main`.
+- Generated release workflows must pin an immutable release ref such as `claude-for-codex-v0.19.0`; do not default to mutable `main`.
 - GitHub context expressions are mapped through `env:` first. Do not insert `${{ github.* }}` directly into shell `run:` blocks.
 - Checks annotations are opt-in because they require `checks: write`.
 - Treat this as a template/render/validate workflow. Local tests must use fixtures and must not call the live GitHub API.
