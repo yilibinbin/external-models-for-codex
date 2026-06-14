@@ -54,21 +54,22 @@ function redactPaths(text, cwd) {
   return redacted;
 }
 
-function capUtf8(text, maxBytes) {
-  if (Buffer.byteLength(text, "utf8") <= maxBytes) {
-    return text;
-  }
+function capUtf8(text, maxBytes, truncateFrom = "tail", forceTruncated = false) {
+  const source = String(text ?? "");
+  const bytes = Buffer.from(source, "utf8");
   const marker = "...<truncated>";
-  const budget = Math.max(0, maxBytes - Buffer.byteLength(marker, "utf8"));
-  let output = "";
-  for (const char of text) {
-    const candidate = output + char;
-    if (Buffer.byteLength(candidate, "utf8") > budget) {
-      break;
-    }
-    output = candidate;
+  const markerBytes = Buffer.from(marker, "utf8");
+  if (bytes.length <= maxBytes && !forceTruncated) {
+    return source;
   }
-  return output + marker;
+  const budget = Math.max(0, maxBytes - markerBytes.length);
+  if (truncateFrom === "head") {
+    const start = forceTruncated && bytes.length <= budget ? 0 : Math.max(0, bytes.length - budget);
+    const body = bytes.subarray(start).toString("utf8").replace(/^\uFFFD+/, "");
+    return marker + body;
+  }
+  const body = bytes.subarray(0, budget).toString("utf8").replace(/\uFFFD+$/, "");
+  return body + marker;
 }
 
 export function stripControls(text) {
@@ -78,6 +79,8 @@ export function stripControls(text) {
 export function sanitizeSummary(text, options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const maxBytes = options.maxBytes ?? 2048;
+  const truncateFrom = options.truncateFrom === "head" ? "head" : "tail";
+  const forceTruncated = options.forceTruncated === true;
   const redacted = redactPaths(redactSecrets(String(text ?? "")), cwd);
-  return capUtf8(stripControls(redacted), maxBytes);
+  return capUtf8(stripControls(redacted), maxBytes, truncateFrom, forceTruncated);
 }

@@ -2,6 +2,8 @@
 {{GIT_CONTEXT}}
 {{SEMANTIC_CONTEXT_BLOCK}}
 {{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
+{{UI_EVIDENCE_BLOCK}}
 {{ADVERSARIAL_LENSES}}
 <scale_guidance>
 If the diff is small, emphasize Skeptic findings.
@@ -25,4 +27,5 @@ Small means fewer than 50 changed lines across one or two files; medium means ro
 - Use REJECT when high-severity findings have strong evidence or consensus across lenses.
 </rules>
 {{FOCUS_BLOCK}}
+{{SCORECARD_BLOCK}}
 {{OUTPUT_CONTRACT}}

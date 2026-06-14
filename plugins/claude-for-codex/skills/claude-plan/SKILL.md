@@ -55,3 +55,9 @@ Output usage:
 - Compare task order against Codex's task plan.
 - Add missing tests or risk checks when Claude found real gaps.
 - Reject unsupported suggestions with a short reason.
+
+Arguments:
+- `--taskset` asks Claude for strict taskset JSON and persists the normalized taskset in plugin data outside the repository.
+- `--issue-assessment` asks Claude for an advisory issue suitability/risk JSON object. It does not create branches, assign issues, implement, commit, push, create pull requests, merge, or close issues.
+- `--validation-log <file>`, `--test-summary <file>`, and `--ci-summary <file>` include already-produced validation evidence as untrusted prompt context.
+- `--rules <file>` explicitly loads an additional workspace-bound advisory rule file.

@@ -14,7 +14,7 @@ This plugin is prepared for a Codex plugin page with:
 - Repository: https://github.com/yilibinbin/external-models-for-codex
 - Marketplace id: `external-models-for-codex`
 - Plugin id: `claude-for-codex`
-- Current version: `0.19.0`
+- Current version: `0.20.0`
 
 Published capabilities:
 
@@ -28,6 +28,10 @@ Published capabilities:
 - Native SDK subagent review teams with `--backend sdk --agent-team sdk-subagents`.
 - Request-local outcome classification for Claude CLI and SDK runs, including compact refusal, fallback, timeout, and permission-compatibility metadata.
 - Structured `review --json` and role-tagged `multi-review --json` for machine-readable findings.
+- Advisory `review --scorecard --json` and `multi-review --scorecard --json` quality scorecards that stay separate from the existing strict review JSON contract.
+- `plan --taskset` for normalized task decomposition stored in repo-external plugin state.
+- User-provided validation evidence inputs such as `review --validation-log <file>` with redaction, workspace bounds, and tail truncation.
+- Explicit bounded `assisted-review --scorecard --max-review-rounds 2` loops where Claude reviews and Codex decides what to fix.
 - Native structured output and sanitized streaming progress with `--native-structured` and `--stream-progress`.
 - Tracked job lifecycle commands for status, result retrieval, and conservative cancellation.
 - Global Claude work-slot governor that bounds foreground review, background jobs, plugin-managed role fan-out, SDK subagents, Stop hooks, and delegated Codex subagent launches.
@@ -56,6 +60,8 @@ Safety and operating model:
 - Ultrareview may use remote/cloud execution and usage-credit billing; it requires `--confirm-cost` or `CLAUDE_FOR_CODEX_ALLOW_ULTRAREVIEW=1`.
 - Rescue is read-only by default; `rescue --write` is explicit opt-in and records git fingerprints before and after Claude runs.
 - Codex remains responsible for applying or rejecting Claude findings.
+- Scorecards are advisory; Codex must still verify findings and decide whether to change code.
+- Validation logs are user-provided or Codex-provided evidence. The plugin does not run project commands automatically to create them.
 - The Stop gate is disabled by default after installation.
 - Claude CLI failures, authentication failures, rate limits, timeouts, or invalid gate output fail open and emit warnings.
 - Claude work-slot capacity exhaustion returns `capacity_blocked` instead of spawning unbounded extra work. Plugin-managed role fan-out downgrades to sequential when partial capacity is available; SDK subagent teams reserve one slot per requested role and return `capacity_blocked` when the whole team cannot be admitted safely.
@@ -164,6 +170,8 @@ codex plugin add claude-for-codex@external-models-for-codex
 
 Review, multi-review, adversarial review, plan, and rescue prompts automatically include bounded advisory project rules from `CLAUDE.md`, `REVIEW.md`, `.claude/review.md`, and `.claude/CLAUDE.md`. Symlinks and files outside the workspace are ignored. `capabilities --json` includes a quality-policy explanation so Codex can report why `--quality auto|fast|standard|strong|max` chose a model and effort.
 
+Claude for Codex 0.20.0 also loads `.codex/program.md` and `.codex/review.md` as bounded advisory project rules. Use `--rules ./program.md` when you explicitly want another workspace-bound file included. Rule files are untrusted advisory data: they cannot grant write permissions, override output contracts, trigger ultrareview, or bypass plugin isolation.
+
 ## Install From This Repository
 
 ```bash
@@ -178,7 +186,7 @@ After installing or upgrading, open Codex Settings > Hooks and trust or enable t
 Install the released Claude plugin from the immutable Claude release ref:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.0
 codex plugin add claude-for-codex@external-models-for-codex
 ```
 
@@ -220,6 +228,7 @@ Then remove or downgrade the plugin through Codex. If Codex Settings > Hooks sti
 - `claude-github-actions-review`: generate or validate fork-safe GitHub Actions PR review workflows.
 - `claude-plan`: independent Claude implementation plan for Codex reconciliation.
 - `claude-plan-review`: review a saved implementation plan file with Claude role agents; use `--backend sdk --agent-team sdk-subagents` only when explicitly requesting Claude SDK native subagents.
+- `claude-assisted-review`: explicit bounded scorecard review loop; Claude reviews, Codex decides and fixes.
 - `claude-collaboration-loop`: full plan, reconcile, implement, adversarial review, report workflow.
 
 ## Direct Runtime Commands
@@ -229,14 +238,18 @@ Run from the repository root:
 ```bash
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --json --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs review --scorecard --json --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs review --validation-log validation.log --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs review --backend sdk --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs recommend-execution-mode --json
 node plugins/claude-for-codex/scripts/claude-companion.mjs adversarial-review --base main challenge the rollback design
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --json --roles correctness,security --base main
+node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --scorecard --json --roles correctness,security --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --backend sdk --agent-team sdk-subagents --json --native-structured --stream-progress --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs multi-review --roles correctness,security --scope branch --base main
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan-review --plan "docs/superpowers/plans/example.md" --json
+node plugins/claude-for-codex/scripts/claude-companion.mjs plan-review --plan "docs/superpowers/plans/example.md" --scorecard --json
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan-review --plan "docs/superpowers/plans/example.md" --backend sdk --agent-team sdk-subagents --json --native-structured
 node plugins/claude-for-codex/scripts/claude-companion.mjs native-plugin validate --json
 node plugins/claude-for-codex/scripts/claude-companion.mjs native-plugin path
@@ -255,8 +268,24 @@ node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions render
 node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions init --write
 node plugins/claude-for-codex/scripts/claude-companion.mjs github-actions validate
 node plugins/claude-for-codex/scripts/claude-companion.mjs plan build the plugin and include tests
+node plugins/claude-for-codex/scripts/claude-companion.mjs plan --taskset build the plugin and include tests
+node plugins/claude-for-codex/scripts/claude-companion.mjs plan --issue-assessment assess whether this issue fits the current session
+node plugins/claude-for-codex/scripts/claude-companion.mjs assisted-review --scorecard --max-review-rounds 2
+node plugins/claude-for-codex/scripts/claude-companion.mjs result --resume-plan <job-id>
 node plugins/claude-for-codex/scripts/claude-companion.mjs status
 ```
+
+## Scorecards, Tasksets, And Validation Evidence
+
+`review --scorecard --json`, `multi-review --scorecard --json`, `adversarial-review --scorecard --json`, and `plan-review --scorecard --json` ask Claude for a separate weighted scorecard schema. The plugin recomputes totals, validates blocking findings, sorts findings by severity, and keeps scorecard parsing separate from the existing `review --json` contract. Scorecards are advisory, not an automatic merge, PR, issue, or Stop-hook decision.
+
+`plan --taskset` asks Claude for strict taskset JSON and writes the normalized state under plugin data outside the repository. It prints the `tasksetId` and `statePath`; it does not write task files into the project unless a future explicit export command is added.
+
+`--validation-log <file>`, `--test-summary <file>`, `--ci-summary <file>`, and `--screenshot-summary <file>` load already-produced evidence from workspace-bound files. Validation logs are user-provided evidence; the plugin redacts common secrets and local paths, rejects binary/symlink/outside-workspace files, reads only a bounded tail window, and renders the evidence as untrusted prompt data.
+
+`assisted-review --scorecard --max-review-rounds 2` runs a bounded advisory review loop. It stops when the scorecard reaches threshold with no blocking findings, when max rounds are reached, when a blocker repeats, or when the global resource governor returns `capacity_blocked`. It never edits files, runs project commands, commits, pushes, creates pull requests, merges, closes issues, or requests ultrareview.
+
+`result --resume-plan <job-id>` is read-only recovery diagnostics for tracked jobs and summary state. It does not restart Claude.
 
 `multi-review` runs several role-specialized Claude review prompts in parallel by default and prints one section per role plus an orchestration summary. This plugin-managed CLI fan-out is read-only; Codex must reconcile findings before any follow-up changes. Use `--sequential` to run one role at a time for debugging or rate-limit-sensitive environments. For Claude native SDK mode, use `multi-review --backend sdk --agent-team sdk-subagents`; this requires the Claude SDK backend, configures native subagents for the selected roles, and rejects incompatible `--sequential` or non-SDK combinations before invoking Claude.
 
@@ -308,9 +337,9 @@ Semantic context is disabled by default. Use `--semantic-context <provider>` on 
 
 `github-actions render` prints a GitHub Actions PR review workflow and writes nothing. `github-actions init --write` writes `.github/workflows/claude-for-codex-review.yml` and refuses to overwrite without `--force`. `github-actions validate` checks minimal permissions, fork-safe gates, immutable release refs, GitHub context env mapping, absence of local absolute paths, and no default `pull_request_target`. Checks annotations are opt-in with `--annotations` because they add `checks: write`. This repository also ships a fork-safe CI dogfood workflow that runs syntax checks, focused pytest, `release-check --ci-simulate --json`, and `git diff --check` for Claude for Codex changes.
 
-The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
+The generated GitHub Actions workflow is a template. It uses `pull_request`, pins `codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.0`, maps GitHub context through environment variables before shell use, uploads structured review JSON as a short-retention artifact, and skips Claude/comment/annotation publishing for fork PRs by default. Maintainers must configure Claude authentication or secrets explicitly in their CI environment. A future unsafe `pull_request_target` variant would need separate review; this version does not generate one.
 
-`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, resource-governor wiring, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.19.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.19.0` when a release must fail if GitHub install fails.
+`release-check` validates release hygiene for this repository, including manifest metadata, model alias registry wiring, outcome classification/reporting, resource-governor wiring, hook compatibility diagnostics, doctor availability, fork-safe repository CI, and docs. `release-check --ci-simulate` adds fixture-driven GitHub Actions validation without calling the live GitHub API, reading user HOME, requiring secrets, or using local Codex caches. Remote install smoke is skipped by default for local development; use `--remote-install --ref claude-for-codex-v0.20.0` for a fail-soft smoke or `--require-remote-install --ref claude-for-codex-v0.20.0` when a release must fail if GitHub install fails.
 
 ## Host-forwarded background jobs
 

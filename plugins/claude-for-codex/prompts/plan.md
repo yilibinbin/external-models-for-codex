@@ -1,6 +1,9 @@
 <task>Create an independent implementation plan for Codex to compare against its own plan.</task>
 {{GIT_CONTEXT}}
 {{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
+{{UI_EVIDENCE_BLOCK}}
+{{TASKSET_BLOCK}}
 <rules>
 - Do not edit files.
 - Separate observed facts from inferences.
@@ -10,11 +13,4 @@
 - End with a reconciliation checklist Codex can use against its own plan.
 </rules>
 {{PLANNING_REQUEST_BLOCK}}
-<output_contract>
-## Observed Facts
-## Inferences
-## Independent Implementation Plan
-## Tests
-## Risks And Blind Spots
-## Reconciliation Checklist
-</output_contract>
+{{OUTPUT_CONTRACT}}

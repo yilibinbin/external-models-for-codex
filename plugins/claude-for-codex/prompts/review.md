@@ -2,6 +2,8 @@
 {{GIT_CONTEXT}}
 {{SEMANTIC_CONTEXT_BLOCK}}
 {{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
+{{UI_EVIDENCE_BLOCK}}
 {{REVIEW_ROLES_BLOCK}}
 <rules>
 - Do not edit files.
@@ -13,4 +15,5 @@
 - Focus on concrete bugs, regressions, missing tests, and maintainability risks.
 </rules>
 {{FOCUS_BLOCK}}
+{{SCORECARD_BLOCK}}
 {{OUTPUT_CONTRACT}}

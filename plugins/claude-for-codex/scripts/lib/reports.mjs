@@ -106,6 +106,21 @@ export function reportFromResult({ command, args = {}, result, startedAt, endedA
     semanticFailureReason: args.semantic?.report?.semanticFailureReason ?? "",
     semanticFailed: Boolean(args.semantic?.report?.semanticFailed),
     semanticVerdict: args.semanticVerdict ?? "",
+    scorecard: parsed?.score && typeof parsed.score === "object" ? {
+      total: Number.isFinite(parsed.score.total) ? parsed.score.total : undefined,
+      threshold: Number.isFinite(parsed.score.threshold) ? parsed.score.threshold : undefined
+    } : undefined,
+    taskset: args.tasksetSummary ? {
+      id: args.tasksetSummary.id ?? "",
+      subtaskCount: args.tasksetSummary.subtaskCount ?? 0,
+      statePathPresent: Boolean(args.tasksetSummary.statePath)
+    } : undefined,
+    validationEvidence: args.validationEvidenceSummary ? {
+      items: args.validationEvidenceSummary.items ?? 0,
+      skipped: args.validationEvidenceSummary.skipped ?? 0,
+      kinds: args.validationEvidenceSummary.kinds ?? []
+    } : undefined,
+    failureCategory: result?.metadata?.failureCategory ?? "",
     rolePack: args.rolePackSummary ? {
       name: args.rolePackSummary.name,
       source: args.rolePackSummary.source,

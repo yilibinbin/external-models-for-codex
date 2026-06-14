@@ -1,7 +1,7 @@
 {
   "name": "claude-for-codex",
-  "version": "0.19.0",
-  "description": "Use Claude Code from Codex for read-only review, adversarial review, saved-plan review, opt-in Claude Code native review agents, native SDK subagent teams, role-pack review teams, advisory mailbox/leases, planning, optional SDK backend, GitHub Actions PR review templates, rescue, ultrareview, and tracked job workflows.",
+  "version": "0.20.0",
+  "description": "Use Claude Code from Codex for read-only review, scorecard review, adversarial review, saved-plan review, taskset planning, bounded assisted review, opt-in Claude Code native review agents, native SDK subagent teams, role-pack review teams, advisory mailbox/leases, planning, optional SDK backend, GitHub Actions PR review templates, rescue, ultrareview, and tracked job workflows.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -23,13 +23,17 @@
   "interface": {
     "displayName": "Claude for Codex",
     "shortDescription": "Claude Code reviews, planning, and stop-gate workflows for Codex.",
-    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, adversarial design critique, structured adversarial verdicts, implementation planning, read-only rescue diagnosis, multi-role review fan-out, native SDK subagent review teams, background job tracking, lifecycle hooks, dynamic model alias routing, compact outcome classification, cheap doctor diagnostics, optional semantic context, sanitized review reports, release checks, fork-safe CI dogfood, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, native SDK mode is explicit, ultrareview requires cost consent, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict. It also includes a first-class plan-review command for saved implementation plans and an opt-in Claude Code plugin pack that exports read-only native reviewer agents for Claude Code. The native pack is isolated from the Codex plugin root, so Codex skills, hooks, MCP servers, and settings are not loaded by Claude Code unless a user explicitly points Claude Code at the exported pack.",
+    "longDescription": "Claude for Codex connects Codex to the local Claude Code CLI for independent read-only code review, scorecard-based quality review, adversarial design critique, structured adversarial verdicts, implementation planning, taskset planning, bounded assisted review loops, validation-evidence ingestion, read-only rescue diagnosis, multi-role review fan-out, native SDK subagent review teams, background job tracking, lifecycle hooks, dynamic model alias routing, compact outcome classification, cheap doctor diagnostics, optional semantic context, sanitized review reports, release checks, fork-safe CI dogfood, and an opt-in Stop hook review gate. It is designed for multi-model collaboration: Codex implements and reconciles, while Claude provides a separate reviewer or planner perspective. Claude invocations are constrained to read-only tools for review workflows, native SDK mode is explicit, ultrareview requires cost consent, and the Stop gate fails open on Claude runtime errors unless Claude explicitly returns a blocking verdict. It also includes a first-class plan-review command for saved implementation plans and an opt-in Claude Code plugin pack that exports read-only native reviewer agents for Claude Code. The native pack is isolated from the Codex plugin root, so Codex skills, hooks, MCP servers, and settings are not loaded by Claude Code unless a user explicitly points Claude Code at the exported pack.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
       "Read-only Claude Code review",
+      "Optional scorecard review JSON",
       "Adversarial review",
       "Implementation planning",
+      "Taskset planning state",
+      "Validation evidence ingestion",
+      "Bounded assisted review",
       "Read-only rescue diagnosis",
       "Multi-role review orchestration",
       "Dynamic Claude model alias registry",

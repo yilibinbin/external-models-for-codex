@@ -122,3 +122,57 @@ export function classifyClaudeOutcome(result = {}) {
     stopReason: events.find((event) => stopReasonForEvent(event)) ? stopReasonForEvent(events.find((event) => stopReasonForEvent(event))) : ""
   };
 }
+
+export const FAILURE_CATEGORIES = Object.freeze([
+  "timeout",
+  "rate_limit",
+  "auth",
+  "quota",
+  "network",
+  "context_overflow",
+  "permission_compat",
+  "empty_output",
+  "malformed_json",
+  "model_unavailable",
+  "capacity_blocked",
+  "unknown"
+]);
+
+export function classifyFailureCategory(result = {}) {
+  const { status, stdout = "", stderr = "", error = "", metadata = {} } = result;
+  if (result.status === "capacity_blocked" || result.capacityStatus === "capacity_blocked" || metadata.capacity?.status === "capacity_blocked") {
+    return "capacity_blocked";
+  }
+  if (metadata.structuredError === "empty_output") {
+    return "empty_output";
+  }
+  if (metadata.structuredError === "malformed_json") {
+    return "malformed_json";
+  }
+  const classified = metadata.outcome && typeof metadata.outcome === "object"
+    ? metadata.outcome
+    : classifyClaudeOutcome({ status, stdout, stderr, error, metadata });
+  if (classified.kind === "unknown_deny_tool") {
+    return "permission_compat";
+  }
+  if (FAILURE_CATEGORIES.includes(classified.kind) && classified.kind !== "unknown") {
+    return classified.kind;
+  }
+  const text = `${status === 0 ? "" : stdout}\n${stderr}\n${error}`.toLowerCase();
+  if (text.includes("context length") || text.includes("context window") || text.includes("maximum context") || text.includes("token limit")) {
+    return "context_overflow";
+  }
+  if (text.includes("billing") || text.includes("credit") || text.includes("quota exceeded")) {
+    return "quota";
+  }
+  if (text.includes("network") || text.includes("econnreset") || text.includes("etimedout") || text.includes("enotfound")) {
+    return "network";
+  }
+  if (text.includes("permission deny rule") && text.includes("matches no known tool")) {
+    return "permission_compat";
+  }
+  if (text.includes("model") && (text.includes("unavailable") || text.includes("not found") || text.includes("does not exist"))) {
+    return "model_unavailable";
+  }
+  return "unknown";
+}

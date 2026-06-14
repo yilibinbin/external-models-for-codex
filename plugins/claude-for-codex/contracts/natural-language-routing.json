@@ -9,6 +9,7 @@
     "claude-github-actions-review",
     "claude-role-packs",
     "claude-collaboration-loop",
+    "claude-assisted-review",
     "claude-review-gate",
     "claude-subagent-review"
   ],
@@ -33,6 +34,7 @@
     "claude-github-actions-review": ["Default generated workflows to `--quality standard` even if the local environment requests stronger manual review."],
     "claude-role-packs": ["Keep Codex responsible for reconciling Claude output before edits."],
     "claude-collaboration-loop": ["Keep Codex responsible for reconciling Claude output before edits."],
+    "claude-assisted-review": ["Keep Codex responsible for reconciling Claude output before edits."],
     "claude-review-gate": ["Installed Stop hooks stay conservative and do not force `--quality strong`, `--quality max`, SDK backend, SDK subagents, or ultrareview."],
     "claude-subagent-review": ["The child must not replace the plugin call with raw `claude -p`."]
   },
@@ -46,6 +48,7 @@
     "claude-github-actions-review": ["routing:github-actions-review"],
     "claude-role-packs": ["routing:role-packs"],
     "claude-collaboration-loop": ["routing:collaboration-loop"],
+    "claude-assisted-review": ["routing:assisted-review"],
     "claude-review-gate": ["routing:review-gate"],
     "claude-subagent-review": ["routing:codex-subagent-delegation"]
   },

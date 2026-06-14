@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "score", "findings", "residual_risks", "next_steps"],
+  "properties": {
+    "verdict": { "enum": ["approve", "needs-attention"] },
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "threshold", "dimensions"],
+      "properties": {
+        "total": { "type": "number", "minimum": 0, "maximum": 100 },
+        "threshold": { "type": "number", "minimum": 0, "maximum": 100 },
+        "dimensions": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["correctness", "tests", "code_quality", "security", "performance"],
+          "properties": {
+            "correctness": { "$ref": "#/$defs/dimension" },
+            "tests": { "$ref": "#/$defs/dimensionWithExemption" },
+            "code_quality": { "$ref": "#/$defs/dimension" },
+            "security": { "$ref": "#/$defs/dimension" },
+            "performance": { "$ref": "#/$defs/dimension" }
+          }
+        }
+      }
+    },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "residual_risks": { "type": "array", "items": { "type": "string" } },
+    "next_steps": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["weight", "score", "evidence"],
+      "properties": {
+        "weight": { "type": "number", "minimum": 0, "maximum": 1 },
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "evidence": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "dimensionWithExemption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["weight", "score", "evidence", "exempt", "exemption_reason"],
+      "properties": {
+        "weight": { "type": "number", "minimum": 0, "maximum": 1 },
+        "score": { "type": "number", "minimum": 0, "maximum": 100 },
+        "evidence": { "type": "array", "items": { "type": "string" } },
+        "exempt": { "type": "boolean" },
+        "exemption_reason": { "type": "string" }
+      }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "blocking", "file", "line", "description", "evidence", "recommendation"],
+      "properties": {
+        "severity": { "enum": ["critical", "high", "medium", "low"] },
+        "blocking": { "type": "boolean" },
+        "file": { "type": "string" },
+        "line": { "type": "integer", "minimum": 1 },
+        "description": { "type": "string" },
+        "evidence": { "type": "string" },
+        "recommendation": { "type": "string" }
+      }
+    }
+  }
+}
