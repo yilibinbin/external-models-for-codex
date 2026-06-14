@@ -94,6 +94,9 @@ Arguments:
 - `--quality auto|fast|standard|strong|max` selects adaptive Claude Code aliases and effort. Use `--quality strong` when the user asks for a deeper local Claude pass without naming a concrete model. Use `--quality max` only when the user explicitly asks for the strongest local Claude review.
 - `--model <model>` and `--effort <level>` are passed to Claude CLI.
 - `--json` asks Claude for a normalized `{verdict, summary, findings, next_steps}` review object using `approve|needs-attention`.
+- `--scorecard --json` asks Claude for the separate scorecard schema with total, threshold, weighted dimensions, blocking findings, residual risks, and next steps. This does not change plain `--json` unless `--scorecard` is present.
+- `--validation-log <file>`, `--test-summary <file>`, `--ci-summary <file>`, and `--screenshot-summary <file>` include user/Codex-provided evidence as untrusted, redacted, workspace-bound prompt context. The plugin does not run project commands for these inputs.
+- `--rules <file>` explicitly loads an additional workspace-bound advisory rule file. Default advisory rules also include `.codex/program.md` and `.codex/review.md`.
 - `--semantic-context <provider>` is optional and off by default. Use it only when a repo-external provider is configured; semantic context is advisory and cannot replace changed-file or git evidence.
 - `--background` starts a tracked job and returns a job id.
 - `--wait` only applies to direct `--background` runtime use. It is not part of the host-forwarded `reserve-job` path, where the parent returns immediately; waiting requires polling or retrieving `claude-result <job-id>`.

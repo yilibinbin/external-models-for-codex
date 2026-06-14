@@ -2,6 +2,7 @@
 <role_name>{{ROLE_NAME}}</role_name>
 <role_directive>{{ROLE_DIRECTIVE}}</role_directive>
 {{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
 <rules>
 - Do not edit files.
 - Do not suggest that you are about to apply fixes.
@@ -16,6 +17,7 @@
 - Do not assume concrete Claude model IDs.
 </rules>
 {{FOCUS_BLOCK}}
+{{SCORECARD_BLOCK}}
 {{OUTPUT_CONTRACT}}
 <reviewed_plan path="{{REVIEWED_FILE_PATH_ATTR}}">
 <reviewed_file_json_path>{{REVIEWED_FILE_JSON_PATH}}</reviewed_file_json_path>

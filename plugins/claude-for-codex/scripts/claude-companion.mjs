@@ -46,7 +46,10 @@ import { postMailboxMessage, listMailboxThreads, showMailboxThread } from "./lib
 import { claimLease, listLeases, releaseLease } from "./lib/leases.mjs";
 import { readWorkspaceBoundPlanFile } from "./lib/plan-review-file.mjs";
 import { renderPromptTemplate } from "./lib/prompt-template.mjs";
-import { renderProjectInstructionsBlock } from "./lib/project-instructions.mjs";
+import {
+  DEFAULT_PROJECT_INSTRUCTION_FILES,
+  renderProjectInstructionsBlock
+} from "./lib/project-instructions.mjs";
 import { sdkSubagentTimeoutMs, timeoutLeaseTtlFloorMs } from "./lib/sdk-subagent-timeout.mjs";
 import { doctorReport, renderDoctorText } from "./lib/doctor.mjs";
 import { hookCompatibilityReport } from "./lib/hook-compat.mjs";
@@ -81,7 +84,7 @@ import {
   effectiveMaxClaudeProcesses,
   inspectResourceGovernor
 } from "./lib/resource-governor.mjs";
-import { classifyClaudeOutcome } from "./lib/outcome-classifier.mjs";
+import { classifyClaudeOutcome, classifyFailureCategory } from "./lib/outcome-classifier.mjs";
 import {
   buildNativeReviewAgents,
   nativeAgentName,
@@ -100,6 +103,18 @@ import {
   normalizeAdversarialOutput,
   normalizeReviewOutput
 } from "./lib/render-review.mjs";
+import {
+  normalizeScorecardOutput,
+  SCORECARD_DIMENSIONS,
+  SCORECARD_SEVERITY_RANK
+} from "./lib/scorecard.mjs";
+import {
+  loadValidationEvidence,
+  renderValidationEvidenceBlock
+} from "./lib/validation-evidence.mjs";
+import { saveTaskset, readTaskset } from "./lib/tasksets.mjs";
+import { nextAssistedReviewAction } from "./lib/assisted-review.mjs";
+import { writeRoundSummary, readRoundSummary } from "./lib/summary-index.mjs";
 import {
   ADVERSARIAL_LENSES,
   DEFAULT_ADVERSARIAL_LENSES,
@@ -165,9 +180,9 @@ import {
   workingTreeFingerprintMatches
 } from "./lib/worktree-fingerprint.mjs";
 
-const VALID_COMMANDS = new Set(["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "plan-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "native-plugin", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
+const VALID_COMMANDS = new Set(["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "plan-review", "ultrareview", "plan", "assisted-review", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "native-plugin", "recommend-execution-mode", "__run-job", "reserve-job", "run-reserved-job", "subagent-command"]);
 const RESOURCE_GOVERNOR_COMPANION_WIRING = "resource-governor:companion-v1";
-const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
+const BACKGROUND_CAPABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "assisted-review", "rescue"]);
 const SUBAGENT_DELEGATABLE_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
 const VALID_AGENT_TEAMS = new Set(["plugin", "sdk-subagents"]);
 const POSITIVE_DECIMAL_PATTERN = /^(?:[1-9]\d*(?:\.\d+)?|0\.\d*[1-9]\d*)$/;
@@ -523,6 +538,7 @@ function hasBaseRef(base, runGit = git) {
 
 function parseArgs(argv, options = {}) {
   const tokens = normalizeArgv(argv);
+  const command = options.command ?? "";
   const parsed = { _: [], paths: [] };
   for (let index = 0; index < tokens.length; index += 1) {
     const arg = tokens[index];
@@ -636,6 +652,36 @@ function parseArgs(argv, options = {}) {
       parsed.waitTimeoutMs = Number(arg.slice("--wait-timeout-ms=".length));
     } else if (arg === "--json" || arg === "--json-output") {
       parsed.jsonOutput = true;
+    } else if (arg === "--scorecard") {
+      parsed.scorecard = true;
+      parsed.jsonOutput = true;
+    } else if (arg === "--scorecard-summary") {
+      parsed.scorecardSummary = true;
+    } else if (["--validation-log", "--test-summary", "--ci-summary", "--screenshot-summary"].includes(arg)) {
+      parsed.validationEvidence = [...(parsed.validationEvidence ?? []), {
+        kind: arg.slice(2),
+        file: readOptionValue(tokens, index, arg)
+      }];
+      index += 1;
+    } else if (arg === "--rules") {
+      parsed.rules = [...(parsed.rules ?? []), readOptionValue(tokens, index, arg)];
+      index += 1;
+    } else if (arg === "--taskset") {
+      if (command === "plan" || (tokens[index + 1] === undefined || tokens[index + 1].startsWith("--"))) {
+        parsed.taskset = true;
+      } else {
+        parsed.tasksetId = readOptionValue(tokens, index, arg);
+        index += 1;
+      }
+    } else if (arg === "--max-review-rounds") {
+      const value = Number(readOptionValue(tokens, index, arg));
+      if (!Number.isInteger(value) || value < 1 || value > 3) {
+        throw new Error("--max-review-rounds must be an integer from 1 to 3.");
+      }
+      parsed.maxReviewRounds = value;
+      index += 1;
+    } else if (arg === "--issue-assessment") {
+      parsed.issueAssessment = true;
     } else if (arg === "--write") {
       parsed.write = true;
     } else if (arg === "--parallel") {
@@ -673,8 +719,11 @@ const ROLE_REVIEW_ONLY_OPTIONS = Object.freeze([
   ["nativeStructured", "--native-structured"],
   ["maxBudgetUsd", "--max-budget-usd"]
 ]);
-const STREAM_PROGRESS_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "rescue"]);
-const PROMPT_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "plan-review", "plan", "rescue"]);
+const STREAM_PROGRESS_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "assisted-review", "rescue"]);
+const PROMPT_COMMANDS = new Set(["review", "adversarial-review", "multi-review", "plan-review", "plan", "assisted-review", "rescue"]);
+const SCORECARD_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan-review", "assisted-review"]);
+const VALIDATION_EVIDENCE_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan", "plan-review", "assisted-review"]);
+const RULE_COMMANDS = new Set(["review", "multi-review", "adversarial-review", "plan", "plan-review", "assisted-review", "rescue"]);
 
 function validateNativeModeOptions(args, command) {
   for (const [property, option] of ROLE_REVIEW_ONLY_OPTIONS) {
@@ -691,10 +740,37 @@ function validateNativeModeOptions(args, command) {
   if (args.confirmCost !== undefined && command !== "ultrareview") {
     throw new Error("Unsupported option --confirm-cost: only valid for ultrareview.");
   }
+  if (args.scorecardSummary && command !== "review-gate") {
+    throw new Error("--scorecard-summary is only valid for review-gate.");
+  }
+  if (args.scorecard && !SCORECARD_COMMANDS.has(command)) {
+    throw new Error("--scorecard is only valid for review, multi-review, adversarial-review, plan-review, and assisted-review.");
+  }
+  if (args.validationEvidence?.length && !VALIDATION_EVIDENCE_COMMANDS.has(command)) {
+    throw new Error("--validation-log, --test-summary, --ci-summary, and --screenshot-summary are only valid for review, multi-review, adversarial-review, plan, plan-review, and assisted-review.");
+  }
+  if (args.rules?.length && !RULE_COMMANDS.has(command)) {
+    throw new Error("--rules is only valid for prompt commands.");
+  }
+  if (args.taskset && command !== "plan") {
+    throw new Error("--taskset without an id is only valid for plan.");
+  }
+  if (args.tasksetId && command !== "assisted-review") {
+    throw new Error("--taskset <id> is only valid for assisted-review.");
+  }
+  if (args.maxReviewRounds !== undefined && command !== "assisted-review") {
+    throw new Error("--max-review-rounds is only valid for assisted-review.");
+  }
+  if (args.issueAssessment && command !== "plan") {
+    throw new Error("--issue-assessment is only valid for plan.");
+  }
+  if (args.taskset && args.issueAssessment) {
+    throw new Error("Choose either --taskset or --issue-assessment.");
+  }
 }
 
 function validateCommandNativeModeOptions(command, rawArgs) {
-  const parsed = parseArgs(rawArgs, { rejectUnknownOptions: PROMPT_COMMANDS.has(command) });
+  const parsed = parseArgs(rawArgs, { rejectUnknownOptions: PROMPT_COMMANDS.has(command), command });
   validateNativeModeOptions(parsed, command);
   if (ROLE_REVIEW_COMMANDS.has(command)) {
     if (parsed.agentTeam !== undefined && !VALID_AGENT_TEAMS.has(parsed.agentTeam)) {
@@ -753,6 +829,12 @@ function commandHelp(command) {
       ...common,
       "--role <role>",
       "--roles <a,b>",
+      "--scorecard",
+      "--validation-log <file>",
+      "--test-summary <file>",
+      "--ci-summary <file>",
+      "--screenshot-summary <file>",
+      "--rules <file>",
       "--semantic-context off|auto|<provider>"
     ],
     "adversarial-review": [
@@ -760,6 +842,8 @@ function commandHelp(command) {
       ...common,
       "--adversarial-lens <lens>",
       "--adversarial-lenses <a,b>",
+      "--scorecard",
+      "--validation-log <file>",
       "--parallel"
     ],
     "multi-review": [
@@ -770,6 +854,9 @@ function commandHelp(command) {
       "--role-pack <pack>",
       "--agent-team plugin|sdk-subagents",
       "--native-structured",
+      "--scorecard",
+      "--validation-log <file>",
+      "--test-summary <file>",
       "--parallel",
       "--sequential",
       "--use-mailbox",
@@ -784,6 +871,9 @@ function commandHelp(command) {
       "--backend cli|sdk",
       "--fallback-model <model>",
       "--json",
+      "--scorecard",
+      "--validation-log <file>",
+      "--rules <file>",
       "--role <role>",
       "--roles <a,b>",
       "--role-pack <pack>",
@@ -799,7 +889,22 @@ function commandHelp(command) {
     ],
     plan: [
       "Usage: claude-companion.mjs plan [options] [focus]",
-      ...common
+      ...common,
+      "--taskset",
+      "--issue-assessment",
+      "--validation-log <file>",
+      "--rules <file>"
+    ],
+    "assisted-review": [
+      "Usage: claude-companion.mjs assisted-review [--scorecard] [--taskset <id>] [--max-review-rounds 1..3] [options] [focus]",
+      ...common,
+      "--scorecard",
+      "--taskset <id>",
+      "--max-review-rounds 1..3",
+      "--validation-log <file>",
+      "--test-summary <file>",
+      "--ci-summary <file>",
+      "--rules <file>"
     ],
     ultrareview: [
       "Usage: claude-companion.mjs ultrareview --confirm-cost [options] [target]",
@@ -810,6 +915,7 @@ function commandHelp(command) {
     "review-gate": [
       "Usage: claude-companion.mjs review-gate [options]",
       "--backend cli|sdk",
+      "--scorecard-summary",
       "--semantic-context off|auto|<provider>"
     ]
   };
@@ -1369,6 +1475,7 @@ function withClaudeOutcome(result = {}) {
     }
   };
   enriched.metadata.outcome = classifyClaudeOutcome(enriched);
+  enriched.metadata.failureCategory = classifyFailureCategory(enriched);
   return enriched;
 }
 
@@ -1548,6 +1655,21 @@ function parseJobIdArg(rawArgs) {
     throw new Error("Missing --job-id value.");
   }
   return positional;
+}
+
+function parseResumePlanArg(rawArgs) {
+  const tokens = normalizeArgv(rawArgs);
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token === "--resume-plan") {
+      const value = tokens[index + 1];
+      if (!value || value.startsWith("--")) {
+        throw new Error("Missing --resume-plan value.");
+      }
+      return value;
+    }
+  }
+  return "";
 }
 
 function parseReservedJobRunArgs(rawArgs) {
@@ -2382,7 +2504,153 @@ function semanticPromptBlock(args) {
 }
 
 function projectInstructionsPromptBlock(args) {
-  return args.projectInstructionsBlock ?? renderProjectInstructionsBlock(process.cwd());
+  if (args.projectInstructionsBlock !== undefined) {
+    return args.projectInstructionsBlock;
+  }
+  const files = [...DEFAULT_PROJECT_INSTRUCTION_FILES, ...(args.rules ?? [])];
+  return renderProjectInstructionsBlock(process.cwd(), { files });
+}
+
+function minifiedJsonFile(relativePath) {
+  const fullPath = path.join(pluginRoot(), relativePath);
+  return JSON.stringify(JSON.parse(fs.readFileSync(fullPath, "utf8")));
+}
+
+function promptPartial(name, variables = {}) {
+  return renderPromptTemplate(pluginRoot(), name, variables);
+}
+
+function scorecardPromptBlock(args) {
+  if (!args.scorecard) {
+    return "";
+  }
+  return promptPartial("scorecard", {
+    SCORECARD_OUTPUT_SCHEMA_JSON: minifiedJsonFile(path.join("schemas", "scorecard-output.schema.json"))
+  });
+}
+
+function tasksetPromptBlock(args) {
+  if (!args.taskset) {
+    return "";
+  }
+  return promptPartial("taskset", {
+    TASKSET_SCHEMA_JSON: minifiedJsonFile(path.join("schemas", "taskset.schema.json"))
+  });
+}
+
+function validationEvidencePromptBlock(args) {
+  if (args.validationEvidenceBlock !== undefined) {
+    return args.validationEvidenceBlock;
+  }
+  const evidence = loadValidationEvidence({
+    cwd: process.cwd(),
+    files: args.validationEvidence ?? []
+  });
+  args.validationEvidenceSummary = {
+    items: evidence.items.length,
+    skipped: evidence.skipped.length,
+    kinds: [...new Set(evidence.items.map((item) => item.kind))]
+  };
+  args.validationEvidenceBlock = renderValidationEvidenceBlock(evidence);
+  return args.validationEvidenceBlock;
+}
+
+function gitNameOnly(args) {
+  if (git(["rev-parse", "--is-inside-work-tree"]).status !== 0) {
+    return [];
+  }
+  const paths = args.paths?.length ? args.paths : args.path ? [args.path] : [];
+  const pathArgs = paths.length ? ["--", ...paths] : [];
+  const results = [
+    git(["diff", "--name-only", ...pathArgs]),
+    git(["diff", "--cached", "--name-only", ...pathArgs]),
+    args.base ? git(["diff", "--name-only", `${args.base}...HEAD`, ...pathArgs]) : null,
+    git(["ls-files", "--others", "--exclude-standard", ...pathArgs])
+  ].filter(Boolean);
+  const names = new Set();
+  for (const result of results) {
+    if (result.status !== 0) {
+      continue;
+    }
+    for (const line of result.stdout.split(/\r?\n/)) {
+      const name = line.trim();
+      if (name) {
+        names.add(name);
+      }
+    }
+  }
+  return [...names];
+}
+
+function isFrontendPath(file) {
+  return /\.(?:css|scss|sass|less|html|tsx|jsx|vue|svelte|astro)$/i.test(file)
+    || /(?:^|\/)(?:app|pages|components|src\/components|src\/app|src\/pages)\//.test(file);
+}
+
+function uiEvidencePromptBlock(args) {
+  if (args.uiEvidenceBlock !== undefined) {
+    return args.uiEvidenceBlock;
+  }
+  const hasProvidedUiEvidence = (args.validationEvidence ?? []).some((entry) => entry.kind === "screenshot-summary");
+  const frontendFiles = gitNameOnly(args).filter(isFrontendPath);
+  args.uiEvidenceBlock = frontendFiles.length
+    ? [
+        "<ui_evidence_policy>",
+        "Classify UI findings as code-inferred, needs-browser-verification, or confirmed-by-provided-evidence.",
+        "Do not claim browser verification unless validation evidence or screenshot summary was provided.",
+        `Provided screenshot or browser evidence: ${hasProvidedUiEvidence ? "yes" : "no"}.`,
+        `Frontend-related changed files: ${frontendFiles.slice(0, 20).join(", ")}`,
+        "</ui_evidence_policy>"
+      ].join("\n")
+    : "";
+  return args.uiEvidenceBlock;
+}
+
+function standardPlanOutputContract() {
+  return [
+    "<output_contract>",
+    "## Observed Facts",
+    "## Inferences",
+    "## Independent Implementation Plan",
+    "## Tests",
+    "## Risks And Blind Spots",
+    "## Reconciliation Checklist",
+    "</output_contract>"
+  ].join("\n");
+}
+
+function reviewOutputContract(args, markdownContract = reviewMarkdownContract, jsonContract = reviewJsonContract) {
+  if (args.scorecard) {
+    return "";
+  }
+  return args.jsonOutput ? jsonContract() : markdownContract();
+}
+
+function tasksetOutputContract(args) {
+  return [
+    tasksetPromptBlock(args),
+    "<output_contract>",
+    "Return exactly one taskset JSON object and no Markdown.",
+    "</output_contract>"
+  ].filter(Boolean).join("\n");
+}
+
+function issueAssessmentOutputContract() {
+  return [
+    "<output_contract>",
+    "Return exactly one JSON object and no Markdown with this shape:",
+    "{",
+    '  "suitable_for_current_session": true,',
+    '  "complexity": "simple|medium|complex",',
+    '  "risk": "low|medium|high",',
+    '  "recommended_quality": "standard|strong|max",',
+    '  "recommend_sdk_subagents": false,',
+    '  "recommend_taskset": true,',
+    '  "blocking_prerequisites": []',
+    "}",
+    "This is advisory only. Do not create branches, assign issues, implement, commit, push, create pull requests, merge, or close issues.",
+    "</output_contract>"
+  ].join("\n");
 }
 
 function escapeXmlText(value) {
@@ -2416,9 +2684,12 @@ function reviewPrompt(kind, args) {
       GIT_CONTEXT: gitContext,
       SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
       PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+      VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+      UI_EVIDENCE_BLOCK: uiEvidencePromptBlock(args),
       ADVERSARIAL_LENSES: adversarialLensSection(adversarialLenses),
       FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
-      OUTPUT_CONTRACT: args.jsonOutput ? adversarialJsonContract() : adversarialVerdictContract()
+      SCORECARD_BLOCK: scorecardPromptBlock(args),
+      OUTPUT_CONTRACT: reviewOutputContract(args, adversarialVerdictContract, adversarialJsonContract)
     });
   }
 
@@ -2426,9 +2697,12 @@ function reviewPrompt(kind, args) {
     GIT_CONTEXT: gitContext,
     SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
     PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    UI_EVIDENCE_BLOCK: uiEvidencePromptBlock(args),
     REVIEW_ROLES_BLOCK: reviewRoles ? `<review_roles>${reviewRoles}</review_roles>` : "",
     FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
-    OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    OUTPUT_CONTRACT: reviewOutputContract(args)
   });
 }
 
@@ -2441,8 +2715,11 @@ function multiReviewRolePrompt(role, args, gitContext) {
     GIT_CONTEXT: gitContext,
     SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
     PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    UI_EVIDENCE_BLOCK: uiEvidencePromptBlock(args),
     FOCUS_BLOCK: focus ? `<focus>${focus}</focus>` : "",
-    OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract()
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    OUTPUT_CONTRACT: reviewOutputContract(args)
   });
 }
 
@@ -2455,8 +2732,10 @@ function planReviewRolePrompt(role, args) {
     ROLE_NAME: escapeXmlText(role.name),
     ROLE_DIRECTIVE: escapeXmlText(role.directive),
     PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
     FOCUS_BLOCK: focus ? `<focus>${escapeXmlText(focus)}</focus>` : "",
-    OUTPUT_CONTRACT: args.jsonOutput ? reviewJsonContract() : reviewMarkdownContract(),
+    SCORECARD_BLOCK: scorecardPromptBlock(args),
+    OUTPUT_CONTRACT: reviewOutputContract(args),
     REVIEWED_FILE_PATH_ATTR: escapeXmlAttribute(reviewedFile),
     REVIEWED_FILE_JSON_PATH: escapeXmlText(JSON.stringify(reviewedFile)),
     PLAN_TEXT_CDATA: escapeCdata(planFile?.text ?? "")
@@ -2468,7 +2747,13 @@ function reviewGateRolePrompt(role, args, gitContext) {
     ROLE_NAME: role.name,
     ROLE_DIRECTIVE: role.directive,
     GIT_CONTEXT: gitContext,
-    SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args)
+    SEMANTIC_CONTEXT_BLOCK: semanticPromptBlock(args),
+    SCORECARD_SUMMARY_BLOCK: args.scorecardSummary ? [
+      "<scorecard_summary_policy>",
+      "If useful, include concise scorecard-style metadata after the first gate line, but the first line must still be ALLOW: or BLOCK:.",
+      "The Stop hook blocks only on BLOCK:, never on numeric scores alone.",
+      "</scorecard_summary_policy>"
+    ].join("\n") : ""
   });
 }
 
@@ -2479,7 +2764,11 @@ function planPrompt(args) {
   return renderPromptTemplate(pluginRoot(), "plan", {
     GIT_CONTEXT: gitContext,
     PROJECT_INSTRUCTIONS_BLOCK: projectInstructionsPromptBlock(args),
-    PLANNING_REQUEST_BLOCK: focus ? `<planning_request>${focus}</planning_request>` : ""
+    VALIDATION_EVIDENCE_BLOCK: validationEvidencePromptBlock(args),
+    UI_EVIDENCE_BLOCK: uiEvidencePromptBlock(args),
+    TASKSET_BLOCK: args.taskset ? tasksetPromptBlock(args) : "",
+    PLANNING_REQUEST_BLOCK: focus ? `<planning_request>${focus}</planning_request>` : "",
+    OUTPUT_CONTRACT: args.taskset ? tasksetOutputContract(args) : args.issueAssessment ? issueAssessmentOutputContract() : standardPlanOutputContract()
   });
 }
 
@@ -3187,7 +3476,8 @@ async function runReviewGate(rawArgs) {
 
   let args;
   try {
-    args = parseArgs(rawArgs);
+    args = parseArgs(rawArgs, { command: "review-gate", rejectUnknownOptions: true });
+    validateNativeModeOptions(args, "review-gate");
     validateBackendArgs(args);
   } catch (error) {
     warnGate(`argument parse failed; allowing stop: ${error.message || String(error)}`);
@@ -3413,6 +3703,108 @@ function reviewGateCacheKey(diffHash, args, roles) {
 
 function parseStructuredReviewResult(stdout, options = {}) {
   return normalizeReviewOutput(extractJsonObject(stdout), options);
+}
+
+function parseScorecardResult(stdout) {
+  return normalizeScorecardOutput(extractJsonObject(stdout));
+}
+
+function structuredErrorKind(stdout) {
+  return String(stdout ?? "").trim() ? "malformed_json" : "empty_output";
+}
+
+function resultWithStructuredError(result, error, stdout = result?.stdout) {
+  return {
+    ...result,
+    status: result?.status === 0 ? 1 : result?.status ?? 1,
+    metadata: {
+      ...(result?.metadata ?? {}),
+      structuredError: structuredErrorKind(stdout),
+      structuredErrorMessage: error?.message ? String(error.message) : String(error)
+    }
+  };
+}
+
+function roleScorecardPayload(role, result) {
+  const structured = result?.metadata?.structuredReview ?? result?.metadata?.structuredScorecard;
+  if (structured?.verdict && structured?.score) {
+    return structured;
+  }
+  if (typeof result?.stdout === "string" && result.stdout.trim()) {
+    return extractJsonObject(result.stdout);
+  }
+  if (result?.verdict && result?.score) {
+    return result;
+  }
+  throw new Error(`Role ${role?.name || "unknown"} did not return a scorecard payload.`);
+}
+
+function aggregateScorecardRoleOutputs(normalizedRoles) {
+  if (!normalizedRoles.length) {
+    throw new Error("multi-review scorecard aggregation requires at least one role result.");
+  }
+  const findings = normalizedRoles
+    .flatMap(({ role, result }) => result.findings.map((finding) => ({ role: role.name, ...finding })))
+    .sort((left, right) => (SCORECARD_SEVERITY_RANK.get(left.severity) ?? 99) - (SCORECARD_SEVERITY_RANK.get(right.severity) ?? 99));
+  const average = Math.round(normalizedRoles.reduce((sum, entry) => sum + entry.result.score.total, 0) / normalizedRoles.length);
+  const threshold = Math.max(...normalizedRoles.map((entry) => Number.isFinite(entry.result.score.threshold) ? entry.result.score.threshold : 85));
+  const dimensions = Object.fromEntries(SCORECARD_DIMENSIONS.map((name) => {
+    const first = normalizedRoles[0].result.score.dimensions[name];
+    return [name, {
+      ...first,
+      score: Math.round(normalizedRoles.reduce((sum, entry) => sum + entry.result.score.dimensions[name].score, 0) / normalizedRoles.length),
+      evidence: normalizedRoles.flatMap((entry) => entry.result.score.dimensions[name].evidence).slice(0, 10)
+    }];
+  }));
+  const blocking = findings.some((finding) => finding.blocking);
+  return {
+    verdict: blocking || average < threshold ? "needs-attention" : "approve",
+    score: { total: average, threshold, dimensions },
+    findings,
+    residual_risks: [...new Set(normalizedRoles.flatMap((entry) => entry.result.residual_risks))],
+    next_steps: [...new Set(normalizedRoles.flatMap((entry) => entry.result.next_steps))],
+    roles: normalizedRoles.map(({ role, result }) => ({
+      role: role.name,
+      verdict: result.verdict,
+      score: {
+        total: result.score.total,
+        threshold: result.score.threshold
+      }
+    }))
+  };
+}
+
+function renderScorecardRoleReview(results) {
+  const errors = [];
+  const normalizedRoles = [];
+  for (const { role, result } of results) {
+    if (result.status !== 0) {
+      errors.push({ role: role.name, message: `Claude exited ${result.status}: ${(result.stderr || result.error || "").trim()}` });
+      continue;
+    }
+    try {
+      normalizedRoles.push({ role, result: normalizeScorecardOutput(roleScorecardPayload(role, result)) });
+    } catch (error) {
+      errors.push({ role: role.name, message: error.message || String(error) });
+    }
+  }
+  if (errors.length) {
+    return {
+      ok: false,
+      text: `Invalid scorecard multi-review output:\n${errors.map((entry) => `- ${entry.role}: ${entry.message}`).join("\n")}\n`,
+      metadata: {
+        structuredError: "malformed_json",
+        structuredErrorRoles: errors
+      }
+    };
+  }
+  const aggregate = aggregateScorecardRoleOutputs(normalizedRoles);
+  return {
+    ok: true,
+    text: `${JSON.stringify(aggregate, null, 2)}\n`,
+    parsedAggregate: aggregate,
+    parsedResults: normalizedRoles
+  };
 }
 
 function renderRoleReviewSections(title, results, roleLabel = "Role") {
@@ -3915,7 +4307,7 @@ async function runRoleReviewWorkflow(command, args, startedAt, options) {
   }
 
   if (args.jsonOutput) {
-    const renderedJson = renderStructuredRoleReview(results);
+    const renderedJson = args.scorecard ? renderScorecardRoleReview(results) : renderStructuredRoleReview(results);
     if (!renderedJson.ok) {
       recordCommandReport(command, reportArgs, {
         status: 1,
@@ -3924,17 +4316,21 @@ async function runRoleReviewWorkflow(command, args, startedAt, options) {
         error: "",
         errorCode: "",
         backend: args.agentTeam === "sdk-subagents" ? "sdk" : undefined,
-        metadata: nativeAggregate?.metadata ?? {}
+        metadata: {
+          ...(nativeAggregate?.metadata ?? {}),
+          ...(renderedJson.metadata ?? {})
+        }
       }, startedAt, undefined, results);
       process.stderr.write(renderedJson.text);
       process.exit(1);
     }
-    let parsedAggregate;
-    try {
-      parsedAggregate = JSON.parse(renderedJson.text);
-    } catch {
-      parsedAggregate = undefined;
-    }
+    const parsedAggregate = renderedJson.parsedAggregate ?? (() => {
+      try {
+        return JSON.parse(renderedJson.text);
+      } catch {
+        return undefined;
+      }
+    })();
     const parsedByRole = new Map((renderedJson.parsedResults ?? [])
       .map(({ role, result }) => [role.name, result]));
     const reportRoleResults = results.map((entry) => ({
@@ -4014,7 +4410,7 @@ async function runClaudeTask(kind, rawArgs) {
   }
   let args;
   try {
-    args = parseArgs(rawArgs);
+    args = parseArgs(rawArgs, { command: kind, rejectUnknownOptions: PROMPT_COMMANDS.has(kind) });
     validateNativeModeOptions(args, kind);
     validateBackendArgs(args);
     validateBackendCompatibleOptions(args);
@@ -4143,6 +4539,47 @@ async function runClaudeTask(kind, rawArgs) {
     recordCommandReport(kind, args, result, startedAt);
     process.stderr.write(claudeFailureDiagnostic(result));
     process.exit(result.status);
+  }
+  if (kind === "plan" && args.taskset) {
+    try {
+      const taskset = saveTaskset(process.cwd(), extractJsonObject(result.stdout), process.env);
+      const payload = {
+        ok: true,
+        tasksetId: taskset.id,
+        statePath: taskset.path,
+        taskset
+      };
+      args.tasksetSummary = {
+        id: taskset.id,
+        subtaskCount: taskset.subtasks.length,
+        statePath: taskset.path
+      };
+      const stdout = `${JSON.stringify(payload, null, 2)}\n`;
+      recordCommandReport(kind, args, { ...result, stdout }, startedAt);
+      process.stdout.write(stdout);
+    } catch (error) {
+      const failed = resultWithStructuredError(result, error);
+      recordCommandReport(kind, args, failed, startedAt);
+      process.stderr.write(`Invalid taskset output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
+  }
+  if (args.scorecard) {
+    try {
+      const parsed = parseScorecardResult(result.stdout);
+      const stdout = `${JSON.stringify(parsed, null, 2)}\n`;
+      recordCommandReport(kind, args, { ...result, stdout }, startedAt, parsed);
+      process.stdout.write(stdout);
+    } catch (error) {
+      const failed = resultWithStructuredError(result, error);
+      recordCommandReport(kind, args, failed, startedAt);
+      process.stderr.write(`Invalid scorecard output: ${error.message || String(error)}\n`);
+      process.stdout.write(result.stdout);
+      process.exit(1);
+    }
+    return;
   }
   if (kind === "adversarial-review" && args.jsonOutput) {
     try {
@@ -4284,6 +4721,155 @@ async function runClaudePlanReview(rawArgs) {
   });
 }
 
+function scorecardRoundSummary(command, scorecard, failureCategory = "") {
+  const blockingFindings = Array.isArray(scorecard?.findings)
+    ? scorecard.findings.filter((finding) => finding.blocking).length
+    : 0;
+  return {
+    command,
+    verdict: scorecard?.verdict ?? "",
+    scoreTotal: Number.isFinite(scorecard?.score?.total) ? scorecard.score.total : null,
+    threshold: Number.isFinite(scorecard?.score?.threshold) ? scorecard.score.threshold : 85,
+    blockingFindings,
+    failureCategory,
+    acceptedFindingIds: []
+  };
+}
+
+function blockingFindingIds(scorecard) {
+  return new Set((scorecard?.findings ?? [])
+    .filter((finding) => finding.blocking)
+    .map((finding) => [
+      finding.severity,
+      finding.file,
+      finding.line,
+      finding.description
+    ].join("|")));
+}
+
+function hasRepeatedBlockingFinding(rounds) {
+  if (rounds.length < 2) {
+    return false;
+  }
+  const previous = rounds.at(-2).blockingFindingIds ?? [];
+  const current = new Set(rounds.at(-1).blockingFindingIds ?? []);
+  return previous.some((id) => current.has(id));
+}
+
+function assistedReviewPrompt(args, round) {
+  const taskset = args.tasksetLoaded?.ok ? args.tasksetLoaded.taskset : null;
+  const tasksetBlock = taskset
+    ? `<assisted_review_taskset trust="untrusted">\n${escapeXmlText(JSON.stringify(taskset, null, 2))}\n</assisted_review_taskset>`
+    : "";
+  return [
+    promptPartial("assisted-review"),
+    `<assisted_review_round>${round}</assisted_review_round>`,
+    tasksetBlock,
+    reviewPrompt("review", args)
+  ].filter(Boolean).join("\n\n");
+}
+
+async function runAssistedReview(rawArgs) {
+  const startedAt = new Date().toISOString();
+  if (await maybeStartBackground("assisted-review", rawArgs)) {
+    return;
+  }
+  let args;
+  try {
+    args = validateCommandNativeModeOptions("assisted-review", rawArgs);
+    validateBackendArgs(args);
+    validateBackendCompatibleOptions(args);
+    args.scorecard = true;
+    args.jsonOutput = true;
+    args.maxReviewRounds = args.maxReviewRounds ?? 2;
+    args.quality = args.quality ?? "auto";
+    if (args.tasksetId) {
+      args.tasksetLoaded = readTaskset(process.cwd(), args.tasksetId, process.env);
+      args.tasksetSummary = {
+        id: args.tasksetId,
+        subtaskCount: args.tasksetLoaded.ok ? args.tasksetLoaded.taskset.subtasks.length : 0,
+        statePath: ""
+      };
+      if (!args.tasksetLoaded.ok) {
+        throw new Error(`Unable to read taskset ${args.tasksetId}: ${args.tasksetLoaded.error}`);
+      }
+    }
+    applyCommandQualityPolicy("review", args);
+    attachSemanticContext(args, { allowed: true, command: "assisted-review" });
+  } catch (error) {
+    console.error(error.message || String(error));
+    process.exit(2);
+  }
+
+  const loopId = `loop-${randomUUID()}`;
+  const rounds = [];
+  let finalAction = { action: "review" };
+  for (let round = 1; round <= args.maxReviewRounds; round += 1) {
+    const prompt = assistedReviewPrompt(args, round);
+    const result = await claudePrintAsync(prompt, {
+      ...args,
+      capacitySurface: "assisted-review",
+      commandName: "assisted-review"
+    });
+    if (isCapacityBlockedResult(result)) {
+      recordCommandReport("assisted-review", args, result, startedAt);
+      writeCapacityBlockedAndExit(result, args);
+    }
+    let scorecard = null;
+    let roundFailureCategory = "";
+    if (result.status === 0) {
+      try {
+        scorecard = parseScorecardResult(result.stdout);
+      } catch (error) {
+        const failed = resultWithStructuredError(result, error);
+        roundFailureCategory = classifyFailureCategory(failed);
+        recordCommandReport("assisted-review", args, failed, startedAt);
+        process.stderr.write(`Invalid assisted-review scorecard output: ${error.message || String(error)}\n`);
+        process.stdout.write(result.stdout);
+        process.exit(1);
+      }
+    } else {
+      roundFailureCategory = classifyFailureCategory(result);
+    }
+    const summary = {
+      ...scorecardRoundSummary("assisted-review", scorecard, roundFailureCategory),
+      blockingFindingIds: scorecard ? [...blockingFindingIds(scorecard)] : []
+    };
+    rounds.push(summary);
+    writeRoundSummary(process.cwd(), loopId, round, summary, process.env);
+    const state = {
+      maxRounds: args.maxReviewRounds,
+      rounds,
+      repeatedBlockingFinding: hasRepeatedBlockingFinding(rounds)
+    };
+    finalAction = nextAssistedReviewAction(state);
+    if (finalAction.action === "stop") {
+      break;
+    }
+  }
+  const latest = rounds.at(-1) ?? {};
+  const payload = {
+    status: finalAction.reason === "threshold_met" ? "approved" : "needs_attention",
+    loopId,
+    rounds: rounds.length,
+    stopReason: finalAction.reason ?? "max_rounds",
+    scoreTotal: latest.scoreTotal ?? null,
+    threshold: latest.threshold ?? 85,
+    blockingFindings: latest.blockingFindings ?? 0,
+    nextSuggestedCommand: "node plugins/claude-for-codex/scripts/claude-companion.mjs review --scorecard --json"
+  };
+  const stdout = `${JSON.stringify(payload, null, 2)}\n`;
+  recordCommandReport("assisted-review", args, {
+    status: payload.status === "approved" ? 0 : 1,
+    stdout,
+    stderr: "",
+    error: "",
+    errorCode: ""
+  }, startedAt, latest);
+  process.stdout.write(stdout);
+  process.exit(payload.status === "approved" ? 0 : 1);
+}
+
 function runClaudeUltrareview(rawArgs) {
   const tokens = normalizeArgv(rawArgs);
   const forwarded = [];
@@ -4351,6 +4937,40 @@ function printJobs() {
 }
 
 function printResult(rawArgs) {
+  const resumePlanJobId = parseResumePlanArg(rawArgs);
+  if (resumePlanJobId) {
+    reapLostJobs(process.cwd());
+    const job = readJob(process.cwd(), resumePlanJobId);
+    const currentFingerprint = workingTreeFingerprint(process.cwd());
+    const reasons = [];
+    if (!job) {
+      reasons.push("job not found");
+    } else if (job.status !== "succeeded") {
+      reasons.push(`job status is ${job.status}`);
+    }
+    if (job?.workspaceFingerprint && job.workspaceFingerprint !== currentFingerprint) {
+      reasons.push("worktree fingerprint changed");
+    }
+    const payload = {
+      ok: Boolean(job),
+      resume: {
+        jobId: resumePlanJobId,
+        safeToResume: Boolean(job && reasons.length === 0),
+        reasons,
+        job: job ? enrichCompanionJob(job) : null,
+        latestSummary: job?.loopId ? (() => {
+          try {
+            return readRoundSummary(process.cwd(), job.loopId, job.round ?? 1, process.env);
+          } catch {
+            return null;
+          }
+        })() : null,
+        nextSuggestedCommand: "claude-companion.mjs review --scorecard --json"
+      }
+    };
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    process.exit(job ? 0 : 1);
+  }
   let jobId;
   try {
     jobId = parseJobIdArg(rawArgs);
@@ -4857,6 +5477,9 @@ switch (command) {
     break;
   case "plan":
     await runClaudeTask("plan", rawArgs);
+    break;
+  case "assisted-review":
+    await runAssistedReview(rawArgs);
     break;
   case "rescue":
     await runClaudeTask("rescue", rawArgs);

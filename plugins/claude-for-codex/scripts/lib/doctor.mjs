@@ -4,6 +4,7 @@ import { backendCapabilities } from "./claude-backend.mjs";
 import { validateClaudeCodePluginPack } from "./claude-plugin-pack.mjs";
 import { hookCompatibilityReport } from "./hook-compat.mjs";
 import { installConsistencyReport } from "./install-consistency.mjs";
+import { loadProjectInstructions } from "./project-instructions.mjs";
 import { inspectResourceGovernor } from "./resource-governor.mjs";
 import { semanticCapabilities } from "./semantic-context.mjs";
 
@@ -49,6 +50,7 @@ export function doctorReport({
     hookFiles: hookFiles(pluginRoot),
     reviewGate: state.reviewGate ?? {},
     semanticProviders: capabilities.semanticContext ?? semanticCapabilities(cwd, env),
+    projectInstructions: loadProjectInstructions(cwd),
     installConsistency: installConsistency.report ?? installConsistencyReport({
       pluginRoot,
       pluginListJson: installConsistency.pluginListJson ?? "",
@@ -81,6 +83,7 @@ export function renderDoctorText(report) {
     `resource governor: ${report.checks.resourceGovernor?.ok === false ? "attention" : "ok"} (${report.checks.resourceGovernor?.lockRootClass ?? "unknown"}, max ${report.checks.resourceGovernor?.effectiveMax ?? "unknown"}, active ${(report.checks.resourceGovernor?.activeLeases ?? []).length})`,
     `hooks: ${(report.checks.hooks.installedEvents ?? []).join(", ")}`,
     `review gate: ${report.checks.reviewGate.enabled ? "enabled" : "disabled"}`,
+    `project instructions: ${(report.checks.projectInstructions?.blocks ?? []).length} loaded, ${(report.checks.projectInstructions?.skipped ?? []).length} skipped`,
     `install: ${report.checks.installConsistency?.ok === false ? "attention" : report.checks.installConsistency?.status || "unknown"}`
   ].join("\n");
 }

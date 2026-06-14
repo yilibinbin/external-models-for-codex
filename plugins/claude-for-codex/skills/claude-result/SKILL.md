@@ -19,3 +19,4 @@ Rules:
 - Treat stored `stdout`/`stderr` as sanitized and capped. If `stdoutTruncated` or `stderrTruncated` is true, tell the user the stored output is shortened and include the byte metadata rather than implying the visible text is complete.
 - If the job is still `running`, preserve `waitTimedOut`, `lifecycle.state`, and progress fields; do not claim the review finished and do not start a replacement review.
 - If the job is not found, report that no tracked job exists for that id in the current workspace.
+- `result --resume-plan <job-id>` is read-only recovery diagnostics. It does not restart Claude; it reports whether the stored job state appears safe to resume and suggests the next manual command.

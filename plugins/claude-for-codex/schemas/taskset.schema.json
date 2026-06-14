@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "source", "title", "createdAt", "updatedAt", "subtasks"],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "id": { "type": "string", "pattern": "^ts-[A-Za-z0-9_-]+$" },
+    "source": { "enum": ["manual", "issue", "diff", "plan"] },
+    "title": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "subtasks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "title", "description", "acceptance_criteria", "risk", "type", "status", "evidence"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^T-[0-9]{3,6}$" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+          "risk": { "enum": ["low", "medium", "high"] },
+          "type": { "enum": ["code", "ui", "docs", "tests", "release", "security"] },
+          "status": { "enum": ["pending", "reviewed", "accepted", "needs-work"] },
+          "evidence": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

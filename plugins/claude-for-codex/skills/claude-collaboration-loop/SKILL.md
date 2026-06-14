@@ -27,7 +27,13 @@ node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" plan "$ARGUMENTS"
 node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" adversarial-review "$ARGUMENTS"
 ```
 
-6. Codex reports:
+6. If the user explicitly asks for a bounded quality-feedback loop, Codex runs:
+
+```bash
+node "${CODEX_PLUGIN_ROOT}/scripts/claude-companion.mjs" assisted-review --scorecard --max-review-rounds 2 "$ARGUMENTS"
+```
+
+7. Codex reports:
    - implemented files,
    - verification commands,
    - Claude findings adopted,
@@ -45,6 +51,7 @@ routing:codex-reconciles-claude
 - Keep Codex responsible for reconciling Claude output before edits.
 - Use this workflow when the user wants Codex and Claude to plan, implement, review, and reconcile together.
 - Keep Claude findings advisory until Codex verifies them against local evidence.
+- Use `assisted-review` only for explicit bounded quality-feedback-loop requests; it does not edit files or run project commands.
 - Do not substitute strong local Claude routing with `claude ultrareview`; ultrareview requires the claude-ultrareview skill and explicit cost confirmation.
 
 User-facing examples:

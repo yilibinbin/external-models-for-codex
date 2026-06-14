@@ -4,6 +4,8 @@
 {{GIT_CONTEXT}}
 {{SEMANTIC_CONTEXT_BLOCK}}
 {{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
+{{UI_EVIDENCE_BLOCK}}
 <rules>
 - Do not edit files.
 - Do not suggest that you are about to apply fixes.
@@ -14,4 +16,5 @@
 - Focus only on this role's directive; do not broaden into unrelated review areas.
 </rules>
 {{FOCUS_BLOCK}}
+{{SCORECARD_BLOCK}}
 {{OUTPUT_CONTRACT}}

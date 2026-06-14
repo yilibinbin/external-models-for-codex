@@ -4,7 +4,7 @@ External Models for Codex is a Codex plugin marketplace for external model CLI w
 
 Included plugins:
 
-- Claude for Codex lets Codex call the local Claude Code CLI for independent review, planning, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates. It also includes a dynamic model alias registry, request-local outcome classification, a global Claude work-slot governor, cheap `doctor --json` diagnostics, and fork-safe CI dogfood.
+- Claude for Codex lets Codex call the local Claude Code CLI for independent review, scorecard review, taskset planning, validation-evidence review, bounded assisted review, multi-role critique, native SDK subagent teams, rescue diagnosis, structured review output, explicit-cost ultrareview, and optional Stop hook gates. It also includes a dynamic model alias registry, request-local outcome classification, a global Claude work-slot governor, cheap `doctor --json` diagnostics, and fork-safe CI dogfood.
 - Gemini for Codex lets Codex call the legacy Gemini CLI (`gemini`) for Gemini-only read-only review, planning, rescue diagnosis, structured review output, and Gemini CLI-native session capability checks.
 - Antigravity for Codex lets Codex call Google Antigravity CLI (`agy`) for mature plugin-managed review workflows: read-only review, adversarial critique, planning, rescue diagnosis, multi-role review, structured reports, role packs, background jobs, mailbox/leases, lifecycle hooks, GitHub Actions workflow rendering, release checks, opt-in real smoke, and an opt-in Stop hook gate with explicit Gemini or Claude model-provider selection.
 
@@ -15,7 +15,7 @@ Natural-language Claude routing rule: users should ask for Claude normally, for 
 Install from GitHub:
 
 ```bash
-codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0
+codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.0
 codex plugin add claude-for-codex@external-models-for-codex
 
 codex plugin marketplace add yilibinbin/external-models-for-codex --ref gemini-for-codex-v0.11.3
@@ -98,6 +98,7 @@ Legacy Gemini CLI resolution order:
 - `claude-adversarial-review`: challenge assumptions, tradeoffs, rollback paths, and hidden failure modes.
 - `claude-plan`: request an independent implementation plan before Codex edits.
 - `claude-plan-review`: asks Claude to review a saved implementation plan file. Native SDK subagents are explicit via `--backend sdk --agent-team sdk-subagents`; ultrareview remains explicit-cost only.
+- `claude-assisted-review`: runs explicit bounded scorecard feedback; Claude reviews, Codex decides and fixes.
 - `claude-multi-review`: run parallel role reviews for correctness, security, tests, release, and adversarial perspectives.
 - `claude-multi-review --backend sdk --agent-team sdk-subagents`: run a Claude native SDK subagent review team.
 - `claude-ultrareview`: run Claude cloud ultrareview only after explicit `--confirm-cost` consent for possible usage-credit billing.
@@ -109,6 +110,8 @@ Legacy Gemini CLI resolution order:
 - `gemini-review`, `gemini-adversarial-review`, `gemini-plan`, `gemini-multi-review`, `gemini-rescue`: Gemini CLI-backed equivalents for Codex-side review. Gemini rescue is read-only. `gemini-review --structured` validates schema-backed findings, `gemini-multi-review` runs parallel role fan-out, and Gemini CLI-only native agent/session flags are capability-gated from the installed CLI.
 - `gemini-mailbox`, `gemini-leases`: inspect sanitized Gemini coordination summaries and advisory path-attention leases.
 - `antigravity-review`, `antigravity-adversarial-review`, `antigravity-plan`, `antigravity-multi-review`, `antigravity-rescue`, `antigravity-review-gate`, `antigravity-github-actions-review`: Antigravity-backed mature plugin-managed review, planning, rescue, Stop gate, and workflow-risk review with explicit Gemini or Claude model-provider selection. Antigravity for Codex uses `agy` only, does not claim Claude SDK, Gemini native-agent, or ultrareview parity, and keeps Claude-through-Antigravity separate from `claude-for-codex`.
+
+Claude for Codex 0.20.0 adds advisory quality-feedback surfaces: `review --scorecard --json`, `multi-review --scorecard --json`, `plan --taskset`, `review --validation-log <file>`, `assisted-review --scorecard --max-review-rounds 2`, and `result --resume-plan <job-id>`. Scorecards are advisory, validation logs are user-provided, and Claude still does not edit files, run project commands, commit, push, create pull requests, merge, close issues, or invoke ultrareview unless the separate explicit ultrareview skill is used.
 
 ## Gemini for Codex
 

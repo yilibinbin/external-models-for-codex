@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.20.0 - 2026-06-14
+
+### Added
+
+- Add opt-in scorecard JSON for review, multi-review, adversarial review, plan-review, and assisted review.
+- Add `plan --taskset` state persisted outside the repository with safe taskset ids and normalized subtasks.
+- Add validation evidence inputs for user/Codex-provided logs and summaries, with redaction, tail truncation, and untrusted XML rendering.
+- Add explicit bounded `assisted-review` for advisory scorecard rounds without automatic fixes, commits, PRs, issue closing, or ultrareview.
+- Add UI evidence classification, issue-assessment planning, read-only resume diagnostics, and expanded `.codex/program.md` / `.codex/review.md` project-rule loading.
+
+### Fixed
+
+- Add canonical failure categories for context overflow, malformed/empty structured output, capacity blocking, model availability, and permission compatibility.
+- Keep scorecard output separate from the existing strict `review --json` schema unless `--scorecard` is present.
+
 ## 0.19.0 - 2026-06-13
 
 ### Added

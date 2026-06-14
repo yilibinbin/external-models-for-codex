@@ -15,9 +15,10 @@ import { validateBuiltInRolePacks } from "./role-packs.mjs";
 import { SECRET_PATTERNS, sanitizeSummary } from "./sanitize.mjs";
 
 const SECRET_ASSIGNMENT_PATTERN = /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']([A-Za-z0-9_./+=:-]{16,})["']/i;
-const DEFAULT_RELEASE_REF = "claude-for-codex-v0.19.0";
+const DEFAULT_RELEASE_REF = "claude-for-codex-v0.20.0";
 const EXPECTED_SKILLS = [
   "claude-adversarial-review",
+  "claude-assisted-review",
   "claude-cancel",
   "claude-collaboration-loop",
   "claude-github-actions-review",
@@ -179,9 +180,9 @@ function checkManifest(root) {
   const changelog = fs.readFileSync(path.join(pluginRoot, "CHANGELOG.md"), "utf8");
   const unreleasedBody = markdownSection(changelog, "Unreleased").trim();
   const checks = [
-    result(manifest.version === "0.19.0", "manifest-version", `version=${manifest.version}`),
-    result(changelog.includes("## 0.19.0"), "changelog-version", "CHANGELOG contains 0.19.0"),
-    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.19.0`"), "readme-current-version", "README current version is 0.19.0"),
+    result(manifest.version === "0.20.0", "manifest-version", `version=${manifest.version}`),
+    result(changelog.includes("## 0.20.0"), "changelog-version", "CHANGELOG contains 0.20.0"),
+    result(fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8").includes("Current version: `0.20.0`"), "readme-current-version", "README current version is 0.20.0"),
     result(unreleasedBody.length === 0, "changelog-unreleased-empty", unreleasedBody ? "Unreleased contains entries" : ""),
     result(!Object.prototype.hasOwnProperty.call(manifest, "hooks"), "manifest-no-hooks-field"),
     result(manifest.repository === "https://github.com/yilibinbin/external-models-for-codex", "repository-url", manifest.repository)
@@ -200,7 +201,7 @@ function checkVersionSurfacesCurrent(root) {
     return [result(false, "version-surfaces-current", `manifest read failed: ${error.message || String(error)}`)];
   }
   const version = codexManifest.version;
-  const expectedVersion = "0.19.0";
+  const expectedVersion = "0.20.0";
   const releaseRef = `claude-for-codex-v${version}`;
   const pluginReadme = fs.readFileSync(path.join(pluginRoot, "README.md"), "utf8");
   const releaseRefFiles = [
@@ -297,17 +298,26 @@ function checkManifestMetadataCurrent(root) {
   const capabilities = Array.isArray(iface.capabilities) ? iface.capabilities : [];
   const prompts = Array.isArray(iface.defaultPrompt) ? iface.defaultPrompt : [];
   const requiredCapabilities = [
+    "Optional scorecard review JSON",
+    "Taskset planning state",
+    "Validation evidence ingestion",
+    "Bounded assisted review",
     "Saved implementation plan review",
     "Opt-in Claude Code native reviewer plugin pack",
     "Renderer-validated Claude Code Markdown agents"
   ];
-  const ok = String(manifest.description ?? "").includes("saved-plan review")
+  const ok = String(manifest.description ?? "").includes("scorecard review")
+    && String(manifest.description ?? "").includes("taskset planning")
+    && String(manifest.description ?? "").includes("bounded assisted review")
+    && String(manifest.description ?? "").includes("saved-plan review")
     && String(manifest.description ?? "").includes("opt-in Claude Code native review agents")
     && String(iface.longDescription ?? "").includes("first-class plan-review command")
+    && String(iface.longDescription ?? "").includes("scorecard-based quality review")
+    && String(iface.longDescription ?? "").includes("bounded assisted review loops")
     && String(iface.longDescription ?? "").includes("opt-in Claude Code plugin pack")
     && requiredCapabilities.every((capability) => capabilities.includes(capability))
     && prompts.some((prompt) => String(prompt).includes("saved implementation plan"));
-  return [result(ok, "manifest-metadata-current", ok ? "marketplace metadata mentions plan-review and native plugin pack" : "manifest metadata missing plan-review/native plugin pack copy")];
+  return [result(ok, "manifest-metadata-current", ok ? "marketplace metadata mentions scorecard/taskset/assisted-review, plan-review, and native plugin pack" : "manifest metadata missing scorecard/taskset/assisted-review/plan-review/native plugin pack copy")];
 }
 
 function checkClaudeNativeUniversality(root) {
@@ -461,6 +471,22 @@ function checkNativeReleaseAssets(root) {
     ),
     result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "install-consistency.mjs")), "install-consistency-module"),
     result(fs.existsSync(path.join(pluginRoot, "scripts", "lib", "project-instructions.mjs")), "project-instructions-module"),
+    result(fs.existsSync(path.join(pluginRoot, "schemas", "scorecard-output.schema.json")), "scorecard-schema"),
+    result(fs.existsSync(path.join(pluginRoot, "schemas", "taskset.schema.json")), "taskset-schema"),
+    result(
+      companion.includes('"assisted-review"') &&
+        fs.existsSync(path.join(pluginRoot, "skills", "claude-assisted-review", "SKILL.md")),
+      "assisted-review-command",
+      "assisted-review command and skill are present"
+    ),
+    result(
+      !hooks.includes("assisted-review") &&
+        !hookWrapper.includes("assisted-review") &&
+        !hooks.includes("ultrareview") &&
+        !hookWrapper.includes("ultrareview"),
+      "review-gate-no-assisted-or-ultrareview",
+      "Stop hook remains conservative"
+    ),
     result(qualityPolicy.includes("explanation:"), "quality-policy-explanation"),
     result(
       ["review.md", "multi-review-role.md", "adversarial-review.md", "plan.md", "plan-review-role.md", "rescue.md"].every((prompt) =>
@@ -469,6 +495,15 @@ function checkNativeReleaseAssets(root) {
       "project-instructions-prompts"
     ),
     result(fs.existsSync(ultrareviewSkill), "ultrareview-skill", "claude-ultrareview"),
+    result(
+      docsJoined.includes("review --scorecard --json") &&
+        docsJoined.includes("plan --taskset") &&
+        docsJoined.includes("assisted-review --scorecard") &&
+        docsJoined.toLowerCase().includes("validation logs are user-provided") &&
+        docsJoined.toLowerCase().includes("scorecards are advisory"),
+      "autoresearch-quality-loop-docs",
+      "docs mention scorecards, tasksets, validation evidence, and assisted-review boundaries"
+    ),
     result(
       companion.includes("--agent-team") &&
         companion.includes("sdk-subagents") &&
@@ -1050,9 +1085,12 @@ function checkPrompts(root) {
   const { pluginRoot } = resolveLayout(root);
   const promptDir = path.join(pluginRoot, "prompts");
   const prompts = fs.readdirSync(promptDir).filter((name) => name.endsWith(".md"));
+  const partialPrompts = new Set(["assisted-review.md", "scorecard.md", "taskset.md"]);
   return prompts.map((prompt) => {
     const text = fs.readFileSync(path.join(promptDir, prompt), "utf8");
-    return result(text.includes("<task>") && text.includes("{{"), `prompt-${prompt}`);
+    const hasTask = text.includes("<task>") || partialPrompts.has(prompt);
+    const hasTemplateVariable = text.includes("{{") || prompt === "assisted-review.md";
+    return result(hasTask && hasTemplateVariable, `prompt-${prompt}`);
   });
 }
 

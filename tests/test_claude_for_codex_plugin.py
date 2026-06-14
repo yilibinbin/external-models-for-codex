@@ -506,6 +506,285 @@ def test_plan_prompt_includes_project_instructions_and_escapes(tmp_path):
     assert "Plan rule: inspect &lt;/task&gt; boundaries." in prompt
 
 
+def valid_scorecard_payload(total=100, verdict="approve"):
+    return {
+        "verdict": verdict,
+        "score": {
+            "total": total,
+            "threshold": 85,
+            "dimensions": {
+                "correctness": {"weight": 0.35, "score": total, "evidence": []},
+                "tests": {"weight": 0.25, "score": total, "evidence": [], "exempt": False, "exemption_reason": ""},
+                "code_quality": {"weight": 0.20, "score": total, "evidence": []},
+                "security": {"weight": 0.10, "score": total, "evidence": []},
+                "performance": {"weight": 0.10, "score": total, "evidence": []},
+            },
+        },
+        "findings": [],
+        "residual_risks": [],
+        "next_steps": [],
+    }
+
+
+def test_claude_scorecard_recomputes_total_and_rejects_bad_shapes():
+    module_uri = (PLUGIN / "scripts" / "lib" / "scorecard.mjs").as_uri()
+    payload = valid_scorecard_payload(total=100)
+    payload["score"]["dimensions"]["correctness"]["score"] = 80
+    payload["score"]["dimensions"]["tests"]["score"] = 60
+    payload["score"]["dimensions"]["code_quality"]["score"] = 90
+    payload["findings"] = [{
+        "severity": "high",
+        "blocking": True,
+        "file": "plugins/claude-for-codex/scripts/lib/example.mjs",
+        "line": 12,
+        "description": "Missing guard",
+        "evidence": "Changed branch lacks validation",
+        "recommendation": "Add validation before writing state",
+    }]
+    code = f"""
+import {{ normalizeScorecardOutput }} from {json.dumps(module_uri)};
+const normalized = normalizeScorecardOutput({json.dumps(payload)});
+if (normalized.score.total !== 81) throw new Error(`expected recomputed total 81, got ${{normalized.score.total}}`);
+if (!normalized.findings[0].blocking) throw new Error("blocking finding was not preserved");
+for (const bad of [
+  {{ ...{json.dumps(payload)}, extra: true }},
+  {{ ...{json.dumps(payload)}, findings: [{{...{json.dumps(payload["findings"][0])}, severity: "banana"}}] }},
+  {{ ...{json.dumps(payload)}, findings: [{{...{json.dumps(payload["findings"][0])}, evidence: ""}}] }},
+]) {{
+  let failed = false;
+  try {{ normalizeScorecardOutput(bad); }} catch {{ failed = true; }}
+  if (!failed) throw new Error("bad scorecard shape was accepted");
+}}
+console.log(JSON.stringify(normalized));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_validation_log_is_redacted_and_tail_truncated(tmp_path):
+    log = tmp_path / "validation.log"
+    log.write_text(("line\n" * 2000) + f"password='1234567890abcdef'\nghp_1234567890abcdef1234567890\n{tmp_path}/secret\nFAIL final error\n", encoding="utf8")
+    module_uri = (PLUGIN / "scripts" / "lib" / "validation-evidence.mjs").as_uri()
+    code = f"""
+import {{ loadValidationEvidence, renderValidationEvidenceBlock }} from {json.dumps(module_uri)};
+const evidence = loadValidationEvidence({{ cwd: {json.dumps(str(tmp_path))}, files: [{{ kind: "validation-log", file: "validation.log" }}], maxBytes: 4096 }});
+if (!evidence.items[0].truncated) throw new Error("expected truncation");
+if (!evidence.items[0].text.startsWith("...<truncated>")) throw new Error("truncation marker missing");
+if (evidence.items[0].text.includes("1234567890abcdef") || evidence.items[0].text.includes("ghp_")) throw new Error("secret was not redacted");
+if (!evidence.items[0].text.includes("<redacted")) throw new Error("redaction marker missing");
+if (!evidence.items[0].text.includes("FAIL final error")) throw new Error("tail error missing");
+const rendered = renderValidationEvidenceBlock(evidence);
+if (!rendered.includes('trust="untrusted"')) throw new Error("trust marker missing");
+console.log(JSON.stringify(evidence));
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_review_scorecard_uses_scorecard_contract(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--scorecard", "--json"],
+        extra_env={"FAKE_CLAUDE_STDOUT": json.dumps(valid_scorecard_payload())},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["score"]["total"] == 100
+    assert "scorecard_schema_json" in prompt
+    assert '"required":["verdict","score","findings","residual_risks","next_steps"]' in prompt
+
+
+def test_plan_taskset_persists_under_plugin_data(tmp_path):
+    taskset = {
+        "schema_version": 1,
+        "id": "ts-test",
+        "source": "plan",
+        "title": "Plan",
+        "createdAt": "2026-06-14T00:00:00.000Z",
+        "updatedAt": "2026-06-14T00:00:00.000Z",
+        "subtasks": [{
+            "id": "T-001",
+            "title": "Review scorecard",
+            "description": "Verify scorecard wiring",
+            "acceptance_criteria": ["scorecard JSON validates"],
+            "risk": "medium",
+            "type": "tests",
+            "status": "pending",
+            "evidence": [],
+        }],
+    }
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--taskset", "Plan this feature."],
+        command="plan",
+        extra_env={
+            "FAKE_CLAUDE_STDOUT": json.dumps(taskset),
+            "CLAUDE_PLUGIN_DATA": str(tmp_path / "plugin-data"),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["tasksetId"] == "ts-test"
+    assert payload["statePath"].startswith(str(tmp_path / "plugin-data"))
+    assert not (pathlib.Path(payload["statePath"]).is_relative_to(tmp_path / "repo") if hasattr(pathlib.Path(payload["statePath"]), "is_relative_to") else False)
+    assert "taskset_schema_json" in prompt
+
+
+def test_codex_project_rules_defaults_and_explicit_rules(tmp_path):
+    def setup(repo):
+        (repo / "program.md").write_text("root program should not load by default\n", encoding="utf8")
+        codex_dir = repo / ".codex"
+        codex_dir.mkdir()
+        (codex_dir / "program.md").write_text("codex program loads\n", encoding="utf8")
+
+    result, prompt, _argv = run_fake_claude_review(tmp_path, ["--scope", "working-tree"], setup_repo=setup)
+    assert result.returncode == 0, result.stderr
+    assert "codex program loads" in prompt
+    assert "root program should not load by default" not in prompt
+
+    explicit_root = tmp_path / "explicit"
+    explicit_root.mkdir()
+    explicit, explicit_prompt, _argv = run_fake_claude_review(
+        explicit_root,
+        ["--scope", "working-tree", "--rules", "program.md"],
+        setup_repo=setup,
+    )
+    assert explicit.returncode == 0, explicit.stderr
+    assert "root program should not load by default" in explicit_prompt
+
+
+def test_ui_evidence_policy_is_rendered_for_frontend_changes(tmp_path):
+    def setup(repo):
+        src = repo / "src" / "components"
+        src.mkdir(parents=True)
+        (src / "Widget.tsx").write_text("export function Widget(){ return <div /> }\n", encoding="utf8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True, text=True)
+        subprocess.run(["git", "commit", "-m", "ui base"], cwd=repo, check=True, capture_output=True, text=True)
+        (src / "Widget.tsx").write_text("export function Widget(){ return <button>Go</button> }\n", encoding="utf8")
+
+    result, prompt, _argv = run_fake_claude_review(tmp_path, ["--scope", "working-tree"], setup_repo=setup)
+    assert result.returncode == 0, result.stderr
+    assert "<ui_evidence_policy>" in prompt
+    assert "needs-browser-verification" in prompt
+    assert "Widget.tsx" in prompt
+
+
+def test_plan_issue_assessment_is_advisory_json_contract(tmp_path):
+    assessment = {
+        "suitable_for_current_session": True,
+        "complexity": "medium",
+        "risk": "medium",
+        "recommended_quality": "strong",
+        "recommend_sdk_subagents": False,
+        "recommend_taskset": True,
+        "blocking_prerequisites": [],
+    }
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--issue-assessment", "Assess this issue."],
+        command="plan",
+        extra_env={"FAKE_CLAUDE_STDOUT": json.dumps(assessment)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["recommended_quality"] == "strong"
+    assert "suitable_for_current_session" in prompt
+    assert "Do not create branches" in prompt
+
+
+def test_failure_category_classifier_covers_new_categories():
+    module_uri = (PLUGIN / "scripts" / "lib" / "outcome-classifier.mjs").as_uri()
+    code = f"""
+import {{ classifyFailureCategory }} from {json.dumps(module_uri)};
+const cases = [
+  [{{ status: 1, error: "ETIMEDOUT" }}, "timeout"],
+  [{{ status: 1, stderr: "Permission deny rule \\"MultiEdit\\" matches no known tool." }}, "permission_compat"],
+  [{{ status: 1, stderr: "maximum context length exceeded" }}, "context_overflow"],
+  [{{ status: 1, metadata: {{ structuredError: "empty_output" }} }}, "empty_output"],
+  [{{ status: 1, metadata: {{ structuredError: "malformed_json" }} }}, "malformed_json"],
+  [{{ status: "capacity_blocked" }}, "capacity_blocked"],
+  [{{ status: 1, stderr: "model unavailable" }}, "model_unavailable"],
+];
+for (const [input, expected] of cases) {{
+  const actual = classifyFailureCategory(input);
+  if (actual !== expected) throw new Error(`${{JSON.stringify(input)}} => ${{actual}}, expected ${{expected}}`);
+}}
+console.log("ok");
+"""
+    result = subprocess.run([NODE, "--input-type=module", "-e", code], cwd=ROOT, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_plan_review_scorecard_is_allowed(tmp_path):
+    scorecard = valid_scorecard_payload()
+    scorecard["score"]["dimensions"]["tests"]["exempt"] = True
+    scorecard["score"]["dimensions"]["tests"]["exemption_reason"] = "plan-only review"
+    result, prompts, _argvs, _repo, _capture, _env = run_fake_claude_plan_review(
+        tmp_path,
+        ["--scorecard", "--json", "--roles", "correctness"],
+        fake_stdout=json.dumps(scorecard),
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["score"]["total"] == 100
+    assert "scorecard_schema_json" in prompts[0]
+
+
+def test_multi_review_scorecard_aggregates_roles(tmp_path):
+    by_role = {
+        "correctness": valid_scorecard_payload(100),
+        "security": valid_scorecard_payload(80, verdict="needs-attention"),
+    }
+    by_role["security"]["findings"] = [{
+        "severity": "high",
+        "blocking": True,
+        "file": "working.txt",
+        "line": 1,
+        "description": "Security blocker",
+        "evidence": "role evidence",
+        "recommendation": "Fix it",
+    }]
+    result, prompts, _argvs = run_fake_claude_multi_review(
+        tmp_path,
+        ["--roles", "correctness,security", "--scorecard", "--json"],
+        extra_env={"JSON_BY_ROLE": json.dumps(by_role)},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["verdict"] == "needs-attention"
+    assert payload["score"]["total"] == 90
+    assert payload["findings"][0]["role"] == "security"
+    assert all("scorecard_schema_json" in prompt for prompt in prompts)
+
+
+def test_assisted_review_is_bounded_and_advisory(tmp_path):
+    result, prompt, _argv = run_fake_claude_review(
+        tmp_path,
+        ["--max-review-rounds", "1", "Review until threshold."],
+        command="assisted-review",
+        extra_env={"FAKE_CLAUDE_STDOUT": json.dumps(valid_scorecard_payload())},
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "approved"
+    assert payload["rounds"] == 1
+    assert "assisted_review_policy" in prompt
+    assert "Do not edit files" in prompt
+
+
+def test_result_resume_plan_is_read_only_for_missing_job(tmp_path):
+    runtime = PLUGIN / "scripts" / "claude-companion.mjs"
+    result = subprocess.run(
+        [NODE, str(runtime), "result", "--resume-plan", "job-missing"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 1
+    payload = json.loads(result.stdout)
+    assert payload["resume"]["jobId"] == "job-missing"
+    assert payload["resume"]["safeToResume"] is False
+
+
 def test_job_lifecycle_helpers_classify_liveness_and_parse_limits(tmp_path):
     lifecycle = PLUGIN / "scripts" / "lib" / "job-lifecycle.mjs"
     script = f"""
@@ -5533,7 +5812,7 @@ def test_plugin_manifest_is_valid():
     manifest_path = PLUGIN / ".codex-plugin" / "plugin.json"
     data = json.loads(manifest_path.read_text())
     assert data["name"] == "claude-for-codex"
-    assert data["version"] == "0.19.0"
+    assert data["version"] == "0.20.0"
     assert data["skills"] == "./skills/"
     assert "hooks" not in data
     assert data["interface"]["displayName"] == "Claude for Codex"
@@ -5548,12 +5827,12 @@ def test_plugin_manifest_is_valid():
 
 def test_claude_manifest_version_matches_release():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.19.0"
+    assert manifest["version"] == "0.20.0"
 
 
 def test_version_and_docs_describe_forwarding_and_mcp():
     manifest = json.loads((PLUGIN / ".codex-plugin" / "plugin.json").read_text(encoding="utf8"))
-    assert manifest["version"] == "0.19.0"
+    assert manifest["version"] == "0.20.0"
 
     readme = (PLUGIN / "README.md").read_text(encoding="utf8")
     root_readme = (ROOT / "README.md").read_text(encoding="utf8")
@@ -5624,7 +5903,7 @@ def test_plugin_stop_hook_manifest_is_autodiscoverable():
 def test_runtime_has_required_commands():
     runtime = PLUGIN / "scripts" / "claude-companion.mjs"
     text = runtime.read_text()
-    for command in ["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "plan-review", "ultrareview", "plan", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "native-plugin", "reserve-job", "run-reserved-job", "subagent-command"]:
+    for command in ["setup", "capabilities", "doctor", "review", "adversarial-review", "multi-review", "plan-review", "ultrareview", "plan", "assisted-review", "status", "review-gate", "jobs", "result", "cancel", "rescue", "report", "release-check", "github-actions", "roles", "mailbox", "leases", "native-plugin", "reserve-job", "run-reserved-job", "subagent-command"]:
         assert re.search(rf'case "{re.escape(command)}"', text), command
     assert "claude" in text
     assert "--print" in text or "-p" in text
@@ -5634,7 +5913,7 @@ def test_runtime_has_required_commands():
 
 
 def test_prompt_templates_and_review_schema_are_packaged():
-    expected_prompts = {
+    expected_full_prompts = {
         "review.md",
         "adversarial-review.md",
         "multi-review-role.md",
@@ -5643,12 +5922,22 @@ def test_prompt_templates_and_review_schema_are_packaged():
         "plan.md",
         "rescue.md",
     }
+    expected_prompt_partials = {
+        "assisted-review.md",
+        "scorecard.md",
+        "taskset.md",
+    }
+    expected_prompts = expected_full_prompts | expected_prompt_partials
     prompt_dir = PLUGIN / "prompts"
     assert {path.name for path in prompt_dir.glob("*.md")} == expected_prompts
-    for prompt in expected_prompts:
+    for prompt in expected_full_prompts:
         text = (prompt_dir / prompt).read_text(encoding="utf8")
         assert "<task>" in text
         assert "{{" in text
+        assert "</output>" not in text
+    for prompt in expected_prompt_partials:
+        text = (prompt_dir / prompt).read_text(encoding="utf8")
+        assert "{{" in text or prompt == "assisted-review.md"
         assert "</output>" not in text
     gate_template = (prompt_dir / "review-gate-role.md").read_text(encoding="utf8")
     assert "{{ROLE_NAME}}" in gate_template
@@ -10818,11 +11107,11 @@ def test_release_check_covers_claude_native_universality():
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.19.0"
+    assert checks["manifest-version"]["detail"] == "version=0.20.0"
     assert checks["changelog-version"]["ok"] is True
     assert checks["readme-current-version"]["ok"] is True
     assert checks["version-surfaces-current"]["ok"] is True
-    assert "releaseRef=claude-for-codex-v0.19.0" in checks["version-surfaces-current"]["detail"]
+    assert "releaseRef=claude-for-codex-v0.20.0" in checks["version-surfaces-current"]["detail"]
     assert "layout=repo" in checks["version-surfaces-current"]["detail"]
     assert checks["no-stale-release-ref"]["ok"] is True
     assert checks["native-agent-profiles"]["ok"] is True
@@ -10870,7 +11159,7 @@ def test_release_check_rejects_stale_release_ref_outside_changelog(tmp_path):
 
 
 def test_release_check_rejects_noncurrent_same_minor_patch_release_ref(tmp_path):
-    for bad_ref in ("0.19.0", "0.19.2"):
+    for bad_ref in ("0.20.0", "0.19.2"):
         plugin_only = tmp_path / f"claude-for-codex-{bad_ref.replace('.', '-')}"
         shutil.copytree(PLUGIN, plugin_only, ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__"))
         for manifest in [
@@ -11015,7 +11304,7 @@ def test_release_check_knows_current_claude_native_assets():
     payload = json.loads(result.stdout)
     assert payload["ok"] is True
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["manifest-version"]["detail"] == "version=0.19.0"
+    assert checks["manifest-version"]["detail"] == "version=0.20.0"
     assert "claude-ultrareview" in checks["skill-inventory"]["detail"]
     detail = " ".join(check.get("detail", "") for check in payload["checks"])
     assert "claude-ultrareview" in detail
@@ -11260,7 +11549,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.19.0"],
+        [NODE, str(runtime), "release-check", "--remote-install", "--ref", "claude-for-codex-v0.20.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -11269,11 +11558,11 @@ raise SystemExit(1)
 
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text(encoding="utf8").splitlines()]
-    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.19.0"] in calls
+    assert ["plugin", "marketplace", "add", "yilibinbin/external-models-for-codex", "--ref", "claude-for-codex-v0.20.0"] in calls
     assert ["plugin", "list", "--json"] in calls
     payload = json.loads(result.stdout)
     checks = {check["name"]: check for check in payload["checks"]}
-    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.19.0"
+    assert checks["remote-install-smoke"]["detail"] == "installed ref=claude-for-codex-v0.20.0"
     assert checks["remote-install-plugin-list-schema"]["ok"] is True
     assert checks["remote-install-plugin-list-schema"]["detail"] == f"installed root={installed_plugin}"
 
@@ -11317,7 +11606,7 @@ raise SystemExit(1)
     env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
 
     result = subprocess.run(
-        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.19.0"],
+        [NODE, str(runtime), "release-check", "--require-remote-install", "--ref", "claude-for-codex-v0.20.0"],
         cwd=ROOT,
         env=env,
         capture_output=True,
@@ -11353,7 +11642,7 @@ def test_github_actions_render_is_safe_and_does_not_write(tmp_path):
     assert "contents: read" in text
     assert "pull-requests: write" in text
     assert "checks: write" not in text
-    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.19.0" in text
+    assert "codex plugin marketplace add yilibinbin/external-models-for-codex --ref claude-for-codex-v0.20.0" in text
     assert "codex plugin add claude-for-codex@external-models-for-codex" in text
     assert "codex plugin list --json" in text
     assert "CLAUDE_PLUGIN_ROOT=$CLAUDE_PLUGIN_ROOT" in text
@@ -11624,7 +11913,7 @@ def test_github_actions_init_write_and_force(tmp_path):
     )
     assert write.returncode == 0, write.stderr
     assert workflow.exists()
-    assert "claude-for-codex-v0.19.0" in workflow.read_text(encoding="utf8")
+    assert "claude-for-codex-v0.20.0" in workflow.read_text(encoding="utf8")
 
     overwrite = subprocess.run(
         [NODE, str(runtime), "github-actions", "init", "--write"],
@@ -11712,7 +12001,7 @@ def test_github_actions_validate_rejects_mutable_main_and_local_paths(tmp_path):
     )
     assert rendered.returncode == 0, rendered.stderr
     workflow.write_text(
-        rendered.stdout.replace("--ref claude-for-codex-v0.19.0", "--ref main") + "\n# /Users/fanghao/leak\n",
+        rendered.stdout.replace("--ref claude-for-codex-v0.20.0", "--ref main") + "\n# /Users/fanghao/leak\n",
         encoding="utf8",
     )
 
@@ -11822,7 +12111,7 @@ def test_release_check_ci_simulate_passes():
     assert checks["quality-policy-assets"]["ok"] is True
     assert checks["quality-top-model-policy"]["ok"] is True
     assert checks["quality-no-concrete-model-defaults"]["ok"] is True
-    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.19.0"
+    assert checks["github-actions-current-release-ref"]["detail"] == "claude-for-codex-v0.20.0"
 
 
 def test_empty_jobs_result_and_cancel_are_isolated_to_temp_plugin_data(tmp_path):
@@ -14983,6 +15272,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
     skills = sorted((PLUGIN / "skills").glob("*/SKILL.md"))
     expected_commands = {
         "claude-adversarial-review": "adversarial-review",
+        "claude-assisted-review": "assisted-review",
             "claude-cancel": "cancel",
             "claude-collaboration-loop": "plan",
         "claude-github-actions-review": "github-actions",
@@ -15002,6 +15292,7 @@ def test_all_skills_have_frontmatter_and_runtime_call():
     }
     assert {p.parent.name for p in skills} == {
         "claude-adversarial-review",
+        "claude-assisted-review",
         "claude-cancel",
         "claude-collaboration-loop",
             "claude-github-actions-review",
