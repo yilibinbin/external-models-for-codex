@@ -1,5 +1,8 @@
 <task>Run an adversarial read-only code and design review.</task>
 {{GIT_CONTEXT}}
+{{GEMINI_CONTEXT}}
+{{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
 {{ADVERSARIAL_LENSES}}
 <scale_guidance>
 If the diff is small, emphasize Skeptic findings.
@@ -23,4 +26,5 @@ Small means fewer than 50 changed lines across one or two files; medium means ro
 - Use REJECT when high-severity findings have strong evidence or consensus across lenses.
 </rules>
 {{FOCUS}}
+{{SCORECARD_BLOCK}}
 {{OUTPUT_CONTRACT}}

@@ -1,7 +1,7 @@
 {
   "name": "antigravity-for-codex",
-  "version": "0.6.1",
-  "description": "Use Antigravity CLI from Codex for mature plugin-managed review, planning, reports, jobs, GitHub Actions, release checks, and opt-in Stop gates with explicit Gemini or Claude model selection.",
+  "version": "0.7.0",
+  "description": "Use Antigravity CLI from Codex for mature plugin-managed review, scorecard quality loops, planning, reports, jobs, GitHub Actions, release checks, and explicit Gemini or Claude model selection.",
   "author": {
     "name": "fanghao",
     "url": "https://github.com/yilibinbin"
@@ -26,12 +26,14 @@
   "interface": {
     "displayName": "Antigravity for Codex",
     "shortDescription": "Antigravity CLI reviews, planning, and stop-gate workflows for Codex.",
-    "longDescription": "Antigravity for Codex connects Codex to the local Antigravity CLI (`agy`) for mature plugin-managed workflows: independent read-only review, adversarial critique, implementation planning, read-only rescue diagnosis, multi-role review fan-out, structured reports, role packs, background jobs, advisory mailbox and leases, lifecycle hooks, GitHub Actions workflow rendering and validation, release checks, opt-in real smoke, and an opt-in Stop hook review gate. It supports explicit model-provider switching between Gemini and Claude models exposed by Antigravity. Claude-through-Antigravity remains separate from claude-for-codex, and this plugin stays within the `agy` command surface. Codex remains the implementation authority; Antigravity provides a separate reviewer or planner perspective.",
+    "longDescription": "Antigravity for Codex connects Codex to the local Antigravity CLI (`agy`) for mature plugin-managed workflows: independent read-only review, normalized scorecard review, taskset planning, plan-file review, bounded assisted-review quality loops, adversarial critique, implementation planning, read-only rescue diagnosis, multi-role review fan-out, structured reports, role packs, background jobs, advisory mailbox and leases, lifecycle hooks, GitHub Actions workflow rendering and validation, release checks, opt-in real smoke, and an opt-in Stop hook review gate. It supports explicit model-provider switching between Gemini and Claude models exposed by Antigravity. Gemini remains the default provider; Claude-through-Antigravity remains separate from claude-for-codex, and this plugin stays within the `agy` command surface. Codex remains the implementation authority; Antigravity provides a separate reviewer or planner perspective.",
     "developerName": "fanghao",
     "category": "Productivity",
     "capabilities": [
       "Read-only Antigravity CLI review",
       "Explicit Gemini or Claude model selection",
+      "Normalized scorecard quality loops",
+      "Taskset planning and plan-file review",
       "Adversarial review",
       "Implementation planning",
       "Read-only rescue diagnosis",
@@ -49,7 +51,7 @@
     "defaultPrompt": [
       "Use Antigravity to review the current git changes with the default Gemini model.",
       "Use Antigravity with a Claude model to challenge this implementation plan.",
-      "Run a multi-role Antigravity review across correctness, security, tests, release, and adversarial perspectives."
+      "Run a bounded Antigravity assisted-review scorecard loop."
     ],
     "websiteURL": "https://github.com/yilibinbin/external-models-for-codex",
     "brandColor": "#0F766E",

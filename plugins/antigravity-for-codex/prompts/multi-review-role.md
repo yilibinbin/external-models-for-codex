@@ -5,6 +5,8 @@ Model provider: {{MODEL_PROVIDER}}.
 Model: {{MODEL}}
 Git context:
 {{GIT_CONTEXT}}
+{{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
 <rules>
 - Do not edit files; return findings only.
 - Put findings first, ordered by severity.
@@ -14,3 +16,5 @@ Git context:
 - Focus only on this role's directive; do not broaden into unrelated review areas.
 </rules>
 {{FOCUS_BLOCK}}
+{{SCORECARD_BLOCK}}
+{{OUTPUT_CONTRACT}}

@@ -1,6 +1,6 @@
 # Antigravity for Codex
 
-Version: 0.6.1
+Version: 0.7.0
 
 Codex plugin that invokes the local Antigravity CLI (`agy`) for independent read-only review, planning, adversarial critique, rescue diagnosis, multi-role review, structured reports, background jobs, advisory coordination, GitHub Actions workflow rendering, release checks, and an opt-in Stop hook gate.
 
@@ -91,6 +91,8 @@ The plugin rejects GPT/OpenAI model labels and never passes `--dangerously-skip-
 - `adversarial-review`
 - `multi-review`
 - `plan`
+- `plan-review`
+- `assisted-review`
 - `rescue`
 - `review-gate`
 - `real-smoke`
@@ -106,6 +108,21 @@ The plugin rejects GPT/OpenAI model labels and never passes `--dangerously-skip-
 - `mailbox`
 - `leases`
 - `github-actions`
+
+## Quality Loop
+
+Antigravity for Codex includes a provider-native quality loop for release work:
+
+```bash
+node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs review --scorecard --json
+node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs plan --taskset "Plan the remaining release work."
+node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs plan-review --plan task_plan.md --scorecard --roles correctness,security,tests,release
+node plugins/antigravity-for-codex/scripts/antigravity-companion.mjs assisted-review --taskset ts-example --max-review-rounds 2
+```
+
+The scorecard contract is normalized locally before Codex consumes it. Tasksets are stored outside the repository under the plugin state directory and contain advisory subtasks only. Plan review reads only regular files inside the current workspace and rejects symlinks or paths outside the repo. Assisted review never edits files, commits, pushes, opens PRs, or closes issues; it stops when the score threshold is met, a repeated blocker/no-improvement condition appears, a provider failure is classified, or the round cap is reached.
+
+Natural-language routing follows the same model-selection boundary as the rest of this plugin: Gemini is the default provider, and Claude-through-Antigravity is used only when the user explicitly asks for Claude through Antigravity.
 
 ## Smoke And CI
 

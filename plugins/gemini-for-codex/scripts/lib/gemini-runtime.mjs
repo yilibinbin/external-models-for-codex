@@ -27,6 +27,34 @@ function findOnPath(commandName, env = process.env) {
   return "";
 }
 
+function splitShebang(line) {
+  const text = String(line || "").replace(/^#!/, "").trim();
+  if (!text) return null;
+  const parts = text.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)?.map((part) => part.replace(/^(['"])(.*)\1$/, "$2")) ?? [];
+  return parts.length ? parts : null;
+}
+
+function normalizePosixScriptInvocation(command, args = []) {
+  if (process.platform === "win32" || !path.isAbsolute(command)) {
+    return { command, args };
+  }
+  let header = "";
+  try {
+    header = fs.readFileSync(command, { encoding: "utf8", flag: "r" }).split(/\r?\n/, 1)[0] || "";
+  } catch {
+    return { command, args };
+  }
+  if (!header.startsWith("#!")) {
+    return { command, args };
+  }
+  const shebang = splitShebang(header);
+  if (!shebang) {
+    return { command, args };
+  }
+  const [interpreter, ...interpreterArgs] = shebang;
+  return { command: interpreter, args: [...interpreterArgs, command, ...args] };
+}
+
 function expandExecutableCandidates(pattern) {
   const parts = path.resolve(pattern).split(path.sep);
   const results = [];
@@ -115,7 +143,8 @@ export function geminiCommand(env = process.env) {
 }
 
 export function runGemini(args, options = {}) {
-  const result = spawnSync(geminiCommand(options.env || process.env), args, {
+  const invocation = normalizePosixScriptInvocation(geminiCommand(options.env || process.env), args);
+  const result = spawnSync(invocation.command, invocation.args, {
     cwd: options.cwd || process.cwd(),
     env: options.env || process.env,
     encoding: "utf8",

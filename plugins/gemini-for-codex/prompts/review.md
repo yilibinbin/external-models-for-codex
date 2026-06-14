@@ -1,6 +1,8 @@
 <task>Run a read-only code review.</task>
 {{GIT_CONTEXT}}
 {{GEMINI_CONTEXT}}
+{{PROJECT_INSTRUCTIONS_BLOCK}}
+{{VALIDATION_EVIDENCE_BLOCK}}
 {{REVIEW_ROLES}}
 <rules>
 - Do not edit files.
@@ -14,4 +16,5 @@
 - Focus on concrete bugs, regressions, missing tests, and maintainability risks.
 </rules>
 {{FOCUS}}
+{{SCORECARD_BLOCK}}
 {{OUTPUT_CONTRACT}}
