@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSyncWithRetry } from "./spawn-retry.mjs";
+import { normalizeWindowsGeminiInvocation } from "./gemini-invocation.mjs";
 
 export const GEMINI_CLI_PATH_ENV = "GEMINI_CLI_PATH";
 
@@ -35,7 +36,10 @@ function splitShebang(line) {
 }
 
 function normalizePosixScriptInvocation(command, args = []) {
-  if (process.platform === "win32" || !path.isAbsolute(command)) {
+  if (process.platform === "win32") {
+    return normalizeWindowsGeminiInvocation(command, args);
+  }
+  if (!path.isAbsolute(command)) {
     return { command, args };
   }
   let header = "";

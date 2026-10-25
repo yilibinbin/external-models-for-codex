@@ -2270,7 +2270,7 @@ def test_multi_review_native_agents_role_pack_requires_include_directories_and_c
 
 
 def test_sanitizer_strips_controls_before_redacting_and_caps_utf8(tmp_path):
-    module = PLUGIN / "scripts" / "lib" / "sanitize.mjs"
+    module = (PLUGIN / "scripts" / "lib" / "sanitize.mjs").as_uri()
     repo = tmp_path / "repo"
     repo.mkdir()
     init_git_repo(repo)
@@ -2800,7 +2800,7 @@ def test_github_actions_render_rejects_auto_context_and_mutable_ref(tmp_path):
 
 
 def test_github_actions_comment_and_annotation_sanitization():
-    module = PLUGIN / "scripts" / "lib" / "github-actions.mjs"
+    module = (PLUGIN / "scripts" / "lib" / "github-actions.mjs").as_uri()
     review = {
         "verdict": "needs-attention",
         "summary": "Summary <b>bad</b> /Users/example/secret",
@@ -3113,7 +3113,7 @@ def test_gemini_prompt_templates_and_schema_are_packaged():
 
 
 def test_prompt_template_renderer_allows_inserted_template_syntax():
-    module = PLUGIN / "scripts" / "lib" / "prompt-template.mjs"
+    module = (PLUGIN / "scripts" / "lib" / "prompt-template.mjs").as_uri()
     code = (
         "const m = await import(process.argv[1]);"
         "const rendered = m.renderPromptTemplate('A {{VALUE}}', {VALUE:'diff contains {{FOCUS}}'});"
@@ -3123,6 +3123,14 @@ def test_prompt_template_renderer_allows_inserted_template_syntax():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "A diff contains {{FOCUS}}"
+
+
+def test_windows_npm_gemini_invocation_resolution():
+    result = subprocess.run(
+        [NODE, "--test", str(ROOT / "tests" / "gemini-windows-invocation.test.mjs")],
+        capture_output=True, text=True, encoding="utf8",
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_gemini_skills_have_frontmatter_and_runtime_calls():

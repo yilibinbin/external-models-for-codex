@@ -91,6 +91,7 @@ import {
   withResourceLeaseSync
 } from "./lib/resource-governor.mjs";
 import { spawnSyncWithRetry } from "./lib/spawn-retry.mjs";
+import { normalizeWindowsGeminiInvocation } from "./lib/gemini-invocation.mjs";
 import { normalizeScorecardOutput } from "./lib/scorecard.mjs";
 import { saveTaskset, readTaskset } from "./lib/tasksets.mjs";
 import { loadValidationEvidence, renderValidationEvidenceBlock } from "./lib/validation-evidence.mjs";
@@ -176,7 +177,10 @@ function splitShebang(line) {
 }
 
 function normalizePosixScriptInvocation(command, args = []) {
-  if (process.platform === "win32" || !path.isAbsolute(command)) {
+  if (process.platform === "win32") {
+    return normalizeWindowsGeminiInvocation(command, args);
+  }
+  if (!path.isAbsolute(command)) {
     return { command, args };
   }
   let header = "";
